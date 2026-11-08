@@ -1865,6 +1865,18 @@ export default function ChatView(props: ChatViewProps) {
     scheduleComposerFocus();
   };
   const insertArtifactTemplateStable = useStableCallback(insertArtifactTemplate);
+  const draftMessage = (text: string) => {
+    if (!composerRef.current?.insertTextAtEnd(text, { ensureLeadingBoundary: true })) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to add to chat",
+        description: "The composer is busy; try again once it is ready.",
+      });
+      return;
+    }
+    scheduleComposerFocus();
+  };
+  const draftMessageStable = useStableCallback(draftMessage);
   const sendAppMessage = async (text: string) => {
     if (!isServerThread || activeThreadId === null) {
       throw new Error("Messages from apps need a started thread.");
@@ -3499,6 +3511,7 @@ export default function ChatView(props: ChatViewProps) {
                   onRevertToTurnCount={onRevertTimelineTurnStable}
                   onUseArtifactTemplate={insertArtifactTemplateStable}
                   onSendAppMessage={sendAppMessageStable}
+                  onDraftMessage={draftMessageStable}
                   isRevertingCheckpoint={isRevertingCheckpoint}
                   onImageExpand={onExpandTimelineImageStable}
                   onFileOpen={openFileAttachmentStable}

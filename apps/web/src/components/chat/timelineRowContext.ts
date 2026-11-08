@@ -63,6 +63,8 @@ export interface TimelineRowSharedState {
   onRevertToTurnCount: (targetTurnCount: number, messageId: MessageId) => void;
   onUseArtifactTemplate: (template: CodexArtifactTemplate) => void;
   onSendAppMessage: ((text: string) => Promise<void>) | undefined;
+  /** Fork-only: puts text at the end of the composer, for a question card's Answer. */
+  onDraftMessage: ((text: string) => void) | undefined;
   onAppFullscreenChange: (rowId: string, fullscreen: boolean) => void;
   onRunShellCommand: ((command: string) => void) | undefined;
   findActive: boolean;

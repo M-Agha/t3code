@@ -9,6 +9,8 @@ import { Button } from "../ui/button";
 import { ProposedPlanCard } from "./ProposedPlanCard";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
 import { McpAppFrame } from "./McpAppFrame";
+import { ReplyQuestionCards } from "./ReplyQuestionCards";
+import { splitReplyQuestions } from "./replyQuestions";
 import { checkpointFileTotals } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { ChangedFilesCard } from "./ChangedFilesTree";
 import { useFileContextMenuHandler } from "../../fileContextMenu";
@@ -33,6 +35,9 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
   );
   const text = liveText ?? row.message.text;
   const messageText = text || (row.message.streaming ? "" : "(empty response)");
+  // Fork-only: a finished reply's trailing Q-block renders as cards below the markdown.
+  const split = row.message.streaming ? null : splitReplyQuestions(messageText);
+  const markdownText = split?.body ?? messageText;
 
   return (
     <>
@@ -47,11 +52,11 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
             listRef={ctx.listRef}
           >
             <ChatMarkdown
-              text={messageText}
+              text={markdownText}
               cwd={ctx.markdownCwd}
               threadRef={ctx.threadRef ?? undefined}
               isStreaming={Boolean(row.message.streaming)}
-              lineBreaks={shouldPreserveAssistantLineBreaks(messageText)}
+              lineBreaks={shouldPreserveAssistantLineBreaks(markdownText)}
               skills={ctx.skills}
               headingLevelOffset={MESSAGE_HEADING_LEVEL}
               onUseArtifactTemplate={ctx.onUseArtifactTemplate}
@@ -59,6 +64,13 @@ export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind
               onImageExpand={ctx.onImageExpand}
             />
           </AssistantCitationSource>
+          {split ? (
+            <ReplyQuestionCards
+              questions={split.questions}
+              onSend={ctx.onSendAppMessage}
+              onDraft={ctx.onDraftMessage}
+            />
+          ) : null}
         </div>
         {ctx.onOpenTurnDiff ? (
           <AssistantChangedFilesSection
