@@ -240,7 +240,11 @@ const KEYBINDING_GROUPS = [
     title: msg("Navigation"),
     prefixes: ["sidebar", "rightPanel", "commandPalette", "filePicker", "projectSearch", "editor"],
   },
-  { id: "threads", title: msg("Threads"), prefixes: ["thread", "chat", "pullRequest"] },
+  {
+    id: "threads",
+    title: msg("Threads"),
+    prefixes: ["thread", "chat", "pullRequest", "decisions"],
+  },
   { id: "composer", title: msg("Composer"), prefixes: ["composer", "modelPicker"] },
   { id: "terminal", title: msg("Terminal"), prefixes: ["terminal"] },
   { id: "preview", title: msg("Preview & diff"), prefixes: ["preview", "diff"] },
