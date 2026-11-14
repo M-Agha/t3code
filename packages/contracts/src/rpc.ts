@@ -465,6 +465,8 @@ import {
   ThreadDecisionsError,
   ThreadDecisionsSnapshot,
   ThreadDecisionsSubscribeInput,
+  ThreadParkInput,
+  ThreadParkedUpdateInput,
 } from "./threadDecisions.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import { AgentFeedbackAnswerInput, AgentFeedbackRequestError } from "./agentFeedback.ts";
@@ -673,6 +675,8 @@ export const WS_METHODS = {
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
   threadDecisionsSubscribe: "threadDecisions.subscribe",
   threadDecisionsReopen: "threadDecisions.reopen",
+  threadDecisionsPark: "threadDecisions.park",
+  threadDecisionsUpdateParked: "threadDecisions.updateParked",
 
   cloudGetRelayClientStatus: "cloud.getRelayClientStatus",
   cloudInstallRelayClient: "cloud.installRelayClient",
@@ -2431,6 +2435,18 @@ const WsThreadDecisionsReopenRpc = Rpc.make(WS_METHODS.threadDecisionsReopen, {
   error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
 });
 
+const WsThreadDecisionsParkRpc = Rpc.make(WS_METHODS.threadDecisionsPark, {
+  payload: ThreadParkInput,
+  success: Schema.Void,
+  error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadDecisionsUpdateParkedRpc = Rpc.make(WS_METHODS.threadDecisionsUpdateParked, {
+  payload: ThreadParkedUpdateInput,
+  success: Schema.Void,
+  error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksUpsertRpc = Rpc.make(WS_METHODS.scheduledTasksUpsert, {
   payload: ScheduledTaskUpsertInput,
   success: ScheduledTaskMutationResult,
@@ -2622,6 +2638,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsThreadDecisionsSubscribeRpc,
   WsThreadDecisionsReopenRpc,
+  WsThreadDecisionsParkRpc,
+  WsThreadDecisionsUpdateParkedRpc,
   WsServerReportClientActivityRpc,
   WsCloudGetRelayClientStatusRpc,
   WsCloudInstallRelayClientRpc,
