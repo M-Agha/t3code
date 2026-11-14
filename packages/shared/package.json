@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sessionKit/decisions": {
+      "types": "./src/sessionKit/decisions.ts",
+      "import": "./src/sessionKit/decisions.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"
