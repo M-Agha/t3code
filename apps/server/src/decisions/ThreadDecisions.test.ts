@@ -610,7 +610,7 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
-it.effect("syncs a thread when the user's message lands or its run ends", () => {
+it.effect("syncs a thread when a message finishes or its run ends", () => {
   const at = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
   const stored = (event: OrchestrationV2StoredEvent["event"]): OrchestrationV2StoredEvent => ({
     sequence: 1,
@@ -664,6 +664,7 @@ it.effect("syncs a thread when the user's message lands or its run ends", () => 
     });
   const events = [
     messageEvent("user-streaming", "user", true),
+    messageEvent("assistant-streaming", "assistant", true),
     messageEvent("assistant-done", "assistant", false),
     messageEvent("user-done", "user", false),
     runEvent("run-running", "running"),
@@ -694,6 +695,8 @@ it.effect("syncs a thread when the user's message lands or its run ends", () => 
     while (!seen.includes("user-done") || !seen.includes("run-completed")) {
       seen.push(yield* Queue.take(synced));
     }
-    assert.sameMembers(seen, ["user-done", "run-waiting", "run-completed"]);
+    // A reply can finish streaming after its run already reads as ended, so the finished assistant
+    // message syncs too; a message still streaming never does.
+    assert.sameMembers(seen, ["assistant-done", "user-done", "run-waiting", "run-completed"]);
   }).pipe(Effect.scoped);
 });
