@@ -80,6 +80,7 @@ import {
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
+  MessageCircleQuestionIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
 import { dispatchPreviewAction } from "./preview/previewActionBus";
@@ -1483,6 +1484,21 @@ function OpenCommandPaletteDialog(props: {
       icon: <PullRequestGlyph.link className={ITEM_ICON_CLASS} />,
       run: async () => {
         useRightPanelStore.getState().open(threadRef, "pull-requests");
+      },
+    });
+  }
+
+  if (activeThread !== null) {
+    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    actionItems.push({
+      kind: "action",
+      value: "action:open-thread-decisions",
+      searchTerms: ["decisions", "questions", "open questions", "picks", "answer", "veto"],
+      title: "Show decisions",
+      shortcutCommand: "decisions.toggle",
+      icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        useRightPanelStore.getState().open(threadRef, "decisions");
       },
     });
   }
