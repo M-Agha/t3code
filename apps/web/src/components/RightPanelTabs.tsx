@@ -43,6 +43,7 @@ import {
   FileDiff,
   Files,
   Globe2,
+  MessageCircleQuestionIcon,
   MessagesSquare,
   Plus,
   TerminalSquare,
@@ -145,6 +146,8 @@ export interface RightPanelTabsProps {
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
   onAddSideChat?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddDecisions?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -326,6 +329,8 @@ function RightPanelEmptyState(props: {
   onAddDevice: () => void;
   /** Absent where side chats are not offered. */
   onAddSideChat?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddDecisions?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -406,6 +411,19 @@ function RightPanelEmptyState(props: {
             available: props.sideChatAvailable && !props.sideChatDisabledReason,
             disabledReason: props.sideChatDisabledReason ?? SURFACE_UNAVAILABLE_HINTS.sideChat,
             onClick: props.onAddSideChat,
+          },
+        ]
+      : []),
+    ...(props.onAddDecisions
+      ? [
+          {
+            label: "Decisions",
+            description: "Questions agents asked in this thread, and what you decided.",
+            icon: MessageCircleQuestionIcon,
+            shortcut: "Q",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddDecisions,
           },
         ]
       : []),
@@ -592,6 +610,8 @@ function surfaceTitle(
       return `#${surface.number}`;
     case "pull-requests":
       return "Pull requests";
+    case "decisions":
+      return "Decisions";
     case "device":
       return surface.title ?? surface.target?.name ?? "Device";
     case "side-chat":
@@ -684,6 +704,8 @@ function SurfaceIcon({
       );
     case "pull-requests":
       return <PullRequestGlyph.link className="size-3 shrink-0" />;
+    case "decisions":
+      return <MessageCircleQuestionIcon className="size-3 shrink-0" />;
     case "side-chat":
       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
     case "device":
@@ -1166,6 +1188,18 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
           },
         ]
       : []),
+    ...(props.onAddDecisions
+      ? [
+          {
+            label: "Decisions",
+            icon: MessageCircleQuestionIcon,
+            shortcut: "Q",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddDecisions,
+          },
+        ]
+      : []),
   ] as const;
 
   const handleAddSurfaceMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1549,6 +1583,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
             onAddSideChat={props.onAddSideChat}
+            onAddDecisions={props.onAddDecisions}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
