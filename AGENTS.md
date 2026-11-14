@@ -212,3 +212,7 @@ Architecture and its constraints: `docs/internals/overview.md`. Glossary: `docs/
 ## Additional tips
 
 - Security is important, but should not be over-indexed on, especially for dev mode/maintainer-only features.
+
+## This checkout is a personal fork
+
+This branch (`fork/main`) is upstream T3 Code plus fork-only commits tagged `(fork)`. Before rebasing onto upstream, resolving a conflict, building or installing the desktop app, or changing anything the fork added, read [FORK.md](FORK.md): it records each fork change's intent, the owner's decisions, and the rules a rebase must keep (fork migrations use their own `fork_sql_migrations` ledger; `packages/shared/src/sessionKit/reply.ts` is a byte-for-byte copy that is never edited here).
