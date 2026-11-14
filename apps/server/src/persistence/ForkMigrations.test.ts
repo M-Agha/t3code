@@ -12,6 +12,7 @@ import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import ForkMigration0001 from "./ForkMigrations/001_ThreadDecisions.ts";
+import ForkMigration0002 from "./ForkMigrations/002_ThreadParked.ts";
 import { FORK_MIGRATIONS_TABLE, runForkMigrations } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
@@ -26,6 +27,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
     assert.deepEqual(yield* runForkMigrations(), [
       [1, "ThreadDecisions"],
       [2, "ThreadParked"],
+      [3, "ThreadArtifacts"],
     ]);
     assert.deepEqual(yield* runForkMigrations(), []);
 
@@ -34,7 +36,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
     );
     assert.deepEqual(
       forkLedger.map((row) => row.migration_id),
-      [1, 2],
+      [1, 2, 3],
     );
     const upstream = yield* sql<{ readonly latest: number; readonly forkRows: number }>`
       SELECT MAX(migration_id) AS latest, SUM(name = 'ThreadDecisions') AS forkRows
@@ -52,26 +54,40 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
-it.effect("runs only the parked-items migration on a database that already has 001", () =>
+it.effect("runs only the artifacts migration on a database that already has 001 and 002", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
     yield* Migrator.make({})({
       table: FORK_MIGRATIONS_TABLE,
-      loader: Migrator.fromRecord({ "1_ThreadDecisions": ForkMigration0001 }),
+      loader: Migrator.fromRecord({
+        "1_ThreadDecisions": ForkMigration0001,
+        "2_ThreadParked": ForkMigration0002,
+      }),
     });
     yield* sql`
       INSERT INTO fork_thread_decision_questions (
         thread_id, label, label_number, text, source_message_id, asked_at, state
       ) VALUES ('t', 'Q1', 1, 'Q1: x', 'm', '2026-01-01T00:00:00.000Z', 'open')
     `;
-    assert.deepEqual(yield* runForkMigrations(), [[2, "ThreadParked"]]);
-    const kept = yield* sql<{ readonly questions: number; readonly parked: number }>`
+    yield* sql`
+      INSERT INTO fork_thread_parked_items (
+        thread_id, kind, text, state, parked_by, created_at, updated_at
+      ) VALUES ('t', 'todo', 'x', 'open', 'user', '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z')
+    `;
+    assert.deepEqual(yield* runForkMigrations(), [[3, "ThreadArtifacts"]]);
+    const kept = yield* sql<{
+      readonly questions: number;
+      readonly parked: number;
+      readonly artifacts: number;
+    }>`
       SELECT
         (SELECT COUNT(*) FROM fork_thread_decision_questions) AS questions,
-        (SELECT COUNT(*) FROM fork_thread_parked_items) AS parked
+        (SELECT COUNT(*) FROM fork_thread_parked_items) AS parked,
+        (SELECT COUNT(*) FROM fork_thread_artifacts) AS artifacts
     `;
-    assert.deepEqual(kept[0], { questions: 1, parked: 0 });
+    assert.deepEqual(kept[0], { questions: 1, parked: 1, artifacts: 0 });
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 

@@ -1,5 +1,6 @@
 import {
   type ScopedThreadRef,
+  type ThreadArtifact,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   THREAD_PARKED_RESOLVED_LIMIT,
   THREAD_PARKED_TEXT_MAX_LENGTH,
@@ -11,11 +12,13 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
-import { MessageCircleQuestionIcon } from "lucide-react";
-import { type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
+import { ArrowUpRightIcon, MessageCircleQuestionIcon } from "lucide-react";
+import { type KeyboardEvent, type MouseEvent, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 
+import { useOpenLink } from "~/browser/useOpenLink";
 import { RelativeTime } from "~/components/RelativeTime";
+import { readLocalApi } from "~/localApi";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
@@ -23,6 +26,7 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
 import { Textarea } from "../ui/textarea";
+import { toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
@@ -719,6 +723,104 @@ function ParkedTab(props: {
   );
 }
 
+function ArtifactRow(props: {
+  readonly artifact: ThreadArtifact;
+  readonly onOpen: (event: MouseEvent<HTMLButtonElement>) => void;
+  readonly onOpenInBrowser: () => void;
+}) {
+  const { artifact } = props;
+  const title = artifact.title ?? artifact.id;
+  return (
+    <li className="flex items-start gap-1 rounded-md hover:bg-accent/50">
+      <button
+        type="button"
+        className="min-w-0 flex-1 rounded-md px-1.5 py-1.5 text-start outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+        onClick={props.onOpen}
+        onAuxClick={props.onOpen}
+      >
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="min-w-0 truncate text-sm font-medium text-foreground">{title}</span>
+          {artifact.mentionedOnly ? (
+            <span className="shrink-0 text-2xs text-muted-foreground">mentioned</span>
+          ) : null}
+          <span className="ms-auto shrink-0 text-2xs text-muted-foreground">
+            <RelativeTime timestamp={artifact.updatedAt} />
+          </span>
+        </span>
+        {artifact.description === null ? null : (
+          <span className="block truncate text-xs text-muted-foreground">
+            {artifact.description}
+          </span>
+        )}
+      </button>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              className="mt-1"
+              aria-label={`Open in browser: ${title}`}
+              onClick={props.onOpenInBrowser}
+            />
+          }
+        >
+          <ArrowUpRightIcon />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Open in browser</TooltipPopup>
+      </Tooltip>
+    </li>
+  );
+}
+
+function ArtifactsTab(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly snapshot: ThreadDecisionsSnapshot | null;
+}) {
+  const openLink = useOpenLink(props.threadRef);
+  const artifacts = props.snapshot?.artifacts ?? [];
+  if (artifacts.length === 0) {
+    return (
+      <EmptyState
+        title="No artifacts"
+        description="Pages an agent publishes to claude.ai, or links to in a reply, appear here."
+      />
+    );
+  }
+  const report = (error: unknown) => {
+    console.error(error);
+    toastManager.add({ type: "error", title: "Unable to open artifact" });
+  };
+  const open = (artifact: ThreadArtifact, event: MouseEvent<HTMLButtonElement>) => {
+    if (event.button > 1) return;
+    void openLink(artifact.url, {
+      event: { metaKey: event.metaKey, ctrlKey: event.ctrlKey, button: event.button },
+    }).catch(report);
+  };
+  const openInBrowser = (artifact: ThreadArtifact) => {
+    const api = readLocalApi();
+    if (!api) return report(new Error("Link opening is unavailable."));
+    void api.shell.openExternal(artifact.url).catch(report);
+  };
+  return (
+    <>
+      <ul className="flex flex-col gap-0.5 pt-3">
+        {artifacts.map((artifact) => (
+          <ArtifactRow
+            key={artifact.id}
+            artifact={artifact}
+            onOpen={(event) => open(artifact, event)}
+            onOpenInBrowser={() => openInBrowser(artifact)}
+          />
+        ))}
+      </ul>
+      {(props.snapshot?.artifactCount ?? 0) > artifacts.length ? (
+        <p className="px-1 pt-2 text-xs text-muted-foreground">Older artifacts are not shown.</p>
+      ) : null}
+    </>
+  );
+}
+
 export function ThreadDecisionsPanel(props: {
   readonly threadRef: ScopedThreadRef;
   readonly actions: ThreadDecisionActions;
@@ -729,6 +831,7 @@ export function ThreadDecisionsPanel(props: {
   const focusParkedTab = () => parkedTabRef.current?.focus();
   const openCount = snapshot?.openCount ?? 0;
   const parkedOpenCount = snapshot?.parkedOpenCount ?? 0;
+  const artifactCount = snapshot?.artifactCount ?? 0;
   return (
     <div className="flex h-full min-h-0 flex-col" data-thread-decisions-panel>
       <div className="flex shrink-0 items-center px-3 pt-3">
@@ -738,13 +841,23 @@ export function ThreadDecisionsPanel(props: {
           value={[tab]}
           onValueChange={(value) => {
             const next = value[0];
-            if (next === "questions" || next === "decisions" || next === "parked") setTab(next);
+            if (
+              next === "questions" ||
+              next === "decisions" ||
+              next === "parked" ||
+              next === "artifacts"
+            ) {
+              setTab(next);
+            }
           }}
         >
           <Toggle value="questions">Questions{openCount > 0 ? ` (${openCount})` : ""}</Toggle>
           <Toggle value="decisions">Decisions</Toggle>
           <Toggle ref={parkedTabRef} value="parked">
             Parked{parkedOpenCount > 0 ? ` (${parkedOpenCount})` : ""}
+          </Toggle>
+          <Toggle value="artifacts">
+            Artifacts{artifactCount > 0 ? ` (${artifactCount})` : ""}
           </Toggle>
         </ToggleGroup>
       </div>
@@ -754,6 +867,8 @@ export function ThreadDecisionsPanel(props: {
             <QuestionsTab snapshot={snapshot} actions={props.actions} />
           ) : tab === "decisions" ? (
             <DecisionsTab threadRef={props.threadRef} snapshot={snapshot} actions={props.actions} />
+          ) : tab === "artifacts" ? (
+            <ArtifactsTab threadRef={props.threadRef} snapshot={snapshot} />
           ) : (
             <ParkedTab
               threadRef={props.threadRef}
