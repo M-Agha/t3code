@@ -1,7 +1,17 @@
-import { MessageId, ThreadId, type ThreadDecisionQuestion } from "@t3tools/contracts";
+import {
+  MessageId,
+  ThreadId,
+  type ThreadDecisionQuestion,
+  type ThreadParkedItem,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { latestReplyOpenQuestions, openQuestionsByReply } from "./threadDecisions.logic";
+import {
+  isParkedBusy,
+  latestReplyOpenQuestions,
+  openQuestionsByReply,
+  parkedFocusAfter,
+} from "./threadDecisions.logic";
 
 const question = (
   label: string,
@@ -30,6 +40,8 @@ const snapshot = {
   ],
   decidedWithoutAsking: [],
   openCount: 2,
+  parked: [],
+  parkedOpenCount: 0,
 };
 
 describe("thread decisions grouping", () => {
@@ -54,5 +66,31 @@ describe("thread decisions grouping", () => {
       ["newer", ["Q4"]],
       ["older", ["Q2"]],
     ]);
+  });
+});
+
+describe("parked items", () => {
+  const item: ThreadParkedItem = {
+    id: 7,
+    kind: "todo",
+    text: "x",
+    state: "open",
+    parkedBy: "user",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    resolvedAt: null,
+  };
+
+  it("keeps an item busy until the snapshot shows the action's result", () => {
+    const busy = new Map([[item.id, item.updatedAt]]);
+    expect(isParkedBusy(busy, item)).toBe(true);
+    expect(isParkedBusy(busy, { ...item, updatedAt: "2026-01-01T00:00:01.000Z" })).toBe(false);
+    expect(isParkedBusy(new Map(), item)).toBe(false);
+  });
+
+  it("moves focus to the next open item, else the one before, else nowhere", () => {
+    expect(parkedFocusAfter([1, 2, 3], 2)).toBe(3);
+    expect(parkedFocusAfter([1, 2, 3], 3)).toBe(2);
+    expect(parkedFocusAfter([2], 2)).toBeNull();
   });
 });

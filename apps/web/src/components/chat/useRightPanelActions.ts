@@ -33,6 +33,7 @@ import type { threadPullRequestPanelTarget } from "../pullRequest/pullRequestDet
 import type { useDeviceState } from "../../state/device";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { openDeviceSetupDialog } from "./ChatOverlayHosts";
+import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
 import { previewEnvironment } from "../../state/preview";
 import { useAtomCommand } from "../../state/use-atom-command";
 import type { ChatShortcutCommands } from "./useChatShortcuts";
@@ -153,6 +154,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
   const addPullRequestsSurfaceStable = useStableCallback(addPullRequestsSurface);
   const addDecisionsSurface = () => {
     if (!activeThreadRef) return;
+    useDecisionsPanelTab.getState().setTab("questions");
     useRightPanelStore.getState().open(activeThreadRef, "decisions");
   };
   const addDecisionsSurfaceStable = useStableCallback(addDecisionsSurface);
