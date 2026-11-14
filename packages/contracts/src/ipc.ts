@@ -86,7 +86,8 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
-export type DesktopAppStageLabel = "Alpha" | "Beta" | "Dev" | "Nightly";
+// Fork-only: "Fork" names this personal fork's builds so they install beside official ones (FORK.md).
+export type DesktopAppStageLabel = "Alpha" | "Beta" | "Dev" | "Fork" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
   "disabled",
