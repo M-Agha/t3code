@@ -355,6 +355,11 @@ import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
 import { useRightPanelSurfaceClose } from "../hooks/useRightPanelSurfaceClose";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import {
+  type ThreadDecisionActions,
+  threadDecisionsBannerItem,
+  useThreadDecisions,
+} from "./chat/ThreadDecisions";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -2041,6 +2046,32 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
+  const sendDecisionMessage = (text: string) => {
+    void sendAppMessage(text).catch((error: unknown) => {
+      toastManager.add({
+        type: "error",
+        title: "Could not send the answer",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    });
+  };
+  const insertDecisionText = (text: string) => {
+    if (composerRef.current?.insertTextAtEnd(text, { ensureLeadingBoundary: true }) !== true) {
+      toastManager.add({
+        type: "error",
+        title: gt("Unable to add to chat"),
+        description: gt("The composer is busy; try again once it is ready."),
+      });
+      return;
+    }
+    scheduleComposerFocusStable();
+  };
+  const decisionActions: ThreadDecisionActions = {
+    canOperate: canOperateThread && isServerThread,
+    send: useStableCallback(sendDecisionMessage),
+    insert: useStableCallback(insertDecisionText),
+  };
+  const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
   const {
@@ -2537,6 +2568,7 @@ export default function ChatView(props: ChatViewProps) {
     addFilesSurfaceStable,
     addPullRequestSurfaceStable,
     addPullRequestsSurfaceStable,
+    addDecisionsSurfaceStable,
     closePreviewPanelStable,
     copyRightPanelFilePathStable,
     createBrowserSurface,
@@ -2824,6 +2856,12 @@ export default function ChatView(props: ChatViewProps) {
     );
     const extensionStatusItems = extensionStatusBanner === null ? [] : [extensionStatusBanner];
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
+    const decisionsBanner = threadDecisionsBannerItem({
+      snapshot: threadDecisions,
+      actions: decisionActions,
+      onOpenPanel: addDecisionsSurfaceStable,
+    });
+    const decisionItems = decisionsBanner === null ? [] : [decisionsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
     // An approval's feedback goes to that approval; the armed session waits for the next message.
     const freshSessionItems =
@@ -2849,6 +2887,7 @@ export default function ChatView(props: ChatViewProps) {
         ...freshSessionItems,
         ...heldSendItems,
         ...systemComposerBannerItems,
+        ...decisionItems,
       ];
     }
     return [
@@ -2861,6 +2900,7 @@ export default function ChatView(props: ChatViewProps) {
       ...freshSessionItems,
       ...heldSendItems,
       ...systemComposerBannerItems,
+      ...decisionItems,
       branchMismatchBannerItem(
         {
           mismatchKey: activeBranchMismatchKey,
@@ -3456,6 +3496,7 @@ export default function ChatView(props: ChatViewProps) {
       onSendAnnotation={sendPreviewAnnotationStable}
       onCloseSurface={closeRightPanelSurface}
       sideChatParentPanel={sideChatParentPanel}
+      decisionActions={decisionActions}
       terminal={{
         launchContext: activeTerminalLaunchContext ?? null,
         keybindings,
@@ -4270,6 +4311,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
+          onAddDecisions={isServerThread ? addDecisionsSurfaceStable : undefined}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && diffAvailable}
