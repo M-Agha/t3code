@@ -6,6 +6,7 @@ import {
   type RunId,
   OrchestratorMcpFailure,
   type OrchestrationV2Command,
+  isDelegatedAppThread,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import { modelSelectionCommandType } from "@t3tools/shared/model";
@@ -19,6 +20,7 @@ import {
   readThread,
   unavailable,
 } from "../../threadAccess.ts";
+import * as ThreadDecisions from "../../../decisions/ThreadDecisions.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTasks from "../../../scheduledTasks/ScheduledTaskService.ts";
 import { queuedRunsInDeliveryOrder } from "../../../orchestration-v2/QueuedRunOrder.ts";
@@ -90,7 +92,46 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
   handle: (params: P) => Effect.Effect<A, E, R>,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
+export const CHILD_PARK_REFUSAL =
+  "not parked: only the main thread parks on the user's list; put follow-ups in your report to your parent";
+
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_park: McpToolAccess.actsAsCaller((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "Parking");
+      const { threads } = yield* readCaller();
+      const caller = yield* threads
+        .getThreadShell(thread.threadId)
+        .pipe(Effect.mapError(unavailable));
+      if (caller === null || caller.deletedAt !== null) {
+        return yield* new OrchestratorMcpFailure({
+          code: "thread_not_found",
+          message: "The calling thread was not found.",
+        });
+      }
+      if (isDelegatedAppThread(caller)) {
+        return yield* new OrchestratorMcpFailure({
+          code: "invalid_request",
+          message: CHILD_PARK_REFUSAL,
+        });
+      }
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* decisions
+        .park({
+          threadId: caller.id,
+          parkedBy: "agent",
+          items: [{ kind: input.kind, text: input.text }],
+        })
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "invalid_request", message: error.message }),
+          ),
+        );
+      return { message: "Parked in this thread's Parked tab; the user sees it there." };
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

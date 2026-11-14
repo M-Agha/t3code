@@ -2,6 +2,7 @@ import type {
   ThreadDecidedWithoutAsking,
   ThreadDecisionQuestion,
   ThreadDecisionsSnapshot,
+  ThreadParkedItem,
 } from "@t3tools/contracts";
 
 /** The messages the decision buttons send or prefill; agents read them as ordinary replies. */
@@ -62,3 +63,28 @@ export const decidedWithoutAskingByReply = (snapshot: ThreadDecisionsSnapshot | 
     messageId: item.messageId,
     at: item.createdAt,
   }));
+
+const ARIA_TEXT_MAX_LENGTH = 80;
+
+/** An item's text short enough to read out as part of a button's name. */
+export const ariaItemText = (text: string) =>
+  text.length <= ARIA_TEXT_MAX_LENGTH ? text : `${text.slice(0, ARIA_TEXT_MAX_LENGTH - 1)}…`;
+
+/**
+ * Parked items with an action in flight, keyed by id, holding the `updatedAt` they had then.
+ * A successful action stays recorded, so the item stays busy until the snapshot shows its result.
+ */
+export type ParkedBusy = ReadonlyMap<number, string>;
+
+export const isParkedBusy = (busy: ParkedBusy, item: ThreadParkedItem) =>
+  busy.get(item.id) === item.updatedAt;
+
+/** The open item to focus once `leavingId` leaves the list: the next one, else the one before. */
+export const parkedFocusAfter = (
+  openIds: ReadonlyArray<number>,
+  leavingId: number,
+): number | null => {
+  const index = openIds.indexOf(leavingId);
+  if (index === -1) return null;
+  return openIds[index + 1] ?? openIds[index - 1] ?? null;
+};

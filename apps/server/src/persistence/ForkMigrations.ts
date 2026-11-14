@@ -4,12 +4,16 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest } from "./Migrations.ts";
 import ForkMigration0001 from "./ForkMigrations/001_ThreadDecisions.ts";
+import ForkMigration0002 from "./ForkMigrations/002_ThreadParked.ts";
 
 // Fork-only schema, kept out of effect_sql_migrations: the Migrator skips every id up to the highest
 // recorded, so a fork id there would make an official build skip its own migration with that id.
 export const FORK_MIGRATIONS_TABLE = "fork_sql_migrations";
 
-const forkMigrationEntries = [[1, "ThreadDecisions", ForkMigration0001]] as const;
+const forkMigrationEntries = [
+  [1, "ThreadDecisions", ForkMigration0001],
+  [2, "ThreadParked", ForkMigration0002],
+] as const;
 
 const UPSTREAM_MIGRATION_HEAD = Math.max(...migrationManifest.map(([id]) => id));
 

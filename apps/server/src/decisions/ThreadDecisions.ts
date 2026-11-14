@@ -5,7 +5,11 @@ import {
   ThreadDecisionsError,
   type ThreadDecisionsSnapshot,
   type ThreadId,
+  type ThreadParkedItem,
+  type ThreadParkedKind,
+  type ThreadParkedUpdateInput,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
+  THREAD_PARKED_RESOLVED_LIMIT,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -14,7 +18,9 @@ import {
   readReplyDecisions,
   splitQuestion,
 } from "@t3tools/shared/sessionKit/decisions";
+import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -60,6 +66,17 @@ interface QuestionRow {
   readonly resolvedAt: string | null;
 }
 
+export interface ThreadParkRequest {
+  readonly threadId: ThreadId;
+  readonly items: ReadonlyArray<{ readonly kind: ThreadParkedKind; readonly text: string }>;
+  readonly parkedBy: ThreadParkedItem["parkedBy"];
+}
+
+export const PLACEHOLDER_PARK_MESSAGE =
+  "not parked: the text is empty or a placeholder. Park only what the user asked to set aside, or a real follow-up.";
+
+const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped", sent: "sent" } as const;
+
 export class ThreadDecisions extends Context.Service<
   ThreadDecisions,
   {
@@ -73,6 +90,11 @@ export class ThreadDecisions extends Context.Service<
     ) => Stream.Stream<ThreadDecisionsSnapshot, ThreadDecisionsError>;
     readonly reopen: (
       input: ThreadDecisionReopenInput,
+    ) => Effect.Effect<void, ThreadDecisionsError>;
+    /** Parks every item or none. */
+    readonly park: (input: ThreadParkRequest) => Effect.Effect<void, ThreadDecisionsError>;
+    readonly updateParked: (
+      input: ThreadParkedUpdateInput,
     ) => Effect.Effect<void, ThreadDecisionsError>;
   }
 >()("t3/decisions/ThreadDecisions") {}
@@ -88,18 +110,23 @@ export const layer = Layer.effect(
       new ThreadDecisionsError({ message, cause });
 
     // Rows of deleted threads; their messages are gone from every view, so nothing can resolve them.
+    // Parked items are user-authored and cannot be rebuilt, so only a soft-deleted thread drops them.
     yield* Effect.forEach(
       [
-        "fork_thread_decision_questions",
-        "fork_thread_decided_without_asking",
-        "fork_thread_decision_sync",
-      ],
-      (table) =>
-        sql.unsafe(`
-          DELETE FROM ${table} WHERE thread_id NOT IN (
+        `DELETE FROM fork_thread_parked_items WHERE thread_id IN (
+          SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL
+        )`,
+        ...[
+          "fork_thread_decision_questions",
+          "fork_thread_decided_without_asking",
+          "fork_thread_decision_sync",
+        ].map(
+          (table) => `DELETE FROM ${table} WHERE thread_id NOT IN (
             SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
-          )
-        `),
+          )`,
+        ),
+      ],
+      (statement) => sql.unsafe(statement),
       { discard: true },
     ).pipe(
       Effect.catchCause((cause) =>
@@ -270,6 +297,24 @@ export const layer = Layer.effect(
           ORDER BY created_at DESC, ordinal ASC
           LIMIT ${THREAD_DECIDED_WITHOUT_ASKING_LIMIT}
         `;
+        const parked = yield* sql<ThreadParkedItem>`
+          SELECT * FROM (
+            SELECT id, kind, text, state, parked_by AS "parkedBy", created_at AS "createdAt",
+              updated_at AS "updatedAt", resolved_at AS "resolvedAt"
+            FROM fork_thread_parked_items
+            WHERE thread_id = ${threadId} AND state = 'open'
+            ORDER BY created_at ASC, id ASC
+          )
+          UNION ALL
+          SELECT * FROM (
+            SELECT id, kind, text, state, parked_by AS "parkedBy", created_at AS "createdAt",
+              updated_at AS "updatedAt", resolved_at AS "resolvedAt"
+            FROM fork_thread_parked_items
+            WHERE thread_id = ${threadId} AND state <> 'open'
+            ORDER BY resolved_at DESC, id DESC
+            LIMIT ${THREAD_PARKED_RESOLVED_LIMIT}
+          )
+        `;
         return {
           threadId,
           questions: questions.map((row): ThreadDecisionQuestion => ({
@@ -291,6 +336,8 @@ export const layer = Layer.effect(
             messageId: MessageId.make(row.messageId),
           })),
           openCount: questions.filter((row) => row.state === "open").length,
+          parked,
+          parkedOpenCount: parked.filter((item) => item.state === "open").length,
         };
       },
       NodeSqliteClient.readOnly,
@@ -339,7 +386,72 @@ export const layer = Layer.effect(
       yield* PubSub.publish(changes, input.threadId);
     });
 
-    return ThreadDecisions.of({ sync, snapshot, subscribe, reopen });
+    const refusePlaceholder = (text: string) =>
+      isPlaceholder(text)
+        ? Effect.fail(new ThreadDecisionsError({ message: PLACEHOLDER_PARK_MESSAGE }))
+        : Effect.void;
+
+    const park = Effect.fn("ThreadDecisions.park")(function* (input: ThreadParkRequest) {
+      if (input.items.length === 0) {
+        return yield* new ThreadDecisionsError({ message: "Nothing to park." });
+      }
+      yield* Effect.forEach(input.items, (item) => refusePlaceholder(item.text), {
+        discard: true,
+      });
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const parked = yield* Effect.gen(function* () {
+        const [thread] = yield* sql`
+          SELECT 1 FROM orchestration_v2_projection_threads
+          WHERE thread_id = ${input.threadId} AND deleted_at IS NULL
+        `;
+        if (thread === undefined) return false;
+        for (const item of input.items) {
+          yield* sql`
+            INSERT INTO fork_thread_parked_items (
+              thread_id, kind, text, state, parked_by, created_at, updated_at
+            ) VALUES (
+              ${input.threadId}, ${item.kind}, ${item.text.trim()}, 'open', ${input.parkedBy},
+              ${now}, ${now}
+            )
+          `;
+        }
+        return true;
+      }).pipe(sql.withTransaction, Effect.mapError(fail("Could not park this.")));
+      if (!parked) {
+        return yield* new ThreadDecisionsError({ message: "This thread was not found." });
+      }
+      yield* PubSub.publish(changes, input.threadId);
+    });
+
+    const updateParked = Effect.fn("ThreadDecisions.updateParked")(function* (
+      input: ThreadParkedUpdateInput,
+    ) {
+      if (input.action === "edit") yield* refusePlaceholder(input.text);
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const reopening = input.action === "reopen";
+      const set =
+        input.action === "edit"
+          ? sql`text = ${input.text.trim()}`
+          : reopening
+            ? sql`state = 'open', resolved_at = NULL`
+            : sql`state = ${RESOLVED_PARKED_STATE[input.action]}, resolved_at = ${now}`;
+      const updated = yield* sql`
+        UPDATE fork_thread_parked_items SET ${set}, updated_at = ${now}
+        WHERE thread_id = ${input.threadId} AND id = ${input.id}
+          AND ${reopening ? sql`state <> 'open'` : sql`state = 'open'`}
+        RETURNING id
+      `.pipe(Effect.mapError(fail("Could not update this item.")));
+      if (updated.length === 0) {
+        return yield* new ThreadDecisionsError({
+          message: reopening
+            ? "This item is not resolved."
+            : "This item is no longer open in this thread.",
+        });
+      }
+      yield* PubSub.publish(changes, input.threadId);
+    });
+
+    return ThreadDecisions.of({ sync, snapshot, subscribe, reopen, park, updateParked });
   }),
 );
 

@@ -6,6 +6,7 @@ import { threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
+  composerParkDecision,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -122,5 +123,41 @@ describe("approvalRedirectNotice", () => {
   it("stays quiet when the decline failed or the user left the thread", () => {
     expect(approvalRedirectNotice({ ...settled, declined: false })).toBeNull();
     expect(approvalRedirectNotice(settled)).toBeNull();
+  });
+});
+
+describe("composerParkDecision", () => {
+  const send = {
+    prompt: "/park fix the flaky test",
+    directAnnotation: false,
+    editingQueuedRun: false,
+    parkInFlight: false,
+    hasNonPromptContent: false,
+    threadStarted: true,
+  };
+
+  it("parks the command's items", () => {
+    expect(composerParkDecision(send)).toEqual({
+      kind: "park",
+      command: { parks: [{ kind: "todo", text: "fix the flaky test" }], placeholders: 0 },
+    });
+  });
+
+  it.each([
+    ["a message that only mentions it", { prompt: "please /park this" }],
+    ["a direct annotation", { directAnnotation: true }],
+  ])("passes on %s", (_name, change) => {
+    expect(composerParkDecision({ ...send, ...change })).toEqual({ kind: "pass" });
+  });
+
+  it.each([
+    ["while editing a queued message", { editingQueuedRun: true }],
+    ["while a park is in flight", { parkInFlight: true }],
+    ["with attachments or context", { hasNonPromptContent: true }],
+    ["before the thread started", { threadStarted: false }],
+    ["when every item is a placeholder", { prompt: "/park tbd" }],
+    ["when an item is too long", { prompt: `/park ${"x".repeat(4_001)}` }],
+  ])("refuses %s", (_name, change) => {
+    expect(composerParkDecision({ ...send, ...change }).kind).toBe("refuse");
   });
 });

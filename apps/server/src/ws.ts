@@ -2294,6 +2294,9 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.threadDecisionsReopen]: (input) => threadDecisions.reopen(input),
+        [WS_METHODS.threadDecisionsPark]: (input) =>
+          threadDecisions.park({ ...input, parkedBy: "user" }),
+        [WS_METHODS.threadDecisionsUpdateParked]: (input) => threadDecisions.updateParked(input),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.setEnabled(input)),

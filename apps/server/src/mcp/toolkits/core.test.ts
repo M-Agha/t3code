@@ -28,6 +28,7 @@ import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import { McpAttachmentInput } from "./attachment/input.ts";
 import { McpSchema, McpServer } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
@@ -47,6 +48,8 @@ import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import type * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
+import * as ThreadDecisions from "../../decisions/ThreadDecisions.ts";
+import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
 import * as ProjectService from "../../project/ProjectService.ts";
 import * as ProviderRegistry from "../../provider/ProviderRegistry.ts";
@@ -62,6 +65,7 @@ import { dispatchFailure } from "../threadAccess.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
+import { CHILD_PARK_REFUSAL } from "./thread/handlers.ts";
 import * as PeerForwarding from "../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../peer/PeerLinks.ts";
@@ -83,13 +87,18 @@ const decodeThreadSearchResult = Schema.decodeUnknownEffect(
   ThreadToolkit.tools.t3_thread_search.successSchema,
 );
 
-const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
-  Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
-  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-);
+const layerThreadToolkitWith = <E, R>(
+  decisions: Layer.Layer<ThreadDecisions.ThreadDecisions, E, R>,
+) =>
+  McpHttpServer.layerThreadToolkit.pipe(
+    Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(decisions),
+  );
+const layerThreadToolkit = layerThreadToolkitWith(Layer.mock(ThreadDecisions.ThreadDecisions)({}));
 
 const threadId = ThreadId.make("mcp-core-thread");
 const scope: McpInvocationContext.McpInvocationScope = {
@@ -296,6 +305,75 @@ it.effect("a pending question read keeps option previews", () => {
     ),
   );
 });
+
+it.effect(
+  "t3_park parks for the main thread and refuses a delegated child or a placeholder",
+  () => {
+    const child = ThreadId.make("mcp-core-child");
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+      INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+        created_at, updated_at, payload_json
+      ) VALUES (${threadId}, 'project', 'Thread', 'codex', 'full-access', 'default',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '{}')
+    `;
+      const server = yield* McpServer.McpServer;
+      const park = (caller: ThreadId, text: string) =>
+        server.callTool({ name: "t3_park", arguments: { kind: "later", text } }).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...scope,
+            thread: {
+              threadId: caller,
+              providerSessionId: "mcp-core-session",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            },
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(declaredFailure(yield* park(child, "follow up on the CI cache"))).toMatchObject({
+        code: "invalid_request",
+        message: CHILD_PARK_REFUSAL,
+      });
+      expect(declaredFailure(yield* park(threadId, "TBD"))).toMatchObject({
+        code: "invalid_request",
+        message: ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
+      });
+      expect((yield* park(threadId, "Migrate CI to the new runner")).isError).not.toBe(true);
+      const { parked } = yield* (yield* ThreadDecisions.ThreadDecisions).snapshot(threadId);
+      expect(parked.map((item) => [item.kind, item.text, item.parkedBy])).toEqual([
+        ["later", "Migrate CI to the new runner", "agent"],
+      ]);
+    }).pipe(
+      Effect.provide(
+        layerThreadToolkitWith(ThreadDecisions.layer).pipe(
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) =>
+                Effect.succeed({
+                  ...McpToolAccessTestkit.liveThreadShell(id),
+                  ...(id === child
+                    ? {
+                        lineage: {
+                          rootThreadId: threadId,
+                          parentThreadId: threadId,
+                          relationshipToParent: "subagent" as const,
+                        },
+                      }
+                    : {}),
+                }),
+            }),
+          ),
+          Layer.provideMerge(ThreadDecisions.layer),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+        ),
+      ),
+    );
+  },
+);
 
 it("bounds public command rejections and redacts internal dispatch causes", () => {
   const command = { commandId: CommandId.make("mcp-core-command"), commandType: "thread.settle" };
@@ -812,6 +890,7 @@ it.effect("search names the calling thread, so an agent can tell its own match a
         Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
         Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
         Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+        Layer.provide(Layer.mock(ThreadDecisions.ThreadDecisions)({})),
       ),
     ),
   ),
@@ -1043,6 +1122,7 @@ it.effect.each([
             runNow: () => Effect.fail(error),
           }),
         ),
+        Layer.provide(Layer.mock(ThreadDecisions.ThreadDecisions)({})),
       ),
     ),
   ),

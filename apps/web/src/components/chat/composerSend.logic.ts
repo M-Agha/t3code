@@ -1,4 +1,9 @@
-import type { EnvironmentId, ThreadContextRecord } from "@t3tools/contracts";
+import {
+  type EnvironmentId,
+  THREAD_PARKED_TEXT_MAX_LENGTH,
+  type ThreadContextRecord,
+} from "@t3tools/contracts";
+import { type ParkCommand, readParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { collectInlineContextIds } from "../../lib/composerContextReferences";
 
 /** Attached threads the prompt still links to; replacing linked text leaves stale records. */
@@ -78,4 +83,66 @@ export function approvalRedirectNotice(input: {
     return "Another approval arrived, so your message wasn't sent.";
   }
   return null;
+}
+
+export type ComposerParkDecision =
+  | { readonly kind: "pass" }
+  | { readonly kind: "refuse"; readonly title: string; readonly description: string }
+  | { readonly kind: "park"; readonly command: ParkCommand };
+
+/** What sending `prompt` does with `/park`: park it, refuse it, or pass it on as a message. */
+export function composerParkDecision(input: {
+  readonly prompt: string;
+  readonly directAnnotation: boolean;
+  readonly editingQueuedRun: boolean;
+  readonly parkInFlight: boolean;
+  readonly hasNonPromptContent: boolean;
+  readonly threadStarted: boolean;
+}): ComposerParkDecision {
+  if (input.directAnnotation) return { kind: "pass" };
+  const command = readParkCommand(input.prompt);
+  if (command === null) return { kind: "pass" };
+  if (input.editingQueuedRun) {
+    return {
+      kind: "refuse",
+      title: "A queued message can't be parked",
+      description: "Save or cancel the edit, then park from the composer.",
+    };
+  }
+  if (input.parkInFlight) {
+    return {
+      kind: "refuse",
+      title: "Still parking",
+      description: "Park again once the previous items are saved.",
+    };
+  }
+  if (input.hasNonPromptContent) {
+    return {
+      kind: "refuse",
+      title: "Parked items take text only",
+      description: "Remove the attachments and context, then park it again.",
+    };
+  }
+  if (!input.threadStarted) {
+    return {
+      kind: "refuse",
+      title: "Nothing parked",
+      description: "Parked items belong to a thread; send its first message, then park.",
+    };
+  }
+  if (command.parks.length === 0 && command.placeholders > 0) {
+    return {
+      kind: "refuse",
+      title: "Nothing parked",
+      description: "The text is empty or a placeholder.",
+    };
+  }
+  if (command.parks.some((park) => park.text.length > THREAD_PARKED_TEXT_MAX_LENGTH)) {
+    return {
+      kind: "refuse",
+      title: "Too long to park",
+      description: `A parked item holds at most ${THREAD_PARKED_TEXT_MAX_LENGTH.toLocaleString("en-US")} characters.`,
+    };
+  }
+  return { kind: "park", command };
 }

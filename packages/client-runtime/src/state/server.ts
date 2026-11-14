@@ -1797,6 +1797,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:thread-decisions:reopen",
       tag: WS_METHODS.threadDecisionsReopen,
     }),
+    parkThreadItems: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:thread-decisions:park",
+      tag: WS_METHODS.threadDecisionsPark,
+    }),
+    updateThreadParkedItem: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:thread-decisions:update-parked",
+      tag: WS_METHODS.threadDecisionsUpdateParked,
+    }),
     createGuestShare: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:guest-share:create",
       tag: WS_METHODS.guestShareCreate,

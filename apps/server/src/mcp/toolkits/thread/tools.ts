@@ -19,11 +19,14 @@ import {
   RunId,
   NonNegativeInt,
   ProjectId,
+  ThreadParkedKind,
+  THREAD_PARKED_TEXT_MAX_LENGTH,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
 
+import * as ThreadDecisions from "../../../decisions/ThreadDecisions.ts";
 import * as ThreadSearch from "../../../orchestration-v2/ThreadSearch.ts";
 import * as ScheduledTaskService from "../../../scheduledTasks/ScheduledTaskService.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -239,6 +242,21 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ParkTool = Tool.make("t3_park", {
+  ...commandTool,
+  description:
+    "Park one item on the user's list in this thread's Parked tab, for later: `todo`, `later`, or `prompt` (a message the user may send as-is). Only what the user asked to set aside, or a follow-up worth their attention later. Never a status update, a placeholder, filler while you wait, or your own task list. Only the main thread parks; a delegated child puts follow-ups in its report to its parent.",
+  parameters: Schema.Struct({
+    kind: ThreadParkedKind,
+    text: Schema.String.check(Schema.isMaxLength(THREAD_PARKED_TEXT_MAX_LENGTH)),
+  }),
+  success: Schema.Struct({ message: Schema.String }),
+  dependencies: [...commandTool.dependencies, ThreadDecisions.ThreadDecisions],
+})
+  .annotate(Tool.Title, "Park for later")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.OpenWorld, false);
+
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
@@ -247,4 +265,5 @@ export const ThreadToolkit = Toolkit.make(
   ThreadOrganizeTool,
   PendingRequestTool,
   QueueTool,
+  ParkTool,
 );

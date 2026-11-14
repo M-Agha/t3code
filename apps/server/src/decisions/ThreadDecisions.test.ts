@@ -183,7 +183,111 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
   ),
 );
 
-it.effect("sweeps the rows of deleted threads when it starts", () =>
+it.effect("parks, edits and resolves a thread's items", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    const parked = Effect.fn("parked")(function* () {
+      const snapshot = yield* decisions.snapshot(threadId);
+      return {
+        open: snapshot.parkedOpenCount,
+        items: snapshot.parked.map((item) => [item.text, item.kind, item.state, item.parkedBy]),
+      };
+    });
+
+    yield* decisions.park({
+      threadId,
+      parkedBy: "user",
+      items: [
+        { kind: "todo", text: " fix the flaky test " },
+        { kind: "later", text: "look at CI caching" },
+      ],
+    });
+    yield* decisions.park({
+      threadId,
+      parkedBy: "agent",
+      items: [
+        { kind: "prompt", text: "Write the release notes" },
+        { kind: "todo", text: "check the deploy" },
+      ],
+    });
+    assert.deepEqual(yield* parked(), {
+      open: 4,
+      items: [
+        ["fix the flaky test", "todo", "open", "user"],
+        ["look at CI caching", "later", "open", "user"],
+        ["Write the release notes", "prompt", "open", "agent"],
+        ["check the deploy", "todo", "open", "agent"],
+      ],
+    });
+
+    const [fix, ci, notes, deploy] = (yield* decisions.snapshot(threadId)).parked.map(
+      (item) => item.id,
+    );
+    assert.isDefined(fix);
+    assert.isDefined(ci);
+    assert.isDefined(notes);
+    assert.isDefined(deploy);
+    yield* decisions.updateParked({ threadId, id: ci, action: "edit", text: "cache CI" });
+    yield* decisions.updateParked({ threadId, id: fix, action: "done" });
+    yield* decisions.updateParked({ threadId, id: ci, action: "drop" });
+    yield* decisions.updateParked({ threadId, id: notes, action: "sent" });
+    assert.deepEqual(yield* parked(), {
+      open: 1,
+      items: [
+        ["check the deploy", "todo", "open", "agent"],
+        // TestClock stands still, so resolved items tie and the newest id comes first.
+        ["Write the release notes", "prompt", "sent", "agent"],
+        ["cache CI", "later", "dropped", "user"],
+        ["fix the flaky test", "todo", "done", "user"],
+      ],
+    });
+
+    yield* decisions.updateParked({ threadId, id: ci, action: "reopen" });
+    const reopened = (yield* decisions.snapshot(threadId)).parked.find((item) => item.id === ci);
+    assert.deepEqual([reopened?.state, reopened?.resolvedAt], ["open", null]);
+
+    const refusals = yield* Effect.forEach(
+      [
+        decisions.updateParked({ threadId, id: notes, action: "edit", text: "too late" }),
+        decisions.updateParked({ threadId, id: deploy, action: "reopen" }),
+        decisions.updateParked({ threadId: ThreadId.make("other"), id: deploy, action: "done" }),
+        decisions.updateParked({ threadId, id: deploy, action: "edit", text: "TBD" }),
+        decisions.park({ threadId, parkedBy: "agent", items: [{ kind: "todo", text: "…" }] }),
+        decisions.park({
+          threadId: ThreadId.make("thread-missing"),
+          parkedBy: "user",
+          items: [{ kind: "todo", text: "real" }],
+        }),
+      ],
+      (refused) => Effect.flip(refused).pipe(Effect.map((error) => error.message)),
+    );
+    assert.deepEqual(refusals, [
+      "This item is no longer open in this thread.",
+      "This item is not resolved.",
+      "This item is no longer open in this thread.",
+      ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
+      ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
+      "This thread was not found.",
+    ]);
+    // A refused batch parks none of its items.
+    yield* Effect.flip(
+      decisions.park({
+        threadId,
+        parkedBy: "user",
+        items: [
+          { kind: "todo", text: "real work" },
+          { kind: "todo", text: "placeholder" },
+        ],
+      }),
+    );
+    assert.strictEqual((yield* parked()).open, 2);
+  }).pipe(
+    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+  ),
+);
+
+it.effect("sweeps deleted threads' rows when it starts, keeping parked items of missing ones", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const deleted = ThreadId.make("thread-deleted");
@@ -195,12 +299,22 @@ it.effect("sweeps the rows of deleted threads when it starts", () =>
           thread_id, label, label_number, text, source_message_id, asked_at, state
         ) VALUES (${id}, 'Q1', 1, 'Q1: x', 'm', '2026-01-01T00:00:00.000Z', 'open')
       `;
+      yield* sql`
+        INSERT INTO fork_thread_parked_items (
+          thread_id, kind, text, state, parked_by, created_at, updated_at
+        ) VALUES (${id}, 'todo', 'x', 'open', 'user', '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z')
+      `;
     }
     yield* Effect.provide(Effect.void, ThreadDecisions.layer);
-    const left = yield* sql<{ readonly threadId: string }>`
+    const questions = yield* sql<{ readonly threadId: string }>`
       SELECT thread_id AS "threadId" FROM fork_thread_decision_questions
     `;
-    assert.deepEqual(left, [{ threadId }]);
+    assert.deepEqual(questions, [{ threadId }]);
+    const parked = yield* sql<{ readonly threadId: string }>`
+      SELECT thread_id AS "threadId" FROM fork_thread_parked_items ORDER BY id
+    `;
+    assert.deepEqual(parked, [{ threadId: "thread-missing" }, { threadId }]);
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 

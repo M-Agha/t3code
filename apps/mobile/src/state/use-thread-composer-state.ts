@@ -90,6 +90,7 @@ import {
   useComposerDraftSettings,
 } from "./use-composer-drafts";
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import { readParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { orchestrationV2WorktreePending } from "@t3tools/shared/orchestrationV2ThreadError";
 import {
   compactionBlocksSteering,
@@ -623,6 +624,11 @@ export function useThreadComposerState(input: {
       );
       Dialog.alert(title, detail);
     };
+    // `/park` must never reach the provider; mobile has no Parked tab to put it in yet.
+    if (beforeDispatch === undefined && readParkCommand(text) !== null) {
+      Dialog.alert("Park from the web composer", "Mobile can't park items yet.");
+      return null;
+    }
     // A redirect's text answers its approval, so `/side` there is that text, not the command.
     const sideChatCommand = beforeDispatch === undefined ? parseSideChatCommand(text) : null;
     if (sideChatCommand) {

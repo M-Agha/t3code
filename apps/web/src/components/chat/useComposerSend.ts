@@ -1,4 +1,5 @@
 import { isClearComposerCommand, parseSideChatCommand } from "@t3tools/shared/composerTrigger";
+import type { ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { armFreshSession, disarmFreshSession, readFreshSessionArm } from "./freshSessionArms";
 import {
   mergeDirectPreviewAnnotation,
@@ -99,6 +100,7 @@ import { useStableCallback } from "../../hooks/useStableCallback";
 import { environmentPresentations } from "../../state/presentation";
 import {
   approvalRedirectNotice,
+  composerParkDecision,
   loadBalancingSendWarning,
   multipleModelSendBlock,
   referencedThreadContexts,
@@ -246,6 +248,8 @@ interface ComposerSendInput {
   readonly onSideChat?: ((prompt: string) => Promise<boolean>) | undefined;
   /** Refuses `/side` with this reason and keeps the draft. */
   readonly sideChatDisabledReason: string | null;
+  /** `/park`: resolves true once the items were parked (none opens the Parked tab). */
+  readonly onPark: (parks: ParkCommand["parks"]) => Promise<boolean>;
   readonly handleNewThreadInActiveProject: () => void;
   readonly persistThreadSettingsForNextTurn: (input: {
     threadId: ThreadId;
@@ -334,6 +338,7 @@ export function useComposerSend(input: ComposerSendInput) {
     acknowledgeActiveThreadWoke,
     onSideChat,
     sideChatDisabledReason,
+    onPark,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -365,6 +370,7 @@ export function useComposerSend(input: ComposerSendInput) {
   });
   const { sendInFlight: sendInFlightRef } = draftSendState(routeThreadKey);
   const composerSendGenerationRef = useRef(0);
+  const parkInFlightRef = useRef(false);
   const environmentUnavailableSendToastSlotRef = useRef(0);
   // A send awaits uploads before it declines, so it reads the approvals pending by then.
   const pendingApprovalsRef = useRef(pendingApprovals);
@@ -396,6 +402,52 @@ export function useComposerSend(input: ComposerSendInput) {
       isUsageLimitsCommand(promptRef.current)
     ) {
       if (openUsageLimits()) {
+        promptRef.current = "";
+        setComposerDraftPrompt(composerDraftTarget, "");
+        composerRef.current?.resetCursorState();
+      }
+      return;
+    }
+
+    // `/park` is T3's own: it never reaches the provider, and it parks while a run is busy too.
+    const parkDecision = composerParkDecision({
+      prompt: promptAtSend,
+      directAnnotation: directAnnotation !== undefined,
+      editingQueuedRun: queuedRunEdit.isEditing,
+      parkInFlight: parkInFlightRef.current,
+      hasNonPromptContent: draftHasNonPromptContent(composerDraftTarget),
+      threadStarted: isServerThread,
+    });
+    if (parkDecision.kind === "refuse") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: parkDecision.title,
+          description: parkDecision.description,
+        }),
+      );
+      return;
+    }
+    if (parkDecision.kind === "park") {
+      const { parks, placeholders } = parkDecision.command;
+      parkInFlightRef.current = true;
+      const parked = await onPark(parks).finally(() => {
+        parkInFlightRef.current = false;
+      });
+      if (!parked) return;
+      if (placeholders > 0) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "info",
+            title: `Left out ${placeholders === 1 ? "a placeholder item" : `${placeholders} placeholder items`}`,
+          }),
+        );
+      }
+      // Clear only what was parked; the user may have edited the draft or left meanwhile.
+      if (
+        currentRouteThreadKeyRef.current === routeThreadKey &&
+        promptRef.current === promptAtSend
+      ) {
         promptRef.current = "";
         setComposerDraftPrompt(composerDraftTarget, "");
         composerRef.current?.resetCursorState();
