@@ -411,6 +411,8 @@ export interface ChatComposerProps {
   onUsageLimitsCommand?: (() => void) | undefined;
   sideChatAvailable?: boolean;
   sideChatDisabledReason?: string | null;
+  /** Offers `/park` in the slash menu; the send path handles the command either way. */
+  parkAvailable?: boolean;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
   environmentUnavailable: {
@@ -1234,6 +1236,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     sideChatAvailable: props.sideChatAvailable === true,
     sideChatDisabledReason: props.sideChatDisabledReason ?? null,
     freshSessionAvailable: props.onFreshSession !== undefined,
+    parkAvailable: props.parkAvailable === true,
     compactSlashCommandAvailable,
     selectedProvider,
     selectedProviderSkills,
@@ -2107,6 +2110,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           setComposerHighlightedItemId(null);
           props.onFreshSession?.();
         }
+        return;
+      }
+      if (item.command === "park") {
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "/park ", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+        });
+        if (applied) setComposerHighlightedItemId(null);
         return;
       }
       if (item.command === "side" || item.command === "btw") {
