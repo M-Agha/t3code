@@ -688,16 +688,16 @@ export const layerListener = Layer.effectDiscard(
     const eventSink = yield* EventSink.EventSinkV2;
     const afterSequence = yield* eventSink.latestSequence().pipe(Effect.orDie);
     yield* Stream.merge(
-      eventSink
-        .stream({ afterSequence, eventType: "message.updated" })
-        .pipe(
-          Stream.filter(
-            (stored) =>
-              stored.event.type === "message.updated" &&
-              stored.event.payload.role === "user" &&
-              !stored.event.payload.streaming,
-          ),
+      eventSink.stream({ afterSequence, eventType: "message.updated" }).pipe(
+        // The user's message closes questions; an assistant message finishing covers a reply that
+        // stops streaming after its run already reads as ended, which no run event would follow.
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "message.updated" &&
+            (stored.event.payload.role === "user" || stored.event.payload.role === "assistant") &&
+            !stored.event.payload.streaming,
         ),
+      ),
       eventSink
         .stream({ afterSequence, eventType: "run.updated" })
         .pipe(
