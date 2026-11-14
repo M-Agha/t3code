@@ -95,7 +95,9 @@ function resolveDesktopAppStageLabel(input: {
     return "Dev";
   }
 
-  return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Beta";
+  // Fork-only: a non-Nightly fork build is "Fork", so its app name, keychain entry and menus never
+  // read as the official Beta it installs beside (FORK.md).
+  return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Fork";
 }
 
 export function resolveDesktopAppBranding(input: {
