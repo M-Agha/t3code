@@ -76,6 +76,23 @@ export type ThreadParkedItem = typeof ThreadParkedItem.Type;
 /** The snapshot carries every open parked item and at most this many resolved ones, newest first. */
 export const THREAD_PARKED_RESOLVED_LIMIT = 50;
 
+/** A claude.ai artifact the thread published (Claude's Artifact tool) or an agent's reply linked. */
+export const ThreadArtifact = Schema.Struct({
+  /** The id in the artifact's URL. */
+  id: Schema.String,
+  url: Schema.String,
+  /** Null when the artifact is only mentioned. */
+  title: Schema.NullOr(Schema.String),
+  description: Schema.NullOr(Schema.String),
+  /** True when only a reply's link names it, so title and updatedAt come from no publish. */
+  mentionedOnly: Schema.Boolean,
+  updatedAt: IsoDateTime,
+});
+export type ThreadArtifact = typeof ThreadArtifact.Type;
+
+/** The snapshot carries at most this many artifacts, most recently updated first. */
+export const THREAD_ARTIFACTS_LIMIT = 50;
+
 export const ThreadDecisionsSnapshot = Schema.Struct({
   threadId: ThreadId,
   /** Newest asking reply first; labels ascending within a reply. */
@@ -85,6 +102,9 @@ export const ThreadDecisionsSnapshot = Schema.Struct({
   /** Open items oldest first, then resolved ones newest first. */
   parked: ForwardCompatibleArray(ThreadParkedItem),
   parkedOpenCount: Schema.Int,
+  artifacts: ForwardCompatibleArray(ThreadArtifact),
+  /** Every artifact of the thread, including those past the snapshot's limit. */
+  artifactCount: Schema.Int,
 });
 export type ThreadDecisionsSnapshot = typeof ThreadDecisionsSnapshot.Type;
 
