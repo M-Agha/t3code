@@ -5,6 +5,7 @@ import {
   type OrchestrationV2StoredEvent,
   ProviderInstanceId,
   RunId,
+  THREAD_ARTIFACTS_LIMIT,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   ThreadId,
 } from "@t3tools/contracts";
@@ -183,6 +184,281 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
   ),
 );
 
+// Shapes copied from a Claude thread's projected Artifact tool calls; ids and paths shortened.
+const artifactItem = Effect.fn("artifactItem")(function* (
+  itemId: string,
+  updatedAt: string,
+  input: Record<string, unknown>,
+  output: unknown,
+  { status = "completed", toolName = "Artifact", driver = "claudeAgent" } = {},
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const payload = {
+    id: itemId,
+    threadId,
+    runId: "r1",
+    nodeId: `node:${itemId}`,
+    nativeItemRef: { driver, nativeId: itemId, strength: "strong" },
+    parentItemId: null,
+    ordinal: 1,
+    status,
+    title: null,
+    startedAt: updatedAt,
+    completedAt: status === "completed" ? updatedAt : null,
+    updatedAt,
+    type: "dynamic_tool",
+    toolName,
+    input,
+    output,
+  };
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_turn_items (
+      turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json
+    ) VALUES (${itemId}, ${threadId}, 'r1', 1, 'dynamic_tool', ${status}, ${updatedAt},
+      ${JSON.stringify(payload)})
+    ON CONFLICT (turn_item_id) DO UPDATE SET
+      status = excluded.status, updated_at = excluded.updated_at,
+      payload_json = excluded.payload_json
+  `;
+});
+
+const PLAN_URL = "https://claude.ai/artifact/RMhcQqa7QJj15KA5R3kCxN";
+const PLAN_UUID = "c53f3af9-93a3-4286-9581-8bf18386d46f";
+const DRAFT_UUID = "1b2c3d4e-0000-4000-8000-000000000001";
+const DRAFT_URL = `https://claude.ai/code/artifact/${DRAFT_UUID}`;
+const publishOutput = (url: string, title: string, updated: boolean, artifactId = PLAN_UUID) => ({
+  url,
+  path: "/tmp/scratchpad/t3-decisions-plan.html",
+  artifact_id: artifactId,
+  title,
+  updated,
+  owned: true,
+  audience: "owner",
+  seq: 1,
+  version: "1794495821-88bf",
+  contract: "0.0.0",
+  liveSubscription: "publish_context",
+});
+
+it.effect("collects a thread's artifacts from Artifact tool calls and reply links", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const artifacts = Effect.fn("artifacts")(function* () {
+      const snapshot = yield* decisions.snapshot(threadId);
+      return {
+        count: snapshot.artifactCount,
+        rows: snapshot.artifacts.map((a) => [
+          a.id,
+          a.url,
+          a.title,
+          a.description,
+          a.mentionedOnly,
+          a.updatedAt,
+        ]),
+      };
+    });
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    // A thread whose decisions synced before artifacts existed still reads its links from the start.
+    yield* sql`
+      INSERT INTO fork_thread_decision_sync (thread_id, after_created_at, after_message_id)
+      VALUES (${threadId}, '9999', 'm')
+    `;
+    yield* artifactItem(
+      "publish",
+      "2026-01-01T00:01:00.000Z",
+      {
+        file_path: "/tmp/scratchpad/t3-decisions-plan.html",
+        icon: "map",
+        description: "Plan for making end-of-reply questions native.",
+      },
+      publishOutput(PLAN_URL, "T3 Decisions Plan", false),
+    );
+    yield* artifactItem(
+      "quickstart",
+      "2026-01-01T00:02:00.000Z",
+      { action: "quickstart", intent: "other" },
+      {
+        quickstart: {
+          intent: "other",
+          types: [{ title: "Data", type_url: "https://claude.ai/artifact/GZLZthZ2sQjn7T16skfdeF" }],
+        },
+      },
+    );
+    yield* artifactItem(
+      "malformed",
+      "2026-01-01T00:03:00.000Z",
+      {},
+      '{"url": "https://claude.ai/ar',
+    );
+    yield* artifactItem(
+      "elsewhere",
+      "2026-01-01T00:04:00.000Z",
+      {},
+      {
+        url: "https://example.com/artifact/Elsewhere1",
+      },
+    );
+    yield* message("u1", "r1", "user", "Is https://claude.ai/artifact/UserLink1 the one?");
+    yield* artifactItem(
+      "codex",
+      "2026-01-01T00:05:00.000Z",
+      {},
+      publishOutput("https://claude.ai/artifact/Codex1", "Not Claude's", false),
+      { driver: "codex" },
+    );
+    yield* message(
+      "a1",
+      "r1",
+      "assistant",
+      [
+        `Published [the plan](${PLAN_URL}), also https://claude.ai/code/artifact/${PLAN_UUID}.`,
+        "The mock-up is https://claude.ai/artifact/MockUp2?tab=2#top, the draft",
+        `(${DRAFT_URL}). Not https://claude.ai/code/artifact/66a57730-… either.`,
+      ].join(" "),
+    );
+
+    const [linked] = yield* sql<{ readonly at: string }>`
+      SELECT created_at AS at FROM orchestration_v2_projection_messages WHERE message_id = 'a1'
+    `;
+    assert.isDefined(linked);
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* artifacts(), {
+      count: 3,
+      rows: [
+        [DRAFT_UUID, DRAFT_URL, null, null, true, linked.at],
+        ["MockUp2", "https://claude.ai/artifact/MockUp2", null, null, true, linked.at],
+        [
+          "RMhcQqa7QJj15KA5R3kCxN",
+          PLAN_URL,
+          "T3 Decisions Plan",
+          "Plan for making end-of-reply questions native.",
+          false,
+          "2026-01-01T00:01:00.000Z",
+        ],
+      ],
+    });
+    assert.isFalse(yield* decisions.sync(threadId));
+    // A later link moves a mentioned artifact's time, not when it was first seen.
+    yield* message("a1b", "r1", "assistant", `The draft again: ${DRAFT_URL}`);
+    const [relinked] = yield* sql<{ readonly at: string }>`
+      SELECT created_at AS at FROM orchestration_v2_projection_messages WHERE message_id = 'a1b'
+    `;
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual((yield* artifacts()).rows[0], [
+      DRAFT_UUID,
+      DRAFT_URL,
+      null,
+      null,
+      true,
+      relinked?.at,
+    ]);
+
+    // A republish stores its output as JSON text and leaves out the description.
+    yield* artifactItem(
+      "republish",
+      "2026-01-03T00:00:00.000Z",
+      { file_path: "/tmp/scratchpad/t3-decisions-plan.html" },
+      JSON.stringify(publishOutput(PLAN_URL, "T3 Decisions Plan v2", true)),
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    // A publish of a linked artifact gives it a title; it arrives running, without output.
+    // Its uuid is the draft's, so the draft's `code/artifact/` row folds into it.
+    yield* artifactItem("late", "2026-01-03T00:01:00.000Z", {}, null, { status: "running" });
+    assert.isFalse(yield* decisions.sync(threadId));
+    yield* artifactItem(
+      "late",
+      "2026-01-03T00:02:00.000Z",
+      { description: `Eight screens.${"x".repeat(1200)}` },
+      publishOutput(
+        "https://claude.ai/artifact/MockUp2",
+        `Spending Canvas${"x".repeat(300)}`,
+        false,
+        DRAFT_UUID,
+      ),
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    // Provider text is capped as it is stored.
+    assert.deepEqual((yield* artifacts()).rows, [
+      [
+        "MockUp2",
+        "https://claude.ai/artifact/MockUp2",
+        `Spending Canvas${"x".repeat(185)}`,
+        `Eight screens.${"x".repeat(986)}`,
+        false,
+        "2026-01-03T00:02:00.000Z",
+      ],
+      [
+        "RMhcQqa7QJj15KA5R3kCxN",
+        PLAN_URL,
+        "T3 Decisions Plan v2",
+        "Plan for making end-of-reply questions native.",
+        false,
+        "2026-01-03T00:00:00.000Z",
+      ],
+    ]);
+    const firstSeen = yield* sql<{
+      readonly id: string;
+      readonly uuid: string;
+      readonly at: string;
+    }>`
+      SELECT link_id AS id, artifact_id AS uuid, first_seen_at AS at
+      FROM fork_thread_artifacts ORDER BY id
+    `;
+    assert.deepEqual(firstSeen, [
+      { id: "MockUp2", uuid: DRAFT_UUID, at: linked.at },
+      { id: "RMhcQqa7QJj15KA5R3kCxN", uuid: PLAN_UUID, at: "2026-01-01T00:01:00.000Z" },
+    ]);
+
+    // A link to a published artifact changes nothing; a streaming reply is read once it ends.
+    const many = Array.from({ length: 55 }, (_, n) => `https://claude.ai/artifact/Many${n}`);
+    yield* message("a2", "r1", "assistant", `Again: ${PLAN_URL}`);
+    yield* message("a3", "r1", "assistant", many.join(" "), {}, true);
+    assert.isFalse(yield* decisions.sync(threadId));
+    yield* sql`UPDATE orchestration_v2_projection_messages SET streaming = 0 WHERE message_id = 'a3'`;
+    assert.isTrue(yield* decisions.sync(threadId));
+    const limited = yield* decisions.snapshot(threadId);
+    assert.deepEqual(
+      [limited.artifactCount, limited.artifacts.length],
+      [57, THREAD_ARTIFACTS_LIMIT],
+    );
+
+    // Any tool call moves the watermark, so a thread without Artifact calls reads each item once.
+    yield* artifactItem(
+      "bash",
+      "2026-01-04T00:00:00.000Z",
+      {},
+      { url: PLAN_URL },
+      {
+        toolName: "Bash",
+      },
+    );
+    assert.isFalse(yield* decisions.sync(threadId));
+    const [watermark] = yield* sql<{ readonly itemId: string }>`
+      SELECT after_item_id AS "itemId" FROM fork_thread_artifact_sync
+    `;
+    assert.deepEqual(watermark, { itemId: "bash" });
+  }).pipe(
+    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+  ),
+);
+
+it.effect("publishes a decisions change when reading artifacts fails", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* sql`DROP TABLE fork_thread_artifact_sync`;
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(Object.keys(yield* states()), ["Q4", "Q5"]);
+  }).pipe(
+    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
+  ),
+);
+
 it.effect("parks, edits and resolves a thread's items", () =>
   Effect.gen(function* () {
     const decisions = yield* ThreadDecisions.ThreadDecisions;
@@ -305,6 +581,17 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
         ) VALUES (${id}, 'todo', 'x', 'open', 'user', '2026-01-01T00:00:00.000Z',
           '2026-01-01T00:00:00.000Z')
       `;
+      yield* sql`
+        INSERT INTO fork_thread_artifacts (
+          thread_id, link_id, url, source, first_seen_at, updated_at
+        ) VALUES (${id}, 'a', 'https://claude.ai/artifact/a', 'mention', 'x', 'x')
+      `;
+      yield* sql`
+        INSERT INTO fork_thread_artifact_sync (
+          thread_id, after_message_created_at, after_message_id, after_item_updated_at,
+          after_item_id
+        ) VALUES (${id}, '', '', '', '')
+      `;
     }
     yield* Effect.provide(Effect.void, ThreadDecisions.layer);
     const questions = yield* sql<{ readonly threadId: string }>`
@@ -315,6 +602,11 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
       SELECT thread_id AS "threadId" FROM fork_thread_parked_items ORDER BY id
     `;
     assert.deepEqual(parked, [{ threadId: "thread-missing" }, { threadId }]);
+    const artifacts = yield* sql<{ readonly threadId: string }>`
+      SELECT thread_id AS "threadId" FROM fork_thread_artifacts
+      UNION ALL SELECT thread_id FROM fork_thread_artifact_sync
+    `;
+    assert.deepEqual(artifacts, [{ threadId }, { threadId }]);
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 

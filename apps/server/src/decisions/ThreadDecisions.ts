@@ -8,6 +8,7 @@ import {
   type ThreadParkedItem,
   type ThreadParkedKind,
   type ThreadParkedUpdateInput,
+  THREAD_ARTIFACTS_LIMIT,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   THREAD_PARKED_RESOLVED_LIMIT,
 } from "@t3tools/contracts";
@@ -23,7 +24,9 @@ import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
@@ -66,6 +69,32 @@ interface QuestionRow {
   readonly resolvedAt: string | null;
 }
 
+// Both forms the Artifact tool documents: `artifact/{id}` and `code/artifact/{uuid}`.
+const ARTIFACT_URL_SOURCE =
+  "https://claude\\.ai/(?:artifact/([A-Za-z0-9]+)|code/artifact/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))";
+const ARTIFACT_URL = new RegExp(ARTIFACT_URL_SOURCE, "g");
+const ARTIFACT_URL_EXACT = new RegExp(`^${ARTIFACT_URL_SOURCE}$`);
+const ARTIFACT_TITLE_LIMIT = 200;
+const ARTIFACT_DESCRIPTION_LIMIT = 1000;
+
+// The Artifact tool's output is provider data: an object, or JSON text, from any action or failure.
+const decodeArtifactPublish = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      url: Schema.String,
+      title: Schema.optional(Schema.Unknown),
+      artifact_id: Schema.optional(Schema.Unknown),
+    }),
+  ),
+);
+
+interface ArtifactItemRow {
+  readonly itemId: string;
+  readonly updatedAt: string;
+  readonly output: unknown;
+  readonly description: unknown;
+}
+
 export interface ThreadParkRequest {
   readonly threadId: ThreadId;
   readonly items: ReadonlyArray<{ readonly kind: ThreadParkedKind; readonly text: string }>;
@@ -80,7 +109,7 @@ const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped", sent: "sent" } as
 export class ThreadDecisions extends Context.Service<
   ThreadDecisions,
   {
-    /** Reads the thread's messages after its watermark; true when any decision row changed. */
+    /** Reads the thread's messages and Artifact tool calls after its watermarks; true when a row changed. */
     readonly sync: (threadId: ThreadId) => Effect.Effect<boolean, ThreadDecisionsError>;
     readonly snapshot: (
       threadId: ThreadId,
@@ -120,6 +149,8 @@ export const layer = Layer.effect(
           "fork_thread_decision_questions",
           "fork_thread_decided_without_asking",
           "fork_thread_decision_sync",
+          "fork_thread_artifacts",
+          "fork_thread_artifact_sync",
         ].map(
           (table) => `DELETE FROM ${table} WHERE thread_id NOT IN (
             SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
@@ -265,9 +296,184 @@ export const layer = Layer.effect(
       return changed;
     }, sql.withTransaction);
 
+    const syncArtifacts = Effect.fn("ThreadDecisions.syncArtifacts")(function* (
+      threadId: ThreadId,
+    ) {
+      const [watermark] = yield* sql<{
+        readonly afterMessageCreatedAt: string;
+        readonly afterMessageId: string;
+        readonly afterItemUpdatedAt: string;
+        readonly afterItemId: string;
+      }>`
+        SELECT
+          after_message_created_at AS "afterMessageCreatedAt",
+          after_message_id AS "afterMessageId",
+          after_item_updated_at AS "afterItemUpdatedAt",
+          after_item_id AS "afterItemId"
+        FROM fork_thread_artifact_sync WHERE thread_id = ${threadId}
+      `;
+      // A tool item is re-read whenever it changes, so one still running is read again once done.
+      // Every tool item moves the watermark; only Claude's Artifact calls pay for their output.
+      const items = yield* sql<ArtifactItemRow>`
+        SELECT
+          turn_item_id AS "itemId",
+          updated_at AS "updatedAt",
+          CASE WHEN json_extract(payload_json, '$.toolName') = 'Artifact'
+            AND json_extract(payload_json, '$.nativeItemRef.driver') = 'claudeAgent'
+          THEN json_extract(payload_json, '$.output') END AS output,
+          CASE WHEN json_extract(payload_json, '$.toolName') = 'Artifact'
+            AND json_extract(payload_json, '$.nativeItemRef.driver') = 'claudeAgent'
+          THEN json_extract(payload_json, '$.input.description') END AS description
+        FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ${threadId} AND type = 'dynamic_tool'
+          AND (updated_at, turn_item_id) >
+            (${watermark?.afterItemUpdatedAt ?? ""}, ${watermark?.afterItemId ?? ""})
+        ORDER BY updated_at, turn_item_id
+      `;
+      const messages = yield* sql<{
+        readonly messageId: string;
+        readonly createdAt: string;
+        readonly streaming: number;
+        readonly text: string | null;
+      }>`
+        SELECT
+          message_id AS "messageId",
+          created_at AS "createdAt",
+          streaming,
+          CASE WHEN role = 'assistant'
+            AND json_extract(payload_json, '$.text') LIKE '%claude.ai/%artifact/%'
+          THEN json_extract(payload_json, '$.text') END AS text
+        FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId}
+          AND (created_at, message_id) >
+            (${watermark?.afterMessageCreatedAt ?? ""}, ${watermark?.afterMessageId ?? ""})
+        ORDER BY created_at, message_id
+      `;
+      const blocked = messages.findIndex((row) => row.streaming === 1);
+      const ready = blocked === -1 ? messages : messages.slice(0, blocked);
+      const lastItem = items.at(-1);
+      const lastMessage = ready.at(-1);
+      if (lastItem === undefined && lastMessage === undefined) return false;
+
+      let changed = false;
+      // Publishes first, so a reply linking an artifact this thread published keeps its title.
+      for (const item of items) {
+        if (item.output === null) continue;
+        const publish = Option.getOrNull(decodeArtifactPublish(item.output));
+        const match = publish === null ? null : ARTIFACT_URL_EXACT.exec(publish.url);
+        const id = match?.[1] ?? match?.[2];
+        if (publish === null || id === undefined) continue;
+        const title =
+          typeof publish.title === "string" && publish.title !== "" ? publish.title : null;
+        const description =
+          typeof item.description === "string" && item.description !== "" ? item.description : null;
+        const artifactId =
+          typeof publish.artifact_id === "string" && publish.artifact_id !== ""
+            ? publish.artifact_id
+            : null;
+        // A `code/artifact/{uuid}` link read before this publish named the same artifact.
+        const [linked] =
+          artifactId === null || artifactId === id
+            ? []
+            : yield* sql<{ readonly firstSeenAt: string }>`
+                DELETE FROM fork_thread_artifacts
+                WHERE thread_id = ${threadId} AND link_id = ${artifactId} AND source = 'mention'
+                RETURNING first_seen_at AS "firstSeenAt"
+              `;
+        const firstSeenAt =
+          linked !== undefined && linked.firstSeenAt < item.updatedAt
+            ? linked.firstSeenAt
+            : item.updatedAt;
+        const upserted = yield* sql`
+          INSERT INTO fork_thread_artifacts (
+            thread_id, link_id, artifact_id, url, title, description, source, first_seen_at,
+            updated_at
+          ) VALUES (
+            ${threadId}, ${id}, ${artifactId}, ${publish.url},
+            substr(${title}, 1, ${ARTIFACT_TITLE_LIMIT}),
+            substr(${description}, 1, ${ARTIFACT_DESCRIPTION_LIMIT}), 'tool',
+            ${firstSeenAt}, ${item.updatedAt}
+          )
+          ON CONFLICT (thread_id, link_id) DO UPDATE SET
+            artifact_id = COALESCE(excluded.artifact_id, artifact_id),
+            url = excluded.url,
+            title = COALESCE(excluded.title, title),
+            description = COALESCE(excluded.description, description),
+            source = 'tool',
+            first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+            updated_at = excluded.updated_at
+          WHERE source = 'mention' OR excluded.updated_at >= updated_at
+          RETURNING link_id
+        `;
+        changed ||= upserted.length > 0 || linked !== undefined;
+      }
+      for (const row of ready) {
+        if (row.text === null) continue;
+        const links = new Map<string, string>();
+        for (const match of row.text.matchAll(ARTIFACT_URL)) {
+          const id = match[1] ?? match[2];
+          if (id !== undefined && !links.has(id)) links.set(id, match[0]);
+        }
+        for (const [id, url] of links) {
+          const [published] = yield* sql<{ readonly linkId: string }>`
+            SELECT link_id AS "linkId" FROM fork_thread_artifacts
+            WHERE thread_id = ${threadId} AND artifact_id = ${id}
+          `;
+          const upserted = yield* sql`
+            INSERT INTO fork_thread_artifacts (
+              thread_id, link_id, artifact_id, url, title, description, source, first_seen_at,
+              updated_at
+            ) VALUES (
+              ${threadId}, ${published?.linkId ?? id}, NULL, ${url}, NULL, NULL, 'mention',
+              ${row.createdAt}, ${row.createdAt}
+            )
+            ON CONFLICT (thread_id, link_id) DO UPDATE SET
+              first_seen_at = MIN(first_seen_at, excluded.first_seen_at),
+              updated_at = CASE WHEN source = 'mention'
+                THEN MAX(updated_at, excluded.updated_at) ELSE updated_at END
+            WHERE excluded.first_seen_at < first_seen_at
+              OR (source = 'mention' AND excluded.updated_at > updated_at)
+            RETURNING link_id
+          `;
+          changed ||= upserted.length > 0;
+        }
+      }
+      yield* sql`
+        INSERT INTO fork_thread_artifact_sync (
+          thread_id, after_message_created_at, after_message_id, after_item_updated_at,
+          after_item_id
+        ) VALUES (
+          ${threadId},
+          ${lastMessage?.createdAt ?? watermark?.afterMessageCreatedAt ?? ""},
+          ${lastMessage?.messageId ?? watermark?.afterMessageId ?? ""},
+          ${lastItem?.updatedAt ?? watermark?.afterItemUpdatedAt ?? ""},
+          ${lastItem?.itemId ?? watermark?.afterItemId ?? ""}
+        )
+        ON CONFLICT (thread_id) DO UPDATE SET
+          after_message_created_at = excluded.after_message_created_at,
+          after_message_id = excluded.after_message_id,
+          after_item_updated_at = excluded.after_item_updated_at,
+          after_item_id = excluded.after_item_id
+      `;
+      return changed;
+    }, sql.withTransaction);
+
     const sync = Effect.fn("ThreadDecisions.sync")(function* (threadId: ThreadId) {
       const changed = yield* locks
-        .withLock(threadId, syncUnlocked(threadId))
+        .withLock(
+          threadId,
+          Effect.all([
+            syncUnlocked(threadId),
+            // Its own transaction: a failure here must not hide decisions already committed.
+            syncArtifacts(threadId).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Failed to sync thread artifacts", { threadId, cause }).pipe(
+                  Effect.as(false),
+                ),
+              ),
+            ),
+          ]).pipe(Effect.map(([decisions, artifacts]) => decisions || artifacts)),
+        )
         .pipe(Effect.mapError(fail("Could not read this thread's decisions.")));
       if (changed) yield* PubSub.publish(changes, threadId);
       return changed;
@@ -315,6 +521,24 @@ export const layer = Layer.effect(
             LIMIT ${THREAD_PARKED_RESOLVED_LIMIT}
           )
         `;
+        const artifacts = yield* sql<{
+          readonly id: string;
+          readonly url: string;
+          readonly title: string | null;
+          readonly description: string | null;
+          readonly mentionedOnly: number;
+          readonly updatedAt: string;
+        }>`
+          SELECT link_id AS id, url, title, description,
+            source = 'mention' AS "mentionedOnly", updated_at AS "updatedAt"
+          FROM fork_thread_artifacts
+          WHERE thread_id = ${threadId}
+          ORDER BY updated_at DESC, link_id ASC
+          LIMIT ${THREAD_ARTIFACTS_LIMIT}
+        `;
+        const [artifactCount] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count FROM fork_thread_artifacts WHERE thread_id = ${threadId}
+        `;
         return {
           threadId,
           questions: questions.map((row): ThreadDecisionQuestion => ({
@@ -338,6 +562,8 @@ export const layer = Layer.effect(
           openCount: questions.filter((row) => row.state === "open").length,
           parked,
           parkedOpenCount: parked.filter((item) => item.state === "open").length,
+          artifacts: artifacts.map((row) => ({ ...row, mentionedOnly: row.mentionedOnly === 1 })),
+          artifactCount: artifactCount?.count ?? 0,
         };
       },
       NodeSqliteClient.readOnly,

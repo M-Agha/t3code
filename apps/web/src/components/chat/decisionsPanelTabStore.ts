@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type DecisionsPanelTab = "questions" | "decisions" | "parked";
+export type DecisionsPanelTab = "questions" | "decisions" | "parked" | "artifacts";
 
 // One tab for every thread's panel, so the command palette and `/park` can open a given one.
 export const useDecisionsPanelTab = create<{

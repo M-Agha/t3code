@@ -42,6 +42,8 @@ const snapshot = {
   openCount: 2,
   parked: [],
   parkedOpenCount: 0,
+  artifacts: [],
+  artifactCount: 0,
 };
 
 describe("thread decisions grouping", () => {
