@@ -227,6 +227,7 @@ describe("command permissions", () => {
 
   it.effect.each([
     WS_METHODS.scheduledTasksDelete,
+    WS_METHODS.threadDecisionsReopen,
     ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
     WS_METHODS.workflowsAnswer,
     WS_METHODS.workflowsResume,
