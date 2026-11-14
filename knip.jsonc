@@ -157,6 +157,11 @@
       // These workspace packages are private to this monorepo.
       "includeEntryExports": true,
     },
+    "packages/shared": {
+      "includeEntryExports": true,
+      // Fork-only: a verbatim copy of session-kit's parser keeps every export of its source.
+      "ignoreIssues": { "src/sessionKit/reply.ts": ["exports", "types"] },
+    },
     "packages/effect-acp": {
       "includeEntryExports": true,
       "entry": ["test/fixtures/*.ts"],
