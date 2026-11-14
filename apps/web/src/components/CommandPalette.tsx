@@ -85,8 +85,10 @@ import {
   UserPlusIcon,
   WorkflowIcon,
   MessageCircleQuestionIcon,
+  ArchiveIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
+import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
 import { dispatchPreviewAction } from "./preview/previewActionBus";
 import { previewBridge } from "./preview/previewBridge";
 import {
@@ -1548,6 +1550,18 @@ function OpenCommandPaletteDialog(props: {
       shortcutCommand: "decisions.toggle",
       icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
+        useDecisionsPanelTab.getState().setTab("questions");
+        useRightPanelStore.getState().open(threadRef, "decisions");
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:open-thread-parked",
+      searchTerms: ["parked", "park", "later", "todo", "set aside", "follow-ups"],
+      title: gt("Show parked items"),
+      icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        useDecisionsPanelTab.getState().setTab("parked");
         useRightPanelStore.getState().open(threadRef, "decisions");
       },
     });
