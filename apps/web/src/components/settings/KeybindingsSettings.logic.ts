@@ -268,7 +268,11 @@ const KEYBINDING_GROUPS = [
       "editor",
     ],
   },
-  { id: "threads", title: msg("Threads"), prefixes: ["thread", "chat", "pullRequest"] },
+  {
+    id: "threads",
+    title: msg("Threads"),
+    prefixes: ["thread", "chat", "pullRequest", "decisions"],
+  },
   { id: "composer", title: msg("Composer"), prefixes: ["composer", "modelPicker"] },
   { id: "terminal", title: msg("Terminal"), prefixes: ["terminal"] },
   { id: "preview", title: msg("Preview & diff"), prefixes: ["preview", "diff"] },

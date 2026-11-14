@@ -14,6 +14,7 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
 import { LinkedThreadPane } from "./LinkedThreadPane";
 import SideThreadPane from "./SideThreadPane";
+import { type ThreadDecisionActions, ThreadDecisionsPanel } from "./ThreadDecisions";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
 import type { ShortcutMatchContext } from "../../keybindings";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -86,6 +87,7 @@ export function RightPanelSurfaceContent(props: {
   readonly issuesSupported: boolean;
   readonly files: RightPanelFileProps;
   readonly sideChatParentPanel: SideChatParentPanel;
+  readonly decisionActions: ThreadDecisionActions;
 }) {
   const { surface, threadRef, visible, onCloseSurface } = props;
   const gt = useGT();
@@ -232,6 +234,8 @@ export function RightPanelSurfaceContent(props: {
       );
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
+    case "decisions":
+      return <ThreadDecisionsPanel threadRef={threadRef} actions={props.decisionActions} />;
     case "thread":
       // Not lazy: revealing a suspended tiptap editor tears down its view and crashes the composer.
       return (

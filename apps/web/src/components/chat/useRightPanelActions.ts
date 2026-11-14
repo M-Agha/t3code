@@ -158,6 +158,11 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     useRightPanelStore.getState().open(activeThreadRef, "pull-requests");
   };
   const addPullRequestsSurfaceStable = useStableCallback(addPullRequestsSurface);
+  const addDecisionsSurface = () => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "decisions");
+  };
+  const addDecisionsSurfaceStable = useStableCallback(addDecisionsSurface);
   const addDeviceSurface = () => {
     if (!activeThreadRef) return;
     if (!deviceState.onboardingCompleted || deviceState.hostStatus === "disabled") {
@@ -329,6 +334,10 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     },
     "threadPanel.toggle": () => toggleThreadPanel(),
     "diff.toggle": () => onToggleDiff(),
+    "decisions.toggle": () => {
+      if (!activeThreadRef) return false;
+      useRightPanelStore.getState().toggle(activeThreadRef, "decisions");
+    },
   } satisfies ChatShortcutCommands;
 
   return {
@@ -339,6 +348,7 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     addFilesSurfaceStable,
     addPullRequestSurfaceStable,
     addPullRequestsSurfaceStable,
+    addDecisionsSurfaceStable,
     closePreviewPanelStable,
     copyRightPanelFilePathStable,
     createBrowserSurface,
