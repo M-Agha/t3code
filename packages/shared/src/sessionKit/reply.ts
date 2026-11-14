@@ -1,4 +1,5 @@
-// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles e83835b2.
+// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles 43cd5328, the version
+// in dotfiles PR #600; it matches dotfiles main once #600 merges.
 // Fork-only: refresh by copying the source again below the marker; reply.drift.test.ts compares them.
 // Fork logic built on it lives in ./decisions.ts, never in this file.
 // ---- verbatim copy below ----
@@ -7,14 +8,19 @@
 // A decision line as the user's global rule writes one: `Q1`, `- **Q2 …`, at a line's start. A numbered
 // list marker (`1. Q1`) is a model's drift from the rule, read the same.
 // The label must end at a separator, so "Q2's wording" is prose.
-const Q_LINE = /^\s*(?:[-*]\s+|\d+\.\s+)?(?:\*\*)?(Q\d+)(?=\**[\s:,.)\u2014\u2013-]|$)/
+export const Q_LINE = /^\s*(?:[-*]\s+|\d+\.\s+)?(?:\*\*)?(Q\d+)(?=\**[\s:,.)\u2014\u2013-]|$)/
 const LIST_MARKER = /^\s*(?:[-*]|\d+\.)\s+/
 // The rule's other end-of-reply block, which may follow the decisions: a heading, or its first line.
-const DECIDED_HEADING = /^\s*(?:#+\s*)?\**Decided without asking\b/i
+export const DECIDED_HEADING = /^\s*(?:#+\s*)?\**Decided without asking\b/i
 // A heading that introduces Q-lines: a short line ending in a colon ("Still open:", "**Board and tools:**").
 // Ceiling: a short prose line ending in one ("Done this turn:") reads the same; the model's reading, which the
 // patterns only stand in for, tells them apart.
 const BLOCK_HEADING = /^\s*(?:#+\s*)?\**[^:*\n]{1,40}\**:\**\s*$/
+// A status line that names labels rather than asking one: "Q6, Q7 and Q8 are still open.", "Q4 (the 19 rows), Q6
+// (x) and Q8 (y) are still open.", its first label's own parenthesis allowed. A shaped question ("Q9, key words:")
+// has words, not a second label, after its first comma. Ceiling: key words that start with a label ("Q9, Q10 names:")
+// read as a status line, and that question is not asked.
+const LISTS_LABELS = /^Q\d+\**(?:\s*\([^)]*\))?[\s,]+(?:and\s+)?Q\d+\b/i
 
 export type Asked = { label: string; text: string }
 
@@ -51,7 +57,10 @@ export const trailingQuestions = (answer: string): Asked[] => {
       break
     }
   }
-  return asked
+  // Filtered after the walk, not a break inside it, so Q-lines above a status line are still collected. Ceiling:
+  // the walk still reads the status line's first label, so one the block above asks again ends the walk there
+  // ("Q4, x: …\n\nQ4 (x) and Q6 are still open." asks nothing).
+  return asked.filter(q => !LISTS_LABELS.test(q.text.replace(/\*\*/g, '')))
 }
 
 // The lines before the last "Decided without asking" heading, when no Q-line follows it.
@@ -126,6 +135,34 @@ export const readReply = (prompt: string): Reply => {
   const accepted = clauses(prompt).some(c => picks.test(c) && !REFUSAL.test(c))
   const turn = accepted ? 'answer' : hits.length === 0 && NOT_A_DECISION.test(prompt) ? 'drop' : null
   return { answer, drop, turn }
+}
+
+// An open question as the closing rule reads it; board.py's question row carries these and more. `at` is UTC ISO,
+// which sorts as text.
+export type OpenRow = { label: string; turn: string; at: string }
+
+// The reply that asked last: the turn of the open question asked most recently. Not the last row: a question
+// asked again is updated in place (board.py ask), so an old row can carry the newest turn. A tie keeps the later row.
+export const lastTurn = (open: readonly OpenRow[]): string | undefined =>
+  open.reduce<OpenRow | undefined>((best, q) => (best === undefined || q.at >= best.at ? q : best), undefined)?.turn
+
+// The open rows a person's reply settles. A label names the newest open row carrying it (the last in file order);
+// "your picks", or a bare "not a decision", settles the rest of the newest asking turn. Drops go first, so "go with
+// your picks, but Q3 is not a decision" drops Q3 and answers the rest. `answered` and `dropped` hold the labelled
+// rows then the swept ones; `swept` names the swept ones apart, which the CLI closes by turn (board-file.ts closes).
+export type Settled<T extends OpenRow> = { answered: T[]; dropped: T[]; swept: T[] }
+export const settles = <T extends OpenRow>(open: readonly T[], reply: Reply): Settled<T> => {
+  const named = (labels: string[]) => labels.flatMap(label => open.filter(q => q.label === label).slice(-1))
+  const drop = named(reply.drop)
+  const answer = named(reply.answer)
+  const settled = new Set([...drop, ...answer])
+  const turn = lastTurn(open)
+  const swept = reply.turn === null || turn === undefined ? [] : open.filter(q => q.turn === turn && !settled.has(q))
+  return {
+    answered: [...answer, ...(reply.turn === 'answer' ? swept : [])],
+    dropped: [...drop, ...(reply.turn === 'drop' ? swept : [])],
+    swept,
+  }
 }
 
 // The prompt the Questions tab's [ask] fills. Sending it brings a question back; it answers nothing.
