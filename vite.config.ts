@@ -200,6 +200,8 @@ export default defineConfig({
       "apps/mobile/modules/t3-highlights/cpp/generated/**",
       "apps/mobile/modules/t3-highlights/nitrogen/generated/**",
       "*.icon/**",
+      // Fork-only: a verbatim copy whose drift test compares it byte for byte with its source.
+      "packages/shared/src/sessionKit/reply.ts",
     ],
     sortPackageJson: {},
     overrides: [
@@ -228,6 +230,8 @@ export default defineConfig({
       "apps/mobile/android/**",
       "apps/mobile/ios/**",
       "apps/mobile/uniwind-types.d.ts",
+      // Fork-only: a verbatim copy of session-kit's parser, kept in its source's style.
+      "packages/shared/src/sessionKit/reply.ts",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
     jsPlugins: ["./oxlint-plugin-t3code/index.ts", "@shadcn/lint"],
