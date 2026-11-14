@@ -360,6 +360,8 @@ import {
   threadDecisionsBannerItem,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
+import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
+import type { ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -2046,14 +2048,41 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
-  const sendDecisionMessage = (text: string) => {
-    void sendAppMessage(text).catch((error: unknown) => {
-      toastManager.add({
-        type: "error",
-        title: "Could not send the answer",
-        description: error instanceof Error ? error.message : String(error),
-      });
+  const sendDecisionMessage = (text: string) =>
+    sendAppMessage(text).then(
+      () => true,
+      (error: unknown) => {
+        toastManager.add({
+          type: "error",
+          title: gt("Could not send the message"),
+          description: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      },
+    );
+  const parkThreadItems = useAtomCommand(serverEnvironment.parkThreadItems, {
+    reportFailure: true,
+  });
+  const parkFromComposer = async (parks: ParkCommand["parks"]) => {
+    if (activeThreadRef === null) return false;
+    if (parks.length === 0) {
+      useDecisionsPanelTab.getState().setTab("parked");
+      useRightPanelStore.getState().open(activeThreadRef, "decisions");
+      return true;
+    }
+    const result = await parkThreadItems({
+      environmentId: activeThreadRef.environmentId,
+      input: { threadId: activeThreadRef.threadId, items: parks },
     });
+    if (result._tag !== "Success") return false;
+    toastManager.add({
+      type: "success",
+      title: gt("{count, plural, one {Parked} other {Parked {count} items}}", {
+        count: parks.length,
+      }),
+      description: gt("In this thread's Parked tab."),
+    });
+    return true;
   };
   const insertDecisionText = (text: string) => {
     if (composerRef.current?.insertTextAtEnd(text, { ensureLeadingBoundary: true }) !== true) {
@@ -2071,6 +2100,7 @@ export default function ChatView(props: ChatViewProps) {
     send: useStableCallback(sendDecisionMessage),
     insert: useStableCallback(insertDecisionText),
   };
+  const parkFromComposerStable = useStableCallback(parkFromComposer);
   const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
@@ -3239,6 +3269,7 @@ export default function ChatView(props: ChatViewProps) {
     acknowledgeActiveThreadWoke,
     onSideChat: sideChat.available ? sendSideChatStable : undefined,
     sideChatDisabledReason,
+    onPark: parkFromComposerStable,
     handleNewThreadInActiveProject,
     persistThreadSettingsForNextTurn,
     linkCheckoutPullRequest,
@@ -3953,6 +3984,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}
                                 sideChatAvailable={sideChat.available}
                                 sideChatDisabledReason={sideChatDisabledReason}
+                                parkAvailable={isServerThread}
                                 onFreshSession={
                                   freshSessionCommandAvailable ? armFreshSessionStable : undefined
                                 }

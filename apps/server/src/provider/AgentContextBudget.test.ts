@@ -43,6 +43,7 @@ import { IssueService } from "../issue/IssueService.ts";
 import { PullRequestReviewGuideService } from "../pullRequest/PullRequestReviewGuideService.ts";
 import { PullRequestService } from "../pullRequest/PullRequestService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
+import { ThreadDecisions } from "../decisions/ThreadDecisions.ts";
 import { SecretRequests } from "../secrets/SecretRequests.ts";
 import { FeedbackStore } from "../feedback/FeedbackStore.ts";
 import { AnalyticsService } from "../telemetry/AnalyticsService.ts";
@@ -87,6 +88,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(GitManager)({}),
   Layer.mock(RemoteDelegation)({}),
   Layer.mock(ScheduledTaskService)({}),
+  Layer.mock(ThreadDecisions)({}),
   Layer.mock(SecretRequests)({}),
   Layer.mock(FeedbackStore)({}),
   NodeSqliteClient.layer({ filename: ":memory:" }),
