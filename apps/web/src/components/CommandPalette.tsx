@@ -88,6 +88,7 @@ import {
   WorkflowIcon,
   MessageCircleQuestionIcon,
   ArchiveIcon,
+  ShapesIcon,
 } from "lucide-react";
 import { openThreadFind } from "./chat/threadFindStore";
 import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
@@ -1592,6 +1593,17 @@ function OpenCommandPaletteDialog(props: {
       icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         useDecisionsPanelTab.getState().setTab("parked");
+        useRightPanelStore.getState().open(threadRef, "decisions");
+      },
+    });
+    actionItems.push({
+      kind: "action",
+      value: "action:open-thread-artifacts",
+      searchTerms: ["artifacts", "artifact", "claude.ai", "published", "pages"],
+      title: gt("Show artifacts"),
+      icon: <ShapesIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        useDecisionsPanelTab.getState().setTab("artifacts");
         useRightPanelStore.getState().open(threadRef, "decisions");
       },
     });

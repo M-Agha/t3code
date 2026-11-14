@@ -49,6 +49,8 @@ const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSna
   openCount: 0,
   parked,
   parkedOpenCount: parked.length,
+  artifacts: [],
+  artifactCount: 0,
 });
 
 const panel = () => <ThreadDecisionsPanel threadRef={threadRef} actions={actions} />;
