@@ -155,3 +155,7 @@ Read the matching doc before changing code in that area; code review enforces th
 - No continuously repainting animations; they peg the GPU on high-refresh displays.
 - Security matters, but do not over-index on dev-mode or maintainer-only features. Read [SECURITY.md](SECURITY.md) before auditing or triaging reports.
 - If a rule here fights the task in front of you, say so loudly and get a human sign-off before breaking it.
+
+## This checkout is a personal fork
+
+This branch (`fork/main`) is upstream T3 Code plus fork-only commits tagged `(fork)`. Before rebasing onto upstream, resolving a conflict, building or installing the desktop app, or changing anything the fork added, read [FORK.md](FORK.md): it records each fork change's intent, the owner's decisions, and the rules a rebase must keep (fork migrations use their own `fork_sql_migrations` ledger; `packages/shared/src/sessionKit/reply.ts` is a byte-for-byte copy that is never edited here).
