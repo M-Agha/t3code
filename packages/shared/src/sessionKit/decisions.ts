@@ -1,10 +1,12 @@
 // Fork-only decision tracking on top of the verbatim session-kit parser in ./reply.ts.
-import { readReply, trailingQuestions } from "./reply.ts";
-
-export interface AskedQuestion {
-  readonly label: string;
-  readonly text: string;
-}
+import {
+  type Asked,
+  DECIDED_HEADING,
+  Q_LINE,
+  readReply,
+  settles,
+  trailingQuestions,
+} from "./reply.ts";
 
 export interface QuestionParts {
   readonly keyWords: string;
@@ -27,9 +29,6 @@ export const splitQuestion = (text: string): QuestionParts => {
   return { keyWords: "", question: plain.replace(LABEL_PREFIX, ""), pick: "", reason: "" };
 };
 
-// Same heading and Q-line patterns as reply.ts, which keeps them private.
-const DECIDED_HEADING = /^\s*(?:#+\s*)?\**Decided without asking\b\**:?\**\s*(.*)$/i;
-const Q_LINE = /^\s*(?:[-*]\s+|\d+\.\s+)?(?:\*\*)?Q\d+(?=\**[\s:,.)—–-]|$)/;
 const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/;
 
 /** The bullets under a reply's last "Decided without asking" heading, before or after its Q-block. */
@@ -38,8 +37,9 @@ export const decidedWithoutAsking = (reply: string): string[] => {
   const at = lines.findLastIndex((line) => DECIDED_HEADING.test(line));
   if (at === -1) return [];
   const items: string[] = [];
-  const inline = DECIDED_HEADING.exec(lines[at] ?? "")?.[1]
-    ?.replace(/^\**\s*/, "")
+  // The heading's own line may carry the first choice: "**Decided without asking:** x".
+  const inline = lines[at]!.replace(DECIDED_HEADING, "")
+    .replace(/^\**:?\**\s*\**\s*/, "")
     .trim();
   if (inline) items.push(inline);
   for (const line of lines.slice(at + 1)) {
@@ -57,18 +57,12 @@ export const decidedWithoutAsking = (reply: string): string[] => {
 };
 
 export interface ReplyDecisions {
-  readonly questions: ReadonlyArray<AskedQuestion>;
+  readonly questions: ReadonlyArray<Asked>;
   readonly decidedWithoutAsking: ReadonlyArray<string>;
 }
 
-// "Q6, Q7 and Q8 are still open." or "Q4 (the 19 rows), Q6 …" names labels; trailingQuestions reads
-// it as asking the first.
-const LISTS_LABELS = /^Q\d+\**(?:\s*\([^)]*\))?[\s,]+(?:and\s+)?Q\d+\b/i;
-
 export const readReplyDecisions = (reply: string): ReplyDecisions => ({
-  questions: trailingQuestions(reply).filter(
-    (question) => !LISTS_LABELS.test(question.text.replace(/\*\*/g, "")),
-  ),
+  questions: trailingQuestions(reply),
   decidedWithoutAsking: decidedWithoutAsking(reply),
 });
 
@@ -84,28 +78,14 @@ export interface Closing {
   readonly dropped: ReadonlyArray<string>;
 }
 
-/**
- * Labels a user message closes, as session-kit's board-file.ts `closes` reads readReply: "your picks"
- * and a bare "not a decision" settle the rest of the newest reply with a question still open.
- */
+/** Labels a user message closes: session-kit's `settles`, over this server's open-question rows. */
 export const closingFor = (message: string, open: ReadonlyArray<OpenQuestion>): Closing => {
-  const reply = readReply(message);
-  const openLabels = new Set(open.map((question) => question.label));
-  const dropped = reply.drop.filter((label) => openLabels.has(label));
-  const answered = reply.answer.filter((label) => openLabels.has(label));
-  const newest = open.reduce<OpenQuestion | undefined>(
-    (best, question) => (best === undefined || question.askedAt >= best.askedAt ? question : best),
-    undefined,
+  const settled = settles(
+    open.map((q) => ({ label: q.label, turn: q.sourceMessageId, at: q.askedAt })),
+    readReply(message),
   );
-  const settled = new Set([...dropped, ...answered]);
-  const rest =
-    reply.turn === null || newest === undefined
-      ? []
-      : open
-          .filter((q) => q.sourceMessageId === newest.sourceMessageId && !settled.has(q.label))
-          .map((q) => q.label);
   return {
-    answered: reply.turn === "answer" ? [...answered, ...rest] : answered,
-    dropped: reply.turn === "drop" ? [...dropped, ...rest] : dropped,
+    answered: settled.answered.map((q) => q.label),
+    dropped: settled.dropped.map((q) => q.label),
   };
 };
