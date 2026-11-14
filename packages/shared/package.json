@@ -7,6 +7,10 @@
       "types": "./src/sessionKit/decisions.ts",
       "import": "./src/sessionKit/decisions.ts"
     },
+    "./sessionKit/parks": {
+      "types": "./src/sessionKit/parks.ts",
+      "import": "./src/sessionKit/parks.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"
