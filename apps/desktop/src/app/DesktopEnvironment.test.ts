@@ -3,6 +3,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import { DesktopAppBrandingSchema } from "@t3tools/contracts";
 
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -72,4 +74,22 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
     }),
   );
+});
+
+// Fork-only: the branding crosses IPC through DesktopAppBrandingSchema, so every stage label the app
+// resolves must decode. A "Fork" label the schema did not list crashed the packaged fork on launch
+// (2026-11-15), and the separately written TypeScript type could not catch it.
+const decodeBranding = Schema.decodeUnknownSync(DesktopAppBrandingSchema);
+
+describe("DesktopEnvironment branding", () => {
+  it("decodes through the IPC schema for every stage", () => {
+    for (const input of [
+      { isDevelopment: false, appVersion: "0.1.9" },
+      { isDevelopment: false, appVersion: "0.0.43-nightly.20260929.2428" },
+      { isDevelopment: true, appVersion: "0.1.9" },
+    ]) {
+      const branding = DesktopEnvironment.resolveDesktopAppBranding(input);
+      assert.deepEqual(decodeBranding(branding), branding);
+    }
+  });
 });
