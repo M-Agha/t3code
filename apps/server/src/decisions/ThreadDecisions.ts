@@ -227,7 +227,7 @@ export const layer = Layer.effect(
         ) {
           const read = readReplyDecisions(row.text);
           for (const question of read.questions) {
-            // An unshaped line about a label ("Q4 is still open") may reopen it, never reword it.
+            // An unshaped line about a label ("Q4 remains open") may reopen it, never reword it.
             const shaped = splitQuestion(question.text).pick !== "";
             const asked = yield* sql`
               INSERT INTO fork_thread_decision_questions (
