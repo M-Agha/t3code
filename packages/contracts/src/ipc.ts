@@ -91,8 +91,6 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
-// Fork-only: "Fork" names this personal fork's builds so they install beside official ones (FORK.md).
-export type DesktopAppStageLabel = "Alpha" | "Beta" | "Dev" | "Fork" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
   "disabled",
@@ -107,7 +105,17 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
-export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Beta", "Dev", "Nightly"]);
+// Fork-only: "Fork" names this personal fork's builds so they install beside official ones (FORK.md). The
+// type is derived from the schema: written separately, the type took "Fork" and the schema did not, and the
+// packaged app crashed on launch decoding its own branding (2026-11-15).
+export const DesktopAppStageLabelSchema = Schema.Literals([
+  "Alpha",
+  "Beta",
+  "Dev",
+  "Fork",
+  "Nightly",
+]);
+export type DesktopAppStageLabel = typeof DesktopAppStageLabelSchema.Type;
 
 export interface DesktopAppBranding {
   baseName: string;
