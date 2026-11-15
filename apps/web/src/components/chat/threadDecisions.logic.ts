@@ -4,13 +4,29 @@ import type {
   ThreadDecisionsSnapshot,
   ThreadParkedItem,
 } from "@t3tools/contracts";
+import { closingFor } from "@t3tools/shared/sessionKit/decisions";
 
-/** The messages the decision buttons send or prefill; agents read them as ordinary replies. */
+/** The lines the decision buttons add to the composer; agents read them as ordinary replies. */
 export const decisionMessages = {
   accept: (question: ThreadDecisionQuestion) => `${question.label}: ${question.pick}`,
   drop: (question: ThreadDecisionQuestion) => `${question.label}: not a decision`,
   answer: (question: ThreadDecisionQuestion) => `${question.label}: `,
   veto: (item: ThreadDecidedWithoutAsking) => `Veto: ${item.text}`,
+};
+
+/** `text` as the draft's next line, so answers chained in one message read one per line. */
+export const asDraftLine = (draft: string, text: string) =>
+  draft === "" || draft.endsWith("\n") ? text : `\n${text}`;
+
+/** Labels of the open questions the draft would close if sent now: their buttons add nothing more. */
+export const questionsClosedByDraft = (
+  draft: string,
+  snapshot: ThreadDecisionsSnapshot | null,
+): ReadonlyArray<string> => {
+  const open = (snapshot?.questions ?? []).filter((question) => question.state === "open");
+  if (draft.trim() === "" || open.length === 0) return [];
+  const { answered, dropped } = closingFor(draft, open);
+  return [...answered, ...dropped];
 };
 
 export interface ReplyGroup<Item> {
