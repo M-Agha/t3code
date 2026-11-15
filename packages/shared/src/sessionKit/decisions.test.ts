@@ -72,6 +72,7 @@ describe("splitQuestion", () => {
 describe("closingFor", () => {
   const open: OpenQuestion[] = [
     { label: "Q3", sourceMessageId: "m1", askedAt: "2026-01-01T00:00:00.000Z" },
+    { label: "Q6", sourceMessageId: "m1", askedAt: "2026-01-01T00:00:00.000Z" },
     { label: "Q4", sourceMessageId: "m2", askedAt: "2026-01-02T00:00:00.000Z" },
     { label: "Q5", sourceMessageId: "m2", askedAt: "2026-01-02T00:00:00.000Z" },
   ];
@@ -87,6 +88,12 @@ describe("closingFor", () => {
       "a dropped label leaves the picks for the rest",
       "go with your picks, but Q5 is not a decision",
       ["Q4"],
+      ["Q5"],
+    ],
+    [
+      "one answer per line closes each label, across replies",
+      "Q4: yes\nQ5: not a decision\nQ6: no",
+      ["Q4", "Q6"],
       ["Q5"],
     ],
     ["a bare not a decision drops the newest reply's rest", "not a decision", [], ["Q4", "Q5"]],
