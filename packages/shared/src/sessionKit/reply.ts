@@ -1,4 +1,4 @@
-// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 04a82f4f (blob 120f44d9).
+// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 02e78bb1 (blob 59f4f3d8).
 // Fork-only: refresh by copying the source again below the marker; reply.drift.test.ts compares them.
 // Fork logic built on it lives in ./decisions.ts, never in this file.
 // ---- verbatim copy below ----
@@ -16,10 +16,12 @@ export const DECIDED_HEADING = /^\s*(?:#+\s*)?\**Decided without asking\b/i
 // patterns only stand in for, tells them apart.
 const BLOCK_HEADING = /^\s*(?:#+\s*)?\**[^:*\n]{1,40}\**:\**\s*$/
 // A status line that names labels rather than asking one: "Q6, Q7 and Q8 are still open.", "Q4 (the 19 rows), Q6
-// (x) and Q8 (y) are still open.", its first label's own parenthesis allowed. A shaped question ("Q9, key words:")
-// has words, not a second label, after its first comma. Ceiling: key words that start with a label ("Q9, Q10 names:")
-// read as a status line, and that question is not asked.
-const LISTS_LABELS = /^Q\d+\**(?:\s*\([^)]*\))?[\s,]+(?:and\s+)?Q\d+\b/i
+// (x) and Q8 (y) are still open.", a range ("Q35 to Q37", "Q35–Q37", "Q35 through Q37"), or one label that "is still
+// open", its first label's own parenthesis allowed. A shaped question ("Q9, key words:") has words, not a second
+// label, after its first comma. Ceilings: key words that start with a label ("Q9, Q10 names:") read as a status
+// line, and that question is not asked; a lone label in other words ("Q4 remains open", "Q4 still waits on you")
+// still asks.
+const LISTS_LABELS = /^Q\d+\**(?:\s*\([^)]*\))?(?:(?:[\s,]+(?:and|to|through)?|\s*[-\u2013\u2014])\s*Q\d+\b|\s+(?:is|are)\s+(?:still\s+)?open\b)/i
 
 export type Asked = { label: string; text: string }
 
