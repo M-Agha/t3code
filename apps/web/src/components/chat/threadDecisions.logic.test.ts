@@ -7,10 +7,12 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  asDraftLine,
   isParkedBusy,
   latestReplyOpenQuestions,
   openQuestionsByReply,
   parkedFocusAfter,
+  questionsClosedByDraft,
 } from "./threadDecisions.logic";
 
 const question = (
@@ -67,6 +69,22 @@ describe("thread decisions grouping", () => {
     ).toEqual([
       ["newer", ["Q4"]],
       ["older", ["Q2"]],
+    ]);
+  });
+});
+
+describe("answers added to the composer", () => {
+  it("puts each answer on its own line", () => {
+    expect(asDraftLine("", "Q4: yes")).toBe("Q4: yes");
+    expect(asDraftLine("Q2: no", "Q4: yes")).toBe("\nQ4: yes");
+    expect(asDraftLine("Q2: no\n", "Q4: yes")).toBe("Q4: yes");
+  });
+
+  it("marks the open questions the draft already closes, and no resolved ones", () => {
+    expect(questionsClosedByDraft("", snapshot)).toEqual([]);
+    expect(questionsClosedByDraft("Q2: yes\nQ4: not a decision\nQ5: no", snapshot)).toEqual([
+      "Q2",
+      "Q4",
     ]);
   });
 });
