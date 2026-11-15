@@ -351,6 +351,7 @@ import {
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
+import { asDraftLine, questionsClosedByDraft } from "./chat/threadDecisions.logic";
 import type { ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
@@ -1999,7 +2000,9 @@ export default function ChatView(props: ChatViewProps) {
     return true;
   };
   const insertDecisionText = (text: string) => {
-    if (composerRef.current?.insertTextAtEnd(text, { ensureLeadingBoundary: true }) !== true) {
+    const composer = composerRef.current;
+    const line = asDraftLine(composer?.getSendContext().prompt ?? "", text);
+    if (composer?.insertTextAtEnd(line) !== true) {
       toastManager.add({
         type: "error",
         title: gt("Unable to add to chat"),
@@ -2009,13 +2012,21 @@ export default function ChatView(props: ChatViewProps) {
     }
     scheduleComposerFocusStable();
   };
+  const parkFromComposerStable = useStableCallback(parkFromComposer);
+  const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
   const decisionActions: ThreadDecisionActions = {
     canOperate: canOperateThread && isServerThread,
     send: useStableCallback(sendDecisionMessage),
     insert: useStableCallback(insertDecisionText),
+    inDraft: useComposerDraftStore(
+      useShallow((store) =>
+        questionsClosedByDraft(
+          store.getComposerDraft(composerDraftTarget)?.prompt ?? "",
+          threadDecisions,
+        ),
+      ),
+    ),
   };
-  const parkFromComposerStable = useStableCallback(parkFromComposer);
-  const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
   const {

@@ -44,12 +44,14 @@ import {
   resolvedQuestions,
 } from "./threadDecisions.logic";
 
-/** How the decision buttons reach the thread: an ordinary message, or text left in the composer. */
+/** How the decision buttons reach the thread: an ordinary message, or a line added to the composer. */
 export interface ThreadDecisionActions {
   readonly canOperate: boolean;
   /** Resolves true once the message was sent or queued; failures are reported to the user. */
   readonly send: (text: string) => Promise<boolean>;
   readonly insert: (text: string) => void;
+  /** Labels the composer's draft already closes. */
+  readonly inDraft: ReadonlyArray<string>;
 }
 
 const STRIP_VISIBLE_ROWS = 3;
@@ -74,21 +76,28 @@ function QuestionActions(props: {
   readonly actions: ThreadDecisionActions;
 }) {
   const { question, actions } = props;
+  const drafted = actions.inDraft.includes(question.label);
+  const disabled = !actions.canOperate || drafted;
   return (
     <span className="ms-auto flex shrink-0 items-center gap-0.5">
+      {drafted ? (
+        <Badge size="sm" variant="outline">
+          in draft
+        </Badge>
+      ) : null}
       <Button
         size="xs"
         variant="outline"
-        disabled={!actions.canOperate || question.pick === ""}
-        aria-label={`Accept ${question.label}: ${question.pick}`}
-        onClick={() => void actions.send(decisionMessages.accept(question))}
+        disabled={disabled || question.pick === ""}
+        aria-label={`Accept ${question.label}: ${question.pick} (adds to your message)`}
+        onClick={() => actions.insert(decisionMessages.accept(question))}
       >
         Accept
       </Button>
       <Button
         size="xs"
         variant="ghost"
-        disabled={!actions.canOperate}
+        disabled={disabled}
         aria-label={`Answer ${question.label} in the composer`}
         onClick={() => actions.insert(decisionMessages.answer(question))}
       >
@@ -97,9 +106,9 @@ function QuestionActions(props: {
       <Button
         size="xs"
         variant="ghost-muted"
-        disabled={!actions.canOperate}
-        aria-label={`Drop ${question.label} as not a decision`}
-        onClick={() => void actions.send(decisionMessages.drop(question))}
+        disabled={disabled}
+        aria-label={`Drop ${question.label} as not a decision (adds to your message)`}
+        onClick={() => actions.insert(decisionMessages.drop(question))}
       >
         Drop
       </Button>
@@ -178,7 +187,8 @@ function StripRows(props: {
   const shown =
     expanded || hidden <= 0 ? props.questions : props.questions.slice(0, STRIP_VISIBLE_ROWS);
   return (
-    <div className="pb-1.5">
+    // min-w-0: as a grid item this div would otherwise widen to its nowrap question's full length.
+    <div className="min-w-0 pb-1.5">
       <ul aria-label="Open questions from the latest reply">
         {shown.map((question) => (
           <StripRow key={question.label} question={question} actions={props.actions} />
