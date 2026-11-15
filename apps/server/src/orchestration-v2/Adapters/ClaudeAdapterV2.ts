@@ -1739,6 +1739,10 @@ export const layerQueryRunner: Layer.Layer<
               }
             : {}),
           [PortScanner.AGENT_THREAD_ENV]: input.threadId,
+          // Fork-only: tells the user's session-kit plugin that this T3 tracks questions and
+          // parking itself. Official builds also set T3CODE_THREAD_ID, so that cannot be the
+          // signal (FORK.md, "Outside this repo").
+          T3CODE_OWNS_BOARD: "1",
         },
       };
       // The SDK can prepend a scope wrapper to native binaries; script entries run through node.
