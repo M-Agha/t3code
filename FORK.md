@@ -42,8 +42,9 @@ reasons are the ones they accepted.
   remember to call.
 - **Closing:** deterministic, from the user's own messages, with session-kit's `readReply`
   (`Q4: yes`, "go with your picks", "not a decision"). A message naming no label closes nothing, so
-  clarifying questions are safe. The buttons (Accept, Answer, Drop) send ordinary messages, so the
-  agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
+  clarifying questions are safe. The buttons (Accept, Answer, Drop) add one line each to the
+  composer instead of sending, so several answers go out as one ordinary message and the agent
+  sees every answer; a question the draft already closes shows "in draft". Only messages a person typed count: agent, scheduled-task and relayed
   messages close nothing. _Rejected:_ a model judging each message; an agent "close" tool.
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
@@ -146,7 +147,7 @@ when an assistant message finishes, so those questions are not held until the ne
    `vp run dev --home-dir "$PWD/.t3"`, since in a main checkout dev falls back to `~/.t3`. Use a
    Replay thread, or one cheap Claude Haiku thread with permissions set to Supervised in a scratch
    project:
-   - a Q-block reply, then Accept;
+   - a Q-block reply, then Accept and send;
    - `/park` while idle and mid-run;
    - `t3_park`;
    - an Artifacts row.
