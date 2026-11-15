@@ -159,9 +159,11 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
     const long = (yield* question("Q4"))?.answerText ?? "";
     assert.deepEqual([long.length, long.at(-1)], [300, "…"]);
 
-    // A status line about a label reopens it but keeps the question it asked.
+    // A label line without the question's shape reopens it but keeps the question it asked. ("Q4 is still
+    // open" asks nothing at all now: session-kit's reply.ts reads it as a status line. "Q4 remains open" is
+    // that filter's named ceiling, still read as asking, so it stands in for any shapeless re-mention.)
     yield* run("r3", 3, "completed");
-    yield* message("a4", "r3", "assistant", "Done.\n\nQ4 is still open: the log is not in yet.");
+    yield* message("a4", "r3", "assistant", "Done.\n\nQ4 remains open: the log is not in yet.");
     assert.isTrue(yield* decisions.sync(threadId));
     const status = yield* question("Q4");
     assert.deepEqual(
