@@ -168,8 +168,9 @@ of a newer build migrates `~/.t3` one way, and that copy is the only way back.
   it on every rebase: without it session-kit and the fork both track questions. Keying on
   `T3CODE_THREAD_ID` was wrong, because official builds set that too, and session-kit would go quiet
   inside an official T3 that tracks nothing natively. Dotfiles PR #596.
-- session-kit's reply.ts carries the logic the fork shares. Dotfiles PR #600; the drift test is red
-  until it merges.
+- session-kit's reply.ts carries the logic the fork shares (dotfiles PR #600, merged). The drift test
+  reads the file from the local dotfiles checkout, so it goes red whenever that checkout is behind or
+  ahead of the copy: compare against the copy's header commit before re-copying.
 
 ## Known noise
 
