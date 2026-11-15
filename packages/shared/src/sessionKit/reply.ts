@@ -1,5 +1,4 @@
-// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles 43cd5328, the version
-// in dotfiles PR #600; it matches dotfiles main once #600 merges.
+// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 04a82f4f (blob 120f44d9).
 // Fork-only: refresh by copying the source again below the marker; reply.drift.test.ts compares them.
 // Fork logic built on it lives in ./decisions.ts, never in this file.
 // ---- verbatim copy below ----
@@ -200,6 +199,13 @@ export const prUrlsIn = (text: string): string[] => [...new Set(text.match(PR_UR
 export const isPrChange = (command: string): boolean =>
   /(?:^|[\s;&|(])gh\s+pr\s+(?!(?:create|view|list|status|diff|checks|checkout)\b)[a-z-]+/.test(command)
 
+// A command with heredoc bodies, quoted text and `#` comments blanked, its length kept, so a position found in it is the
+// same position in the command: a quote keeps its marks around underscores, the rest turns to spaces, newlines kept.
+const blanked = (command: string): string => command
+  .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g, m => `<<${m.slice(2).replace(/[^\n]/g, ' ')}`)
+  .replace(/"[^"]*"|'[^']*'/g, m => `${m.charAt(0)}${'_'.repeat(m.length - 2)}${m.charAt(0)}`)
+  .replace(/(^|\s)#[^\n]*/g, (m, before: string) => `${before}${' '.repeat(m.length - before.length)}`)
+
 // A Bash call that sends work out of the session, the adoption nudge's trigger (relay redesign v3, S8): a `git push`,
 // a `gh pr create`, or a deploy, which is `deploy` run by a deploy CLI or a package manager's script runner (`pnpm
 // deploy` is pnpm's own workspace copy and `npm deploy` no command, so those two need `run`). Heredoc bodies, quoted
@@ -208,11 +214,68 @@ export const isPrChange = (command: string): boolean =>
 // otherwise) is not seen, the push or the PR around it usually is; the words as bare arguments (`echo git push`) are.
 const DEPLOY = /(?:^|[\s;&|(])(?:cdk|vercel|flyctl|fly|wrangler|firebase|netlify|serverless|sls|(?:pnpm|npm)\s+run|(?:yarn|bun)(?:\s+run)?)\s+deploy\b/
 export const shipsWork = (command: string): boolean => {
-  const unquoted = command
-    .replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?\n\s*\2(?=\n|$)/g, '<<')
-    .replace(/"[^"]*"|'[^']*'/g, '""')
-    .replace(/(^|\s)#[^\n]*/g, '$1')
+  const unquoted = blanked(command)
   return /(?:^|[\s;&|(])git\s+push\b/.test(unquoted) || isPrCreate(unquoted) || DEPLOY.test(unquoted)
+}
+
+// The PRs a Bash call's `gh pr merge`s name, for landing on merge (relay redesign v3, S6): each by its number or URL,
+// quoted or not, with the `-R`/`--repo` it was given (`-Ro/r` too), read from the words after `merge` up to the end of
+// that command (`;`, `|`, `&`, a newline), a flag's value skipped; the first other word is the PR, and anything but a
+// number or URL names none. The merge is found as shipsWork finds a push, in the command with quotes, heredocs and
+// comments blanked, so a commit message or a comment that names one merges nothing; `--help` merges nothing either.
+// `repoUnknown`: a `cd`, `pushd` or `GH_REPO=` earlier in the command, and no `-R` or URL, so the number may be another
+// repository's than the session's, which is where the mod would ask gh. `gh pr merge` prints nothing on success when
+// its output is no terminal, so the command is the only place the PR is named. Ceilings: a merge with no PR named
+// (gh's current branch: a `--delete-branch` has left it by the time anyone asks), one named by branch, or by a shell
+// variable (`gh pr merge $p` in a loop), is not read; a value flag missing from MERGE_VALUE_FLAGS lets its value be
+// read as the PR; a GH_REPO exported in an earlier call is not seen.
+const MERGE_VALUE_FLAGS = new Set(['-R', '--repo', '-b', '--body', '-F', '--body-file', '-t', '--subject', '-A', '--author-email', '--match-head-commit'])
+const PR_URL_ONE = /^https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+$/
+const unquote = (w: string): string => w.replace(/^(["'])(.*)\1$/s, '$2')
+export type MergedRef = { pr: string; repo?: string; repoUnknown: boolean }
+export const prMerges = (command: string): MergedRef[] => {
+  const plain = blanked(command)
+  return [...plain.matchAll(/(?:^|[\s;&|(])gh\s+pr\s+merge\b([^;|&\n]*)/g)].flatMap(m => {
+    const args = m[1] ?? ''
+    const at = m.index + m[0].length - args.length
+    const words = command.slice(at, at + args.length).match(/\$\([^)]*\)|"(?:[^"\\]|\\.)*"|'[^']*'|\S+/g) ?? []
+    let pr: string | undefined
+    let repo: string | undefined
+    for (let i = 0; i < words.length; i += 1) {
+      const w = words[i] ?? ''
+      if (w === '--help' || w === '-h') return []
+      const flag = /^(-R)(.+)$|^(--?[A-Za-z-]+)(?:=(.*))?$/.exec(w)
+      if (flag === null) {
+        pr ??= unquote(w)
+        continue
+      }
+      const name = flag[1] ?? flag[3] ?? ''
+      const value = flag[2] ?? flag[4] ?? (MERGE_VALUE_FLAGS.has(name) ? words[(i += 1)] : undefined)
+      if (name === '-R' || name === '--repo') repo = value === undefined ? undefined : unquote(value)
+    }
+    if (pr === undefined || !(/^\d+$/.test(pr) || PR_URL_ONE.test(pr))) return []
+    const moved = /(?:^|[\s;&|(])(?:cd|pushd)\s|(?:^|[\s;&|(])GH_REPO=/.test(plain.slice(0, m.index + 1))
+    const repoUnknown = moved && repo === undefined && !PR_URL_ONE.test(pr)
+    return [repo === undefined ? { pr, repoUnknown } : { pr, repo, repoUnknown }]
+  })
+}
+
+// The `owner/name` a GitHub remote, a `-R` value (`o/r`, `github.com/o/r`) or a PR's URL names, in lower case; undefined
+// for anything else.
+export const repoOf = (text: string): string | undefined => {
+  const m = /(?:^|github\.com[:/])([\w.-]+)\/([\w.-]+?)(?:\.git)?(?:\/pull\/\d+)?\/?$/.exec(text.trim())
+  return m === null ? undefined : `${m[1]}/${m[2]}`.toLowerCase()
+}
+
+// Whether `text` cites decision `id` (OWNER-n): by itself as a word, or inside a range the repository's commits write
+// (`DOT-65..79`, `DOT-65..DOT-79`, `DOT-150 to DOT-153`). A range is tested, never listed out, so `DOT-1..99999`
+// costs nothing.
+export const cites = (text: string, id: string): boolean => {
+  const m = /^([A-Z][A-Z0-9]{1,11})-(\d+)$/.exec(id)
+  if (m === null) return false
+  const [, owner = '', n = ''] = m
+  const ref = new RegExp(String.raw`\b${owner}-(\d+)(?:(?:\.\.(?:${owner}-)?|\s+(?:to|through)\s+${owner}-)(\d+))?\b`, 'g')
+  return [...text.matchAll(ref)].some(r => (r[2] === undefined ? r[1] === n : Number(r[1]) <= Number(n) && Number(n) <= Number(r[2])))
 }
 
 // The canvas an Artifact call made or filled, by its URL, so the Links tab says `canvas`: a canvas's
