@@ -31,7 +31,13 @@ fi
 mkdir -p "$trash"
 if [ -f "$db" ]; then
   backup="$trash/statev2.sqlite_$stamp"
-  sqlite3 -readonly "$db" ".backup '$backup'"
+  # Read-write, not -readonly: with every app quit SQLite has removed the WAL's -shm file, and a read-only
+  # connection cannot recreate it ("unable to open database file", 2026-11-15). Nothing else holds the
+  # database here (checked above), so a writable connection only replays the WAL into what it copies.
+  if ! sqlite3 "$db" ".backup '$backup'"; then
+    rm -f "$backup"
+    fail "could not back up $db; nothing was installed."
+  fi
   chmod "$(stat -f %Lp "$db")" "$backup"
   check="$(sqlite3 "file:$backup?immutable=1" "pragma integrity_check" 2>&1)"
   [ "$check" = "ok" ] || fail "backup at $backup failed its integrity check: $check"
