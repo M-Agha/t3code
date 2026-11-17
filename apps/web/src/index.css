@@ -252,6 +252,9 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --color-diff-deletion-foreground: var(--diff-deletion-foreground);
   --color-info-foreground: var(--info-foreground);
   --color-info: var(--info);
+  --color-tracker-draft: var(--tracker-draft);
+  --color-tracker-pick: var(--tracker-pick);
+  --color-tracker-agent: var(--tracker-agent);
   --color-guest: var(--guest);
   --color-guest-foreground: var(--guest-foreground);
   --color-guest-surface: var(--guest-surface);
@@ -1312,6 +1315,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
     /* On black a gray mix stays as bright as the blue, so dim with transparency instead. */
     --diff-modified-icon: color-mix(in srgb, var(--info-foreground) 65%, transparent);
     --diff-added-icon: var(--success-foreground);
+  }
+}
+
+/* Fork: the Tracker's three roles, each beside a word ("In draft", "Pick:", Veto): a line in the
+   draft, the agent's pick, and a choice the agent made without asking. Themes have no hue roles to
+   derive these from, so they follow light and dark, which custom themes set too (the .dark class).
+   Measured 2026-11-17 in the Tracker: text 5.0:1 or more in light, 11.3:1 or more in dark, on the
+   panel and on their own 10-12% tints. */
+:root {
+  --tracker-draft: var(--color-teal-800);
+  --tracker-pick: var(--color-violet-700);
+  --tracker-agent: var(--color-orange-700);
+
+  @variant dark {
+    --tracker-draft: var(--color-teal-300);
+    --tracker-pick: var(--color-violet-300);
+    --tracker-agent: var(--color-orange-300);
   }
 }
 

@@ -355,6 +355,7 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   type ThreadDecisionActions,
   threadDecisionsBannerItem,
+  useDraftActions,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
@@ -2056,10 +2057,10 @@ export default function ChatView(props: ChatViewProps) {
     });
     return true;
   };
-  const insertDecisionText = (text: string) => {
+  const insertDecisionText = (text: string, options?: { readonly focus?: boolean }) => {
     const composer = composerRef.current;
     const line = asDraftLine(composer?.getSendContext().prompt ?? "", text);
-    if (composer?.insertTextAtEnd(line) !== true) {
+    if (composer?.insertTextAtEnd(line, { focus: options?.focus !== false }) !== true) {
       toastManager.add({
         type: "error",
         title: gt("Unable to add to chat"),
@@ -2067,7 +2068,7 @@ export default function ChatView(props: ChatViewProps) {
       });
       return false;
     }
-    scheduleComposerFocusStable();
+    if (options?.focus !== false) scheduleComposerFocusStable();
     return true;
   };
   // The send in flight, kept so a decision sent through the composer can tell whether it went.
@@ -2079,6 +2080,16 @@ export default function ChatView(props: ChatViewProps) {
     canOperate: canOperateThread && isServerThread,
     send: useStableCallback(sendDecisionMessage),
     insert: insertDecisionTextStable,
+    ...useDraftActions({
+      composerRef,
+      promptRef,
+      sendingRef: composerSendingRef,
+      draftTarget: composerDraftTarget,
+    }),
+    draft: useComposerDraftStore(
+      (store) => store.getComposerDraft(composerDraftTarget)?.prompt ?? "",
+    ),
+    answeringPendingInput: activePendingUserInput !== null,
     inDraft: useComposerDraftStore(
       useShallow((store) =>
         questionsClosedByDraft(
