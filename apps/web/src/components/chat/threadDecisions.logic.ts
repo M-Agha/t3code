@@ -4,7 +4,7 @@ import type {
   ThreadDecisionsSnapshot,
   ThreadParkedItem,
 } from "@t3tools/contracts";
-import { closingFor } from "@t3tools/shared/sessionKit/decisions";
+import { closingFor, readReply } from "@t3tools/shared/sessionKit/decisions";
 
 /** The lines the decision buttons add to the composer; agents read them as ordinary replies. */
 export const decisionMessages = {
@@ -18,15 +18,48 @@ export const decisionMessages = {
 export const asDraftLine = (draft: string, text: string) =>
   draft === "" || draft.endsWith("\n") ? text : `\n${text}`;
 
-/** Labels of the open questions the draft would close if sent now: their buttons add nothing more. */
+/** The option of a question's panel that the draft has chosen. */
+export type DraftChoice = "accept" | "answer" | "drop";
+
+/**
+ * The open questions the draft would close if sent now (the server's closingFor), by label, with the
+ * option that says how: their buttons add nothing more. "Go with your picks", which names no label, and
+ * a line that is exactly the Accept line both accept.
+ */
 export const questionsClosedByDraft = (
   draft: string,
   snapshot: ThreadDecisionsSnapshot | null,
-): ReadonlyArray<string> => {
+): Readonly<Record<string, DraftChoice>> => {
   const open = (snapshot?.questions ?? []).filter((question) => question.state === "open");
-  if (draft.trim() === "" || open.length === 0) return [];
+  if (draft.trim() === "" || open.length === 0) return {};
   const { answered, dropped } = closingFor(draft, open);
-  return [...answered, ...dropped];
+  const named = readReply(draft).answer;
+  const lines = draft.split("\n").map((line) => line.trim());
+  const choices: Record<string, DraftChoice> = {};
+  for (const label of dropped) choices[label] = "drop";
+  for (const question of open) {
+    if (!answered.includes(question.label)) continue;
+    const accepted =
+      !named.includes(question.label) ||
+      (question.pick !== "" && lines.includes(decisionMessages.accept(question)));
+    choices[question.label] = accepted ? "accept" : "answer";
+  }
+  return choices;
+};
+
+/**
+ * The question to show after `from` was answered: the next one the draft does not close, wrapping
+ * to the start; none when the draft closes them all.
+ */
+export const nextUndrafted = (
+  labels: ReadonlyArray<string>,
+  from: string,
+  inDraft: Readonly<Record<string, DraftChoice>>,
+): string | undefined => {
+  const at = labels.indexOf(from);
+  return [...labels.slice(at + 1), ...labels.slice(0, Math.max(at, 0))].find(
+    (label) => inDraft[label] === undefined,
+  );
 };
 
 export interface ReplyGroup<Item> {
