@@ -15,7 +15,9 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
+  type Closing,
   closingFor,
+  type JudgedQuestion,
   Q_LINE,
   readReplyDecisions,
   splitQuestion,
@@ -32,6 +34,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as DecisionJudge from "./DecisionJudge.ts";
 
 // Fork-only. Questions are derived from projected messages; only resolutions are irreplaceable.
 
@@ -183,6 +186,8 @@ export const layer = Layer.effect(
   ThreadDecisions,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
+    const scope = yield* Effect.scope;
+    const judge = yield* DecisionJudge.DecisionJudge;
     const locks = yield* KeyedLock.make<ThreadId>();
     // Subscribers re-read their thread on a signal, so a slow one only needs recent thread ids.
     const changes = yield* PubSub.sliding<ThreadId>(256);
@@ -216,7 +221,123 @@ export const layer = Layer.effect(
       ),
     );
 
-    const syncUnlocked = Effect.fn("ThreadDecisions.syncUnlocked")(function* (threadId: ThreadId) {
+    // Rows in order, in one transaction: the questions a run's reply asks, the closing found for each user
+    // message among them, then the watermark past the last row.
+    const applyRows = Effect.fn("ThreadDecisions.applyRows")(function* (
+      threadId: ThreadId,
+      rows: ReadonlyArray<MessageRow>,
+      replies: ReadonlySet<string>,
+      closings: ReadonlyMap<string, Closing>,
+    ) {
+      const last = rows.at(-1);
+      if (last === undefined) return false;
+      let changed = false;
+      for (const row of rows) {
+        if (row.text === null) continue;
+        if (replies.has(row.messageId)) {
+          const read = readReplyDecisions(row.text);
+          for (const question of read.questions) {
+            // Only a shaped re-ask ("My pick is") reopens or rewords a known label. An unshaped line about it
+            // ("Q4 remains open", or an agent echoing "Q7: nothing to change." after the user answered) changes
+            // nothing: echoes reopened answered questions (2026-11-17). A label never seen before is still recorded.
+            const shaped = splitQuestion(question.text).pick !== "";
+            const asked = yield* sql`
+              INSERT INTO fork_thread_decision_questions (
+                thread_id, label, label_number, text, source_message_id, asked_at, state
+              ) VALUES (
+                ${threadId}, ${question.label}, ${Number(question.label.slice(1))},
+                ${question.text}, ${row.messageId}, ${row.createdAt}, 'open'
+              )
+              ON CONFLICT (thread_id, label) DO UPDATE SET
+                ${shaped ? sql`text = excluded.text, source_message_id = excluded.source_message_id, asked_at = excluded.asked_at,` : sql``}
+                state = 'open',
+                answer_text = NULL,
+                answer_message_id = NULL,
+                resolved_at = NULL
+              WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`0`}
+              RETURNING label
+            `;
+            changed ||= asked.length > 0;
+          }
+          yield* sql`
+            DELETE FROM fork_thread_decided_without_asking
+            WHERE thread_id = ${threadId} AND message_id = ${row.messageId}
+          `;
+          for (const [ordinal, text] of read.decidedWithoutAsking.entries()) {
+            yield* sql`
+              INSERT INTO fork_thread_decided_without_asking (
+                thread_id, message_id, ordinal, text, created_at
+              ) VALUES (${threadId}, ${row.messageId}, ${ordinal}, ${text}, ${row.createdAt})
+            `;
+            changed = true;
+          }
+          continue;
+        }
+        const closing = closings.get(row.messageId);
+        if (closing === undefined) continue;
+        for (const [state, labels] of [
+          ["answered", closing.answered],
+          ["dropped", closing.dropped],
+        ] as const) {
+          if (labels.length === 0) continue;
+          yield* sql`
+            UPDATE fork_thread_decision_questions
+            SET state = ${state}, answer_text = ${row.text},
+              answer_message_id = ${row.messageId}, resolved_at = ${row.createdAt}
+            WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
+          `;
+          changed = true;
+        }
+      }
+      yield* sql`
+        INSERT INTO fork_thread_decision_sync (thread_id, after_created_at, after_message_id)
+        VALUES (${threadId}, ${last.createdAt}, ${last.messageId})
+        ON CONFLICT (thread_id) DO UPDATE SET
+          after_created_at = excluded.after_created_at,
+          after_message_id = excluded.after_message_id
+      `;
+      return changed;
+    }, sql.withTransaction);
+
+    // What a user's message closes: the judge's verdict on every message while questions are open, as in
+    // the terminal; the rules (`closingFor`) only when it gives none. Outside any transaction: it may wait on
+    // a model for seconds.
+    const closingOf = Effect.fn("ThreadDecisions.closingOf")(function* (
+      threadId: ThreadId,
+      row: MessageRow & { readonly text: string },
+    ) {
+      const open = yield* sql<JudgedQuestion>`
+        SELECT label, text, source_message_id AS "sourceMessageId", asked_at AS "askedAt"
+        FROM fork_thread_decision_questions
+        WHERE thread_id = ${threadId} AND state = 'open'
+        ORDER BY asked_at, label_number
+      `;
+      if (open.length === 0) return undefined;
+      // The reply the message follows: whether a bare "yes" assents to the question block depends on it.
+      const [reply] = yield* sql<{ readonly text: string }>`
+        SELECT json_extract(payload_json, '$.text') AS text
+        FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId} AND role = 'assistant'
+          AND json_extract(payload_json, '$.text') IS NOT NULL
+          AND (created_at, message_id) < (${row.createdAt}, ${row.messageId})
+        ORDER BY created_at DESC, message_id DESC
+        LIMIT 1
+      `;
+      const judged = yield* judge.judge({
+        threadId,
+        messageId: row.messageId,
+        open,
+        reply: reply?.text,
+        message: row.text,
+      });
+      return judged ?? closingFor(row.text, open);
+    });
+
+    // Under the thread's lock, but in several transactions, so no model call runs inside one: the rows before
+    // each user message are applied first, so the questions it may close include those they asked; then its
+    // closing is found, then applied with the watermark past it. Each step commits its own watermark, so a
+    // failure part way keeps what was read and resumes after it.
+    const syncMessages = Effect.fn("ThreadDecisions.syncMessages")(function* (threadId: ThreadId) {
       const [watermark] = yield* sql<{
         readonly afterCreatedAt: string;
         readonly afterMessageId: string;
@@ -260,94 +381,33 @@ export const layer = Layer.effect(
             !ENDED_RUN_STATUSES.has(row.runStatus)),
       );
       const ready = blocked === -1 ? rows : rows.slice(0, blocked);
-      const last = ready.at(-1);
-      if (last === undefined) return false;
 
       // A run's reply is its last assistant message; earlier ones narrate tool calls.
       const replyByRun = new Map<string, string>();
       for (const row of ready) {
         if (row.role === "assistant") replyByRun.set(row.runId ?? row.messageId, row.messageId);
       }
+      const replies = new Set(replyByRun.values());
 
       let changed = false;
-      for (const row of ready) {
-        if (row.text === null) continue;
-        if (
-          row.role === "assistant" &&
-          replyByRun.get(row.runId ?? row.messageId) === row.messageId
-        ) {
-          const read = readReplyDecisions(row.text);
-          for (const question of read.questions) {
-            // Only a shaped re-ask ("My pick is") reopens or rewords a known label. An unshaped line about it
-            // ("Q4 remains open", or an agent echoing "Q7: nothing to change." after the user answered) changes
-            // nothing: echoes reopened answered questions (2026-11-17). A label never seen before is still recorded.
-            const shaped = splitQuestion(question.text).pick !== "";
-            const asked = yield* sql`
-              INSERT INTO fork_thread_decision_questions (
-                thread_id, label, label_number, text, source_message_id, asked_at, state
-              ) VALUES (
-                ${threadId}, ${question.label}, ${Number(question.label.slice(1))},
-                ${question.text}, ${row.messageId}, ${row.createdAt}, 'open'
-              )
-              ON CONFLICT (thread_id, label) DO UPDATE SET
-                ${shaped ? sql`text = excluded.text, source_message_id = excluded.source_message_id, asked_at = excluded.asked_at,` : sql``}
-                state = 'open',
-                answer_text = NULL,
-                answer_message_id = NULL,
-                resolved_at = NULL
-              WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`0`}
-              RETURNING label
-            `;
-            changed ||= asked.length > 0;
-          }
-          yield* sql`
-            DELETE FROM fork_thread_decided_without_asking
-            WHERE thread_id = ${threadId} AND message_id = ${row.messageId}
-          `;
-          for (const [ordinal, text] of read.decidedWithoutAsking.entries()) {
-            yield* sql`
-              INSERT INTO fork_thread_decided_without_asking (
-                thread_id, message_id, ordinal, text, created_at
-              ) VALUES (${threadId}, ${row.messageId}, ${ordinal}, ${text}, ${row.createdAt})
-            `;
-            changed = true;
-          }
-        } else if (row.role === "user" && row.userAuthored === 1) {
-          const open = yield* sql<{
-            readonly label: string;
-            readonly sourceMessageId: string;
-            readonly askedAt: string;
-          }>`
-            SELECT label, source_message_id AS "sourceMessageId", asked_at AS "askedAt"
-            FROM fork_thread_decision_questions
-            WHERE thread_id = ${threadId} AND state = 'open'
-          `;
-          if (open.length === 0) continue;
-          const closing = closingFor(row.text, open);
-          for (const [state, labels] of [
-            ["answered", closing.answered],
-            ["dropped", closing.dropped],
-          ] as const) {
-            if (labels.length === 0) continue;
-            yield* sql`
-              UPDATE fork_thread_decision_questions
-              SET state = ${state}, answer_text = ${row.text},
-                answer_message_id = ${row.messageId}, resolved_at = ${row.createdAt}
-              WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
-            `;
-            changed = true;
-          }
-        }
+      let start = 0;
+      for (const [index, row] of ready.entries()) {
+        if (row.role !== "user" || row.userAuthored !== 1 || row.text === null) continue;
+        changed =
+          (yield* applyRows(threadId, ready.slice(start, index), replies, new Map())) || changed;
+        const closing = yield* closingOf(threadId, { ...row, text: row.text });
+        changed =
+          (yield* applyRows(
+            threadId,
+            [row],
+            replies,
+            new Map(closing === undefined ? [] : [[row.messageId, closing]]),
+          )) || changed;
+        start = index + 1;
       }
-      yield* sql`
-        INSERT INTO fork_thread_decision_sync (thread_id, after_created_at, after_message_id)
-        VALUES (${threadId}, ${last.createdAt}, ${last.messageId})
-        ON CONFLICT (thread_id) DO UPDATE SET
-          after_created_at = excluded.after_created_at,
-          after_message_id = excluded.after_message_id
-      `;
+      changed = (yield* applyRows(threadId, ready.slice(start), replies, new Map())) || changed;
       return changed;
-    }, sql.withTransaction);
+    });
 
     // Answers given on AskUserQuestion cards. A card is read once, in (updated_at, turn_item_id) order,
     // so a question reopened by hand stays open. Its own watermark: it runs whether or not new messages
@@ -605,7 +665,7 @@ export const layer = Layer.effect(
         .withLock(
           threadId,
           Effect.all([
-            syncUnlocked(threadId),
+            syncMessages(threadId),
             // After the messages, so a card never closes a question before its reply is read. Each in its
             // own transaction: a failure here must not hide decisions already committed.
             syncCards(threadId).pipe(
@@ -724,13 +784,17 @@ export const layer = Layer.effect(
     const subscribe = (threadId: ThreadId) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          // Backfills replies written while another build ran, then subscribes before reading.
+          // Subscribes before reading, then backfills replies written while another build ran, in the
+          // background: the backlog's messages are each judged, which can take seconds, and the panel shows
+          // the current rows meanwhile. What the backfill changes publishes as usual. It runs in the
+          // service's scope, so a client leaving does not cut the backlog short.
+          const subscription = yield* PubSub.subscribe(changes);
           yield* sync(threadId).pipe(
             Effect.catchCause((cause) =>
               Effect.logWarning("Failed to sync thread decisions", { threadId, cause }),
             ),
+            Effect.forkIn(scope),
           );
-          const subscription = yield* PubSub.subscribe(changes);
           return Stream.concat(
             Stream.fromEffect(snapshot(threadId)),
             Stream.fromSubscription(subscription).pipe(
@@ -832,6 +896,8 @@ export const layer = Layer.effect(
   }),
 );
 
+const LISTENER_CONCURRENCY = 4;
+
 /** Keeps decisions current as replies finish and the user answers, whether or not a client watches. */
 export const layerListener = Layer.effectDiscard(
   Effect.gen(function* () {
@@ -859,16 +925,22 @@ export const layerListener = Layer.effectDiscard(
           ),
         ),
     ).pipe(
-      Stream.runForEach((stored) =>
-        decisions.sync(stored.event.threadId).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Failed to sync thread decisions", {
-              threadId: stored.event.threadId,
-              cause,
-            }),
+      // A few at once: a sync may wait seconds on the decision judge, and must not hold up other threads.
+      // The per-thread lock keeps one thread's syncs in order; a sync after a slow one finds little left.
+      // Ceiling: 4 threads judged at once; a fifth waits for a slot.
+      Stream.mapEffect(
+        (stored) =>
+          decisions.sync(stored.event.threadId).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to sync thread decisions", {
+                threadId: stored.event.threadId,
+                cause,
+              }),
+            ),
           ),
-        ),
+        { concurrency: LISTENER_CONCURRENCY, unordered: true },
       ),
+      Stream.runDrain,
       Effect.catchCause((cause) =>
         Effect.logError("Thread decisions listener stopped; decisions sync only on subscribe", {
           cause,
