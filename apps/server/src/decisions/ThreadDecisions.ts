@@ -227,7 +227,9 @@ export const layer = Layer.effect(
         ) {
           const read = readReplyDecisions(row.text);
           for (const question of read.questions) {
-            // An unshaped line about a label ("Q4 remains open") may reopen it, never reword it.
+            // Only a shaped re-ask ("My pick is") reopens or rewords a known label. An unshaped line about it
+            // ("Q4 remains open", or an agent echoing "Q7: nothing to change." after the user answered) changes
+            // nothing: echoes reopened answered questions (2026-11-17). A label never seen before is still recorded.
             const shaped = splitQuestion(question.text).pick !== "";
             const asked = yield* sql`
               INSERT INTO fork_thread_decision_questions (
@@ -242,7 +244,7 @@ export const layer = Layer.effect(
                 answer_text = NULL,
                 answer_message_id = NULL,
                 resolved_at = NULL
-              WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`state <> 'open'`}
+              WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`0`}
               RETURNING label
             `;
             changed ||= asked.length > 0;
