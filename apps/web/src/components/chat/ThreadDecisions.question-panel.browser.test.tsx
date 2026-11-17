@@ -167,3 +167,11 @@ it("gives way to the agent's own pending question", async () => {
   await expect.element(accept("Q4", "yes")).not.toBeInTheDocument();
   expect(document.querySelector("[data-thread-decision]")).toBeNull();
 });
+
+it("opens the right panel's Tracker from the panel header", async () => {
+  await using _app = await openThread(threadWithHistory("thread-decision-tracker", 1));
+  await page.getByRole("button", { name: "Open Tracker", exact: true }).click();
+  await expect.element(page.getByLabelText("Tracker view")).toBeVisible();
+  // The panel's tab names the surface.
+  await expect.element(page.getByRole("button", { name: "Tracker", exact: true })).toBeVisible();
+});
