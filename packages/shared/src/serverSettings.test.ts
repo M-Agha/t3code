@@ -23,6 +23,7 @@ import {
   resolveModelPreferences,
   isModelSelectionProviderEnabled,
   parsePersistedServerObservabilitySettings,
+  resolveDecisionJudgeModelSelection,
   resolveReviewGuideModelSelection,
   resolveSourceControlWriterModelSelection,
   resolveSpeechPostProcessingModelSelection,
@@ -30,6 +31,7 @@ import {
 
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
+const encodeServerSettings = Schema.encodeSync(ServerSettings);
 
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
@@ -1093,5 +1095,65 @@ describe("resolveSpeechPostProcessingModelSelection", () => {
       applyServerSettingsPatch(pinned, { speechPostProcessingModelSelection: null })
         .speechPostProcessingModelSelection,
     ).toBeNull();
+  });
+});
+
+describe("resolveDecisionJudgeModelSelection", () => {
+  it("decodes a missing or null judge model as null and follows the text generation model", () => {
+    const textGeneration = createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-luna");
+    expect(decodeServerSettings({}).decisionJudgeModelSelection).toBeNull();
+    expect(DEFAULT_SERVER_SETTINGS.decisionJudgeModelSelection).toBeNull();
+    const base = decodeServerSettings({
+      textGenerationModelSelection: textGeneration,
+      decisionJudgeModelSelection: null,
+    });
+    expect(resolveDecisionJudgeModelSelection(base)).toEqual(textGeneration);
+    expect(
+      decodeServerSettingsPatch({ decisionJudgeModelSelection: null }).decisionJudgeModelSelection,
+    ).toBeNull();
+  });
+
+  it("pins the judge to its own usable model, with its effort, until cleared", () => {
+    const textGeneration = createModelSelection(ProviderInstanceId.make("codex"), "gpt-6-luna");
+    const judge = createModelSelection(ProviderInstanceId.make("claudeAgent"), "claude-sonnet", [
+      { id: "effort", value: "low" },
+    ]);
+    const base = { ...DEFAULT_SERVER_SETTINGS, textGenerationModelSelection: textGeneration };
+    const pinned = applyServerSettingsPatch(base, { decisionJudgeModelSelection: judge });
+    expect(resolveDecisionJudgeModelSelection(pinned)).toEqual(judge);
+    expect(decodeServerSettings(encodeServerSettings(pinned)).decisionJudgeModelSelection).toEqual(
+      judge,
+    );
+    // A judge on a disabled provider, or one that cannot generate text, reads with the text model.
+    expect(
+      resolveDecisionJudgeModelSelection({
+        ...pinned,
+        providerInstances: {
+          [ProviderInstanceId.make("claudeAgent")]: {
+            driver: ProviderDriverKind.make("claudeAgent"),
+            enabled: false,
+            config: {},
+          },
+        },
+      }),
+    ).toBe(textGeneration);
+    expect(
+      resolveDecisionJudgeModelSelection(pinned, [
+        {
+          instanceId: "claudeAgent",
+          enabled: true,
+          installed: true,
+          supportsTextGeneration: false,
+        },
+      ] as never),
+    ).toBe(textGeneration);
+    // A new selection replaces the old one whole: no effort left over from the last model.
+    expect(
+      applyServerSettingsPatch(pinned, { decisionJudgeModelSelection: textGeneration })
+        .decisionJudgeModelSelection,
+    ).toEqual(textGeneration);
+    const cleared = applyServerSettingsPatch(pinned, { decisionJudgeModelSelection: null });
+    expect(cleared.decisionJudgeModelSelection).toBeNull();
+    expect(resolveDecisionJudgeModelSelection(cleared)).toBe(textGeneration);
   });
 });
