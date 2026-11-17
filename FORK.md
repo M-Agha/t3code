@@ -192,11 +192,19 @@ when an assistant message finishes, so those questions are not held until the ne
      cheap Claude Haiku thread (Supervised, scratch project) also: `/park` mid-run and `t3_park`.
 7. **Build:** `.env` must exist (`cp .env.example .env`, once per checkout; gitignored). Without it the
    app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
-   are upstream's public production identifiers, the same ones official builds embed. Move any old
-   `release/T3-Code-*-arm64.*` aside, then
-   `env -u GITHUB_REPOSITORY -u T3CODE_DESKTOP_UPDATE_REPOSITORY vp run dist:desktop:dmg:arm64`.
-   No update feed may be set; the build must not contain `app-update.yml`. `scripts/fork/install.sh`
-   refuses a build without T3 Connect. Push with `git push --force-with-lease origin fork/main` only
+   are upstream's public production identifiers, the same ones official builds embed. Then run
+   `scripts/fork/build.sh`: it moves the old build to the trash, clears any update feed, and stamps
+   the version from the upstream tag below HEAD (`v0.1.11-nightly.20261117.4825` becomes
+   `0.1.11-fork.20261117.4825`). Without the stamp the app reported package.json's older version and
+   linked clients called it out of date; a `-nightly.` version would rebrand it "T3 Code (Nightly)".
+   The build must not contain `app-update.yml`. `scripts/fork/install.sh` refuses a build without
+   T3 Connect or without a `-fork.` version. Known limits of the `-fork.` version, both unused today
+   (Fable 5.2 review, 2026-11-17): an SSH environment started from the fork asks for a
+   `v0.1.11-fork.…` server release that does not exist (`DesktopSshEnvironment.ts` passes the app
+   version as `archiveVersion`); and a linked server whose core version is below the fork's is offered
+   an update to `t3@<fork version>`, which fails. If either is needed, map `-fork.` back to the base tag's
+   `-nightly.` at those seams. A killed build can leave the stamped version in tracked `package.json`
+   files (the build rewrites and restores them); `git checkout` them. Push with `git push --force-with-lease origin fork/main` only
    after every check passes.
 
 ## Installing
