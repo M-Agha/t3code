@@ -370,6 +370,13 @@ export interface ChatComposerHandle {
   };
   validateProviderInput: (providerInput: string) => boolean;
   setMultipleModelSelections: (selections: ReadonlyArray<ModelSelection>) => void;
+  /**
+   * Sends the draft as the send button does (queue or steer while a run is busy, as set): "sent" once
+   * it reached the send path, "refused" when it refused and said why, "blocked" when it refused
+   * without a word (dictating, sending disabled, no right to operate). While dictating it refuses
+   * rather than sending once dictation ends.
+   */
+  submit: () => "sent" | "refused" | "blocked";
 }
 
 export interface ChatComposerProps {
@@ -3536,6 +3543,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setProviderInputSubmissionError(validationMessage);
         return validationMessage === null;
       },
+      submit: () => {
+        if (
+          voiceInputActive ||
+          submissionBlocked ||
+          !readEnvironmentScope(environmentId, AuthOrchestrationOperateScope)
+        ) {
+          return "blocked";
+        }
+        return submitComposerStable() ? "sent" : "refused";
+      },
     }),
     [
       activeThread,
@@ -3588,6 +3605,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       selectedProvider,
       selectedProviderModels,
       compactThreadContextStable,
+      voiceInputActive,
+      submissionBlocked,
+      submitComposerStable,
     ],
   );
 

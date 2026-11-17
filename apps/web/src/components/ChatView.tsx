@@ -359,6 +359,7 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   type ThreadDecisionActions,
   threadDecisionsBannerItem,
+  useInsertAndSend,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
@@ -2100,12 +2101,22 @@ export default function ChatView(props: ChatViewProps) {
     scheduleComposerFocusStable();
     return true;
   };
+  // The send in flight, kept so a decision sent through the composer can tell whether it went.
+  const composerSendingRef = useRef<Promise<void> | null>(null);
+  const insertDecisionTextStable = useStableCallback(insertDecisionText);
   const parkFromComposerStable = useStableCallback(parkFromComposer);
   const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
   const decisionActions: ThreadDecisionActions = {
     canOperate: canOperateThread && isServerThread,
     send: useStableCallback(sendDecisionMessage),
-    insert: useStableCallback(insertDecisionText),
+    insert: insertDecisionTextStable,
+    insertAndSend: useInsertAndSend({
+      composerRef,
+      promptRef,
+      sendingRef: composerSendingRef,
+      draftTarget: composerDraftTarget,
+      insert: insertDecisionTextStable,
+    }),
     inDraft: useComposerDraftStore(
       useShallow((store) =>
         questionsClosedByDraft(
@@ -3299,7 +3310,11 @@ export default function ChatView(props: ChatViewProps) {
     });
   };
   const onWorktreeSetupWorkLocallyStable = useStableCallback(onWorktreeSetupWorkLocally);
-  const onComposerSendStable = useStableCallback(onSend);
+  const onComposerSendStable = useStableCallback((...args: Parameters<typeof onSend>) => {
+    const sending = onSend(...args);
+    composerSendingRef.current = sending;
+    return sending;
+  });
   const sendPreviewAnnotation = (
     annotation: PreviewAnnotationPayload,
     image: ComposerImageAttachment | null,
