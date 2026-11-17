@@ -4,21 +4,18 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
-const SOURCE = NodePath.join(
-  NodeOS.homedir(),
-  "repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts",
-);
-const COPY = NodePath.join(import.meta.dirname, "reply.ts");
+const SOURCE_DIR = NodePath.join(NodeOS.homedir(), "repos/dotfiles/.claude/mods/session-kit/hooks");
 const MARKER = "// ---- verbatim copy below ----\n";
 
-describe("session-kit reply.ts copy", () => {
-  it.skipIf(!NodeFS.existsSync(SOURCE))(
+describe.each(["reply.ts", "judge.ts"])("session-kit %s copy", (name) => {
+  const source = NodePath.join(SOURCE_DIR, name);
+  it.skipIf(!NodeFS.existsSync(source))(
     "matches the dotfiles source byte for byte (skipped where ~/repos/dotfiles is absent)",
     () => {
-      const copy = NodeFS.readFileSync(COPY, "utf8");
+      const copy = NodeFS.readFileSync(NodePath.join(import.meta.dirname, name), "utf8");
       const at = copy.indexOf(MARKER);
       expect(at).toBeGreaterThan(-1);
-      expect(copy.slice(at + MARKER.length)).toBe(NodeFS.readFileSync(SOURCE, "utf8"));
+      expect(copy.slice(at + MARKER.length)).toBe(NodeFS.readFileSync(source, "utf8"));
     },
   );
 });

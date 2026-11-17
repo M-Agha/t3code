@@ -6,22 +6,66 @@ import {
   ProviderInstanceId,
   RunId,
   THREAD_ARTIFACTS_LIMIT,
+  TextGenerationError,
+  type ThreadDecisionsError,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   ThreadId,
 } from "@t3tools/contracts";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import * as DecisionJudge from "./DecisionJudge.ts";
 import * as ThreadDecisions from "./ThreadDecisions.ts";
 
 const threadId = ThreadId.make("thread-decisions");
+
+// The decision judge over a fake text generator: `answer` stands in for the model, given the prompt.
+const judgeLayer = (answer: (prompt: string) => Effect.Effect<string, TextGenerationError>) =>
+  DecisionJudge.layer.pipe(
+    Layer.provide(
+      Layer.mock(TextGeneration.TextGeneration)({
+        generateTranscriptionPostProcessing: (input) =>
+          answer(input.prompt).pipe(Effect.map((transcription) => ({ transcription }))),
+      }),
+    ),
+    Layer.provide(
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+    ),
+    Layer.provide(ServerSettings.layerTest()),
+    Layer.provide(NodeServices.layer),
+  );
+
+// A model that cannot be reached: every message is closed by the rules, as before the judge.
+const offline = () =>
+  Effect.fail(
+    new TextGenerationError({
+      operation: "generateTranscriptionPostProcessing",
+      detail: "offline",
+    }),
+  );
+
+const decisionsWith = (answer: (prompt: string) => Effect.Effect<string, TextGenerationError>) =>
+  ThreadDecisions.layer.pipe(
+    Layer.provide(judgeLayer(answer)),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+  );
+
+const withDecisions = decisionsWith(offline);
 
 const REPLY = [
   "Migrated.",
@@ -187,9 +231,7 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
       [decided.length, decided[0]?.text],
       [THREAD_DECIDED_WITHOUT_ASKING_LIMIT, "Choice 0."],
     );
-  }).pipe(
-    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
-  ),
+  }).pipe(Effect.provide(withDecisions)),
 );
 
 // Shapes copied from a Claude thread's projected Artifact tool calls; ids and paths shortened.
@@ -447,9 +489,7 @@ it.effect("collects a thread's artifacts from Artifact tool calls and reply link
       SELECT after_item_id AS "itemId" FROM fork_thread_artifact_sync
     `;
     assert.deepEqual(watermark, { itemId: "bash" });
-  }).pipe(
-    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
-  ),
+  }).pipe(Effect.provide(withDecisions)),
 );
 
 it.effect("publishes a decisions change when reading artifacts fails", () =>
@@ -462,9 +502,7 @@ it.effect("publishes a decisions change when reading artifacts fails", () =>
     yield* sql`DROP TABLE fork_thread_artifact_sync`;
     assert.isTrue(yield* decisions.sync(threadId));
     assert.deepEqual(Object.keys(yield* states()), ["Q4", "Q5"]);
-  }).pipe(
-    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
-  ),
+  }).pipe(Effect.provide(withDecisions)),
 );
 
 it.effect("parks, edits and resolves a thread's items", () =>
@@ -566,9 +604,7 @@ it.effect("parks, edits and resolves a thread's items", () =>
       }),
     );
     assert.strictEqual((yield* parked()).open, 2);
-  }).pipe(
-    Effect.provide(ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory))),
-  ),
+  }).pipe(Effect.provide(withDecisions)),
 );
 
 it.effect("sweeps deleted threads' rows when it starts, keeping parked items of missing ones", () =>
@@ -601,7 +637,10 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
         ) VALUES (${id}, '', '', '', '')
       `;
     }
-    yield* Effect.provide(Effect.void, ThreadDecisions.layer);
+    yield* Effect.provide(
+      Effect.void,
+      ThreadDecisions.layer.pipe(Layer.provide(judgeLayer(offline))),
+    );
     const questions = yield* sql<{ readonly threadId: string }>`
       SELECT thread_id AS "threadId" FROM fork_thread_decision_questions
     `;
@@ -618,58 +657,77 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 
-it.effect("syncs a thread when a message finishes or its run ends", () => {
-  const at = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
-  const stored = (event: OrchestrationV2StoredEvent["event"]): OrchestrationV2StoredEvent => ({
-    sequence: 1,
-    commandId: null,
-    event,
+const eventAt = DateTime.makeUnsafe("2026-01-02T00:00:00.000Z");
+const stored = (event: OrchestrationV2StoredEvent["event"]): OrchestrationV2StoredEvent => ({
+  sequence: 1,
+  commandId: null,
+  event,
+});
+const messageEvent = (id: string, role: "user" | "assistant", streaming: boolean) =>
+  stored({
+    id: EventId.make(id),
+    type: "message.updated",
+    threadId: ThreadId.make(id),
+    occurredAt: eventAt,
+    payload: {
+      id: MessageId.make(id),
+      threadId: ThreadId.make(id),
+      runId: null,
+      nodeId: null,
+      role,
+      text: "Q1: yes",
+      attachments: [],
+      streaming,
+      createdBy: "user",
+      creationSource: "web",
+      createdAt: eventAt,
+      updatedAt: eventAt,
+    },
   });
-  const messageEvent = (id: string, role: "user" | "assistant", streaming: boolean) =>
-    stored({
-      id: EventId.make(id),
-      type: "message.updated",
+const runEvent = (id: string, status: OrchestrationV2Run["status"]) =>
+  stored({
+    id: EventId.make(id),
+    type: "run.updated",
+    threadId: ThreadId.make(id),
+    occurredAt: eventAt,
+    payload: {
+      id: RunId.make(id),
       threadId: ThreadId.make(id),
-      occurredAt: at,
-      payload: {
-        id: MessageId.make(id),
-        threadId: ThreadId.make(id),
-        runId: null,
-        nodeId: null,
-        role,
-        text: "Q1: yes",
-        attachments: [],
-        streaming,
-        createdBy: "user",
-        creationSource: "web",
-        createdAt: at,
-        updatedAt: at,
-      },
-    });
-  const runEvent = (id: string, status: OrchestrationV2Run["status"]) =>
-    stored({
-      id: EventId.make(id),
-      type: "run.updated",
-      threadId: ThreadId.make(id),
-      occurredAt: at,
-      payload: {
-        id: RunId.make(id),
-        threadId: ThreadId.make(id),
-        ordinal: 1,
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" },
-        providerThreadId: null,
-        userMessageId: MessageId.make(id),
-        rootNodeId: null,
-        activeAttemptId: null,
-        status,
-        requestedAt: at,
-        startedAt: at,
-        completedAt: null,
-        checkpointId: null,
-        contextHandoffId: null,
-      },
-    });
+      ordinal: 1,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" },
+      providerThreadId: null,
+      userMessageId: MessageId.make(id),
+      rootNodeId: null,
+      activeAttemptId: null,
+      status,
+      requestedAt: eventAt,
+      startedAt: eventAt,
+      completedAt: null,
+      checkpointId: null,
+      contextHandoffId: null,
+    },
+  });
+
+// The listener over these events, with `sync` standing in for the service's.
+const listen = (
+  events: ReadonlyArray<OrchestrationV2StoredEvent>,
+  sync: (id: ThreadId) => Effect.Effect<boolean>,
+) =>
+  Layer.build(
+    ThreadDecisions.layerListener.pipe(
+      Layer.provide(Layer.mock(ThreadDecisions.ThreadDecisions)({ sync })),
+      Layer.provide(
+        Layer.mock(EventSink.EventSinkV2)({
+          latestSequence: () => Effect.succeed(0),
+          stream: (input) =>
+            Stream.fromIterable(events.filter((e) => e.event.type === input?.eventType)),
+        }),
+      ),
+    ),
+  );
+
+it.effect("syncs a thread when a message finishes or its run ends", () => {
   const events = [
     messageEvent("user-streaming", "user", true),
     messageEvent("assistant-streaming", "assistant", true),
@@ -682,22 +740,7 @@ it.effect("syncs a thread when a message finishes or its run ends", () => {
 
   return Effect.gen(function* () {
     const synced = yield* Queue.unbounded<ThreadId>();
-    yield* Layer.build(
-      ThreadDecisions.layerListener.pipe(
-        Layer.provide(
-          Layer.mock(ThreadDecisions.ThreadDecisions)({
-            sync: (id) => Queue.offer(synced, id).pipe(Effect.as(true)),
-          }),
-        ),
-        Layer.provide(
-          Layer.mock(EventSink.EventSinkV2)({
-            latestSequence: () => Effect.succeed(0),
-            stream: (input) =>
-              Stream.fromIterable(events.filter((e) => e.event.type === input?.eventType)),
-          }),
-        ),
-      ),
-    );
+    yield* listen(events, (id) => Queue.offer(synced, id).pipe(Effect.as(true)));
     // Each stream is read in order, so its last syncing event comes after the ones it skips.
     const seen: string[] = [];
     while (!seen.includes("user-done") || !seen.includes("run-completed")) {
@@ -708,6 +751,35 @@ it.effect("syncs a thread when a message finishes or its run ends", () => {
     assert.sameMembers(seen, ["assistant-done", "user-done", "run-waiting", "run-completed"]);
   }).pipe(Effect.scoped);
 });
+
+// A judged sync can take seconds: other threads sync beside it, at most four at once.
+it.effect("syncs at most four threads at once", () =>
+  Effect.gen(function* () {
+    const started = yield* Queue.unbounded<ThreadId>();
+    const gate = yield* Deferred.make<void>();
+    let running = 0;
+    let most = 0;
+    const events = [1, 2, 3, 4, 5, 6].map((n) => runEvent(`thread-${n}`, "completed"));
+    yield* listen(events, (id) =>
+      Effect.sync(() => {
+        running += 1;
+        most = Math.max(most, running);
+      }).pipe(
+        Effect.andThen(Queue.offer(started, id)),
+        Effect.andThen(Deferred.await(gate)),
+        Effect.ensuring(Effect.sync(() => (running -= 1))),
+        Effect.as(true),
+      ),
+    );
+    for (const _ of [1, 2, 3, 4]) yield* Queue.take(started);
+    // The fifth waits for a slot, however long the four take: let every other fiber run first.
+    for (let turn = 0; turn < 100; turn += 1) yield* Effect.yieldNow;
+    assert.strictEqual(yield* Queue.size(started), 0);
+    yield* Deferred.succeed(gate, undefined);
+    for (const _ of [5, 6]) yield* Queue.take(started);
+    assert.strictEqual(most, 4);
+  }).pipe(Effect.scoped),
+);
 
 // An AskUserQuestion card as the orchestrator projects it once answered; `answers` null is a card
 // resolved without answers. Ids default to the question text, as Claude's cards use.
@@ -762,8 +834,6 @@ const answers = Effect.fn("answers")(function* () {
     snapshot.questions.map((q) => [q.label, [q.state, q.answerText, q.answerMessageId]]),
   );
 });
-
-const withDecisions = ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 
 it.effect("closes questions answered on AskUserQuestion cards, each card once", () =>
   Effect.gen(function* () {
@@ -936,4 +1006,261 @@ it.effect("leaves a question its message-mode answer already closed to that mess
       "async-answer:request-c1",
     ]);
   }).pipe(Effect.provide(withDecisions)),
+);
+
+// What the judge was asked: the message, and the open questions' labels, read back from its prompt.
+const said = (prompt: string) => /Person's message:\n<<<\n([\s\S]*)\n>>>/.exec(prompt)?.[1];
+const openIn = (prompt: string) =>
+  [...(prompt.split("Open questions:\n")[1]?.split("\n\n")[0] ?? "").matchAll(/^(Q\d+)[,:]/gm)].map(
+    (match) => match[1],
+  );
+// The decision judge's log lines, as [level, first message part], while `effect` ran.
+const judgeLogs = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.gen(function* () {
+    const logs: Array<readonly [string, string]> = [];
+    const logger = Logger.make(({ logLevel, message }) => {
+      const [first] = Array.isArray(message) ? message : [message];
+      if (String(first).startsWith("Decision judge")) logs.push([logLevel, String(first)]);
+    });
+    const result = yield* effect.pipe(
+      Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+    );
+    return [result, logs] as const;
+  });
+
+const verdict = (answered: ReadonlyArray<string>, dropped: ReadonlyArray<string> = []) =>
+  JSON.stringify({ answered, dropped });
+
+it.effect("closes what the judge reads in a bare yes right after the question block", () => {
+  const prompts: string[] = [];
+  return Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "yes");
+    const [changed, logs] = yield* judgeLogs(decisions.sync(threadId));
+    assert.isTrue(changed);
+    assert.deepEqual(yield* answers(), {
+      Q4: ["answered", "yes", "u1"],
+      Q5: ["answered", "yes", "u1"],
+    });
+    assert.deepEqual(logs, [["Info", "Decision judge read a message"]]);
+    // The judge read the reply the message follows: a bare yes assents to its block only.
+    assert.deepEqual(prompts.map(said), ["yes"]);
+    assert.include(prompts[0], "The assistant's last reply:\n<<<\nMigrated.");
+    // Text generators enforce no schema, so the prompt spells out the envelope their reply is read as.
+    assert.isTrue(
+      prompts[0]?.endsWith(
+        '\n\nReply with exactly {"transcription":"<that JSON object, as a string>"}, nothing else.',
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      decisionsWith((prompt) =>
+        Effect.sync(() => {
+          prompts.push(prompt);
+          return verdict(["Q4", "Q5"]);
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("closes the label a mixed message names and the question its words answer", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message(
+      "a1",
+      "r1",
+      "assistant",
+      [
+        "Q4, follow continuation: Resume? My pick is yes: it stopped cleanly.",
+        "Q5, merge branch: Merge it? My pick is yes: CI is green.",
+        "Q6, table name: Rename it? My pick is no: nothing reads it.",
+      ].join("\n"),
+    );
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "Q4: yes, and merge it");
+    assert.isTrue(yield* decisions.sync(threadId));
+    // The rules read only the label: Q4 alone. The judge's reading decides.
+    assert.deepEqual(yield* states(), { Q4: "answered", Q5: "answered", Q6: "open" });
+  }).pipe(Effect.provide(decisionsWith(() => Effect.succeed(verdict(["Q4", "Q5"]))))),
+);
+
+// Two messages after REPLY, synced by `drive`: "yes" closes nothing by the rules, "Q4: yes" closes Q4.
+const fallsBack = <E, R>(
+  drive: (
+    sync: Effect.Effect<boolean, ThreadDecisionsError>,
+  ) => Effect.Effect<boolean, E | ThreadDecisionsError, R>,
+) =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "yes");
+    yield* message("u2", "r2", "user", "Q4: yes");
+    const [changed, logs] = yield* judgeLogs(drive(decisions.sync(threadId)));
+    assert.isTrue(changed);
+    assert.deepEqual(yield* answers(), {
+      Q4: ["answered", "Q4: yes", "u2"],
+      Q5: ["open", null, null],
+    });
+    // A fallback is a warning: the rules read in the model's place.
+    const fallback = ["Warn", "Decision judge gave no usable verdict; the rules decide"] as const;
+    assert.deepEqual(logs, [fallback, fallback]);
+  });
+
+it.effect.each([
+  { failure: "fails", answer: offline },
+  { failure: "answers in prose", answer: () => Effect.succeed("Q4 is answered.") },
+  {
+    failure: "answers JSON of another shape",
+    answer: () => Effect.succeed('{"closed":["Q4","Q5"]}'),
+  },
+])("falls back to the rules when the judge $failure", ({ answer }) =>
+  fallsBack((sync) => sync).pipe(Effect.provide(decisionsWith(answer))),
+);
+
+it.effect("falls back to the rules when the judge does not answer within 20 s", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<void>();
+    yield* fallsBack((sync) =>
+      Effect.gen(function* () {
+        const syncing = yield* Effect.forkChild(sync);
+        // Each message waits on the judge in turn; past 20 s the rules decide.
+        yield* Queue.take(asked);
+        yield* TestClock.adjust("20 seconds");
+        yield* Queue.take(asked);
+        yield* TestClock.adjust("20 seconds");
+        return yield* Fiber.join(syncing);
+      }),
+    ).pipe(
+      Effect.provide(
+        decisionsWith(() => Queue.offer(asked, undefined).pipe(Effect.andThen(Effect.never))),
+      ),
+    );
+  }),
+);
+
+it.effect(
+  "keeps only what the judge may close: a pick taken as a whole spares older questions",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", asks("Q1"));
+      yield* run("r2", 2, "completed");
+      yield* message("a2", "r2", "assistant", asks("Q4", "Q5"));
+      yield* run("r3", 3, "completed");
+      yield* message("u1", "r3", "user", "go with your picks");
+      assert.isTrue(yield* decisions.sync(threadId));
+      // scopeVerdict drops Q1: asked earlier, and neither the message nor the last reply names it.
+      assert.deepEqual(yield* states(), { Q1: "open", Q4: "answered", Q5: "answered" });
+    }).pipe(Effect.provide(decisionsWith(() => Effect.succeed(verdict(["Q1", "Q4", "Q5"]))))),
+);
+
+it.effect("asks the judge nothing for card answers, nor while no question is open", () => {
+  const prompts: string[] = [];
+  return Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("u1", "r1", "user", "Migrate it.");
+    yield* message("a1", "r1", "assistant", asks("Q8"));
+    assert.isTrue(yield* decisions.sync(threadId));
+    yield* run("r2", 2, "completed");
+    yield* card("c1", "r2", [{ question: "Q8: Ship?" }], { "Q8: Ship?": "Ship" });
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* answers(), { Q8: ["answered", "Q8: Ship", null] });
+    assert.deepEqual(prompts, []);
+  }).pipe(
+    Effect.provide(
+      decisionsWith((prompt) =>
+        Effect.sync(() => {
+          prompts.push(prompt);
+          return verdict(["Q8"]);
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("judges each message against the questions open when it was sent", () => {
+  const prompts: string[] = [];
+  return Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q4", "Q5"));
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "yes to the first");
+    yield* message("a2", "r2", "assistant", asks("Q6"));
+    yield* run("r3", 3, "completed");
+    yield* message("u2", "r3", "user", "Q5 and Q6: yes");
+    // One sync reads all four: u2's judge sees Q4 closed by u1 and Q6 asked after it.
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(prompts.map(openIn), [
+      ["Q4", "Q5"],
+      ["Q5", "Q6"],
+    ]);
+    assert.deepEqual(yield* answers(), {
+      Q4: ["answered", "yes to the first", "u1"],
+      Q5: ["answered", "Q5 and Q6: yes", "u2"],
+      Q6: ["answered", "Q5 and Q6: yes", "u2"],
+    });
+  }).pipe(
+    Effect.provide(
+      decisionsWith((prompt) =>
+        Effect.sync(() => {
+          prompts.push(prompt);
+          return said(prompt) === "yes to the first" ? verdict(["Q4"]) : verdict(["Q5", "Q6"]);
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("shows a subscriber the current rows while its backlog is judged", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<void>();
+    const answer = yield* Deferred.make<string>();
+    yield* Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      assert.isTrue(yield* decisions.sync(threadId));
+      // Sent while no client watched: the subscriber's backfill judges it.
+      yield* run("r2", 2, "completed");
+      yield* message("u1", "r2", "user", "yes");
+      const snapshots = yield* Queue.unbounded<Record<string, string>>();
+      yield* decisions.subscribe(threadId).pipe(
+        Stream.runForEach((snapshot) =>
+          Queue.offer(
+            snapshots,
+            Object.fromEntries(snapshot.questions.map((q) => [q.label, q.state])),
+          ),
+        ),
+        Effect.forkScoped,
+      );
+      // The judge is still thinking, and the panel already has the rows.
+      yield* Queue.take(asked);
+      assert.deepEqual(yield* Queue.take(snapshots), { Q4: "open", Q5: "open" });
+      yield* Deferred.succeed(answer, verdict(["Q4", "Q5"]));
+      assert.deepEqual(yield* Queue.take(snapshots), { Q4: "answered", Q5: "answered" });
+    }).pipe(
+      Effect.provide(
+        decisionsWith(() =>
+          Queue.offer(asked, undefined).pipe(Effect.andThen(Deferred.await(answer))),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped),
 );
