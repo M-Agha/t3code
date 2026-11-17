@@ -2,7 +2,6 @@ import { createMemoryHistory } from "@tanstack/react-router";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   MessageId,
-  ThreadId,
   type ThreadDecisionQuestion,
   type ThreadDecisionsSnapshot,
   WS_METHODS,
@@ -11,7 +10,7 @@ import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
 import * as Stream from "effect/Stream";
 import { expect, it, vi } from "vite-plus/test";
-import { page, userEvent } from "vite-plus/test/browser";
+import { page } from "vite-plus/test/browser";
 
 import { AppRoot } from "~/AppRoot";
 // The route loads ChatView lazily; importing it here keeps its first transform out of the timeout.
@@ -25,16 +24,12 @@ import {
   dispatchedCommands,
   emitThreadEvent,
   installFakeEnvironment,
-  rejectPendingCommand,
   threadWithHistory,
   threadWithQuestion,
   type FakeDriver,
   type FakeThread,
 } from "../../../test/fakeEnvironment";
 import { render } from "../../../test/render";
-import { toastManager } from "../ui/toast";
-import type { ChatComposerHandle } from "./ChatComposer";
-import { useInsertAndSend } from "./ThreadDecisions";
 
 // The socket is the only fake layer; see test/appScenarios.renders.tsx.
 vi.mock(
@@ -120,10 +115,7 @@ const accept = (label: string, pick: string) =>
   option(`Accept ${label}: ${pick} (adds to your message)`);
 const answer = (label: string) => option(`Answer ${label} in the composer`);
 const drop = (label: string) => option(`Drop ${label} as not a decision (adds to your message)`);
-const acceptAndSend = (label: string) => option(`Accept ${label} and send`);
 const yesToAll = () => option("Yes to all (adds to your message)");
-const yesToAllAndSend = () => option("Yes to all and send");
-const editor = () => page.getByTestId("composer-editor");
 const sentTexts = () =>
   dispatchedCommands().flatMap((command) =>
     command.type === "message.dispatch" ? [command.text] : [],
@@ -193,176 +185,25 @@ it("opens the right panel's Tracker from the panel header", async () => {
   await expect.element(page.getByRole("button", { name: "Tracker", exact: true })).toBeVisible();
 });
 
-it("Accept and send sends the draft with the Accept line; Accept alone only adds it", async () => {
-  await using app = await openThread(threadWithHistory("thread-decision-send", 1), {
-    acceptCommands: true,
-  });
-  await expect.element(accept("Q4", "yes")).toBeVisible();
-  app.setDraft("Also rename it");
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-
-  await acceptAndSend("Q4").click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Also rename it\nQ4: yes"]));
-  await vi.waitFor(() => expect(app.draft()).toBe(""));
-
-  await accept("Q4", "yes").click();
-  await vi.waitFor(() => expect(app.draft()).toBe("Q4: yes"));
-  expect(sentTexts()).toHaveLength(1);
-});
-
-it("Yes to all adds one line naming the picks the draft leaves open, once", async () => {
+it("Yes to all adds one Accept line per pick the draft leaves open, once", async () => {
   await using app = await openThread(threadWithHistory("thread-decision-yes", 1));
   await expect.element(yesToAll()).toBeVisible();
   app.setDraft("Q5: only on main");
 
   await yesToAll().click();
-  await vi.waitFor(() => expect(app.draft()).toBe("Q5: only on main\nYes to your picks: Q4, Q6"));
-  // What the line names is in the draft now, so there is nothing left to add.
+  await vi.waitFor(() => expect(app.draft()).toBe("Q5: only on main\nQ4: yes\nQ6: later"));
+  // What the lines name is in the draft now, so there is nothing left to add.
   await expect.element(yesToAll()).toBeDisabled();
   await expect.element(accept("Q4", "yes")).toHaveAttribute("aria-pressed", "true");
-  expect(app.draft().split("Yes to your picks")).toHaveLength(2);
 });
 
-it("Yes to all and send sends the line with the draft", async () => {
-  await using app = await openThread(threadWithHistory("thread-decision-yes-send", 1), {
+it("nothing in the question panel sends: no send arrows", async () => {
+  await using app = await openThread(threadWithHistory("thread-decision-no-arrows", 1), {
     acceptCommands: true,
   });
-  await expect.element(yesToAllAndSend()).toBeEnabled();
-  await yesToAllAndSend().click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Yes to your picks: Q4, Q5, Q6"]));
-  await vi.waitFor(() => expect(app.draft()).toBe(""));
-});
-
-it("a send T3 refuses leaves the draft as it was, with T3's reason alone", async () => {
-  // The composer's own send is held unanswered, so T3 refuses the next one while it is in flight.
-  await using app = await openThread(threadWithHistory("thread-decision-refused", 1), {
-    acceptCommands: true,
-    holdCommand: (command) => command.type === "message.dispatch",
-  });
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-  await userEvent.click(page.getByTestId("composer-editor"));
-  await userEvent.keyboard("First{Enter}");
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["First"]));
-  app.setDraft("Keep this");
-
-  await yesToAllAndSend().click();
-  await expect.element(page.getByText("Still sending your previous message.")).toBeVisible();
-  await vi.waitFor(() => expect(app.draft()).toBe("Keep this"));
-  expect(page.getByText("Not sent", { exact: true }).elements()).toHaveLength(0);
-  expect(sentTexts()).toHaveLength(1);
-});
-
-// No fake environment makes the composer refuse without a word, so its handle is faked here.
-it.each([
-  ["blocked", false, true],
-  ["refused", false, false],
-  // A send that throws is T3's to report; the line still comes out, and nothing goes unhandled.
-  ["sent", true, false],
-] as const)(
-  "puts the draft back when the composer's send is %s (throws: %s), and says Not sent only if nothing else did",
-  async (outcome, throws, toasted) => {
-    // Recorded, not shown: a toast left on screen would leak into the next test.
-    const add = vi.spyOn(toastManager, "add").mockReturnValue("toast");
-    const promptRef = { current: "Keep this" };
-    const sendingRef: { current: Promise<void> | null } = { current: null };
-    const composer = {
-      submit: () => {
-        if (throws) sendingRef.current = Promise.reject(new Error("socket closed"));
-        return outcome;
-      },
-      resetCursorState: () => {},
-    } as Partial<ChatComposerHandle> as ChatComposerHandle;
-    const results: Array<Promise<boolean>> = [];
-    function Harness() {
-      const insertAndSend = useInsertAndSend({
-        composerRef: { current: composer },
-        promptRef,
-        sendingRef,
-        draftTarget: scopeThreadRef(ENVIRONMENT_ID, ThreadId.make("thread-decision-blocked")),
-        insert: (text) => {
-          promptRef.current = `${promptRef.current}\n${text}`;
-          return true;
-        },
-      });
-      return (
-        <button type="button" onClick={() => results.push(insertAndSend("Q4: yes"))}>
-          Accept and send
-        </button>
-      );
-    }
-    await using _app = await render(<Harness />, { router: false });
-    await page.getByRole("button", { name: "Accept and send" }).click();
-    await expect(results[0]).resolves.toBe(false);
-    expect(promptRef.current).toBe("Keep this");
-    expect(add.mock.calls.some(([toast]) => toast.title === "Not sent")).toBe(toasted);
-    add.mockRestore();
-  },
-);
-
-it("a send the server rejects leaves the draft as it was", async () => {
-  await using app = await openThread(threadWithHistory("thread-decision-rejected", 1), {
-    acceptCommands: true,
-    holdCommand: (command) => command.type === "message.dispatch",
-  });
-  app.setDraft("Keep this");
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-  await acceptAndSend("Q4").click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Keep this\nQ4: yes"]));
-
-  // T3 reports the failure and puts the draft back; the panel then takes its line out again.
-  await rejectPendingCommand("The provider is unavailable.");
-  await vi.waitFor(() => expect(app.draft()).toBe("Keep this"));
-  expect(page.getByText("Not sent", { exact: true }).elements()).toHaveLength(0);
-});
-
-it("Accept and send on an empty draft in an interrupted thread sends rather than resumes", async () => {
-  const history = threadWithHistory("thread-decision-resumable", 1);
-  const interrupted = {
-    ...history,
-    runs: [{ ...history.runs[0]!, status: "interrupted" as const }],
-  };
-  await using app = await openThread(interrupted, { acceptCommands: true });
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-  await acceptAndSend("Q4").click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Q4: yes"]));
-  expect(dispatchedCommands()).not.toContainEqual(
-    expect.objectContaining({ manualContinuationOfRunId: expect.anything() }),
-  );
-  await vi.waitFor(() => expect(app.draft()).toBe(""));
-});
-
-it("Accept and send only sends once the draft holds the Accept line", async () => {
-  await using app = await openThread(threadWithHistory("thread-decision-held", 1), {
-    acceptCommands: true,
-  });
-  app.setDraft("Q4: yes");
-  await expect.element(editor()).toHaveTextContent("Q4: yes");
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-  await acceptAndSend("Q4").click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Q4: yes"]));
-  await vi.waitFor(() => expect(app.draft()).toBe(""));
-});
-
-it("Yes to all and send only sends once the draft holds the line", async () => {
-  await using app = await openThread(threadWithHistory("thread-decision-held-yes", 1), {
-    acceptCommands: true,
-  });
-  await yesToAll().click();
-  await vi.waitFor(() => expect(app.draft()).toBe("Yes to your picks: Q4, Q5, Q6"));
-  await expect.element(yesToAllAndSend()).toBeEnabled();
-  await yesToAllAndSend().click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Yes to your picks: Q4, Q5, Q6"]));
-  await vi.waitFor(() => expect(app.draft()).toBe(""));
-});
-
-it("disables the send buttons while their send is in flight", async () => {
-  await using _app = await openThread(threadWithHistory("thread-decision-pending", 1), {
-    acceptCommands: true,
-    holdCommand: (command) => command.type === "message.dispatch",
-  });
-  await expect.element(acceptAndSend("Q4")).toBeEnabled();
-  await acceptAndSend("Q4").click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Q4: yes"]));
-  await expect.element(acceptAndSend("Q4")).toBeDisabled();
-  await expect.element(yesToAllAndSend()).toBeDisabled();
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+  expect(page.getByRole("button", { name: /and send/i }).elements()).toHaveLength(0);
+  await accept("Q4", "yes").click();
+  await vi.waitFor(() => expect(app.draft()).toBe("Q4: yes"));
+  expect(sentTexts()).toEqual([]);
 });
