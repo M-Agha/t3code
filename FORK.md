@@ -24,16 +24,23 @@ reasons are the ones they accepted.
 
 ## The changes (oldest first)
 
-| Commit subject                                                    | What it adds                  |
-| ----------------------------------------------------------------- | ----------------------------- |
-| `feat: track end-of-reply decision questions natively`            | Questions and decisions       |
-| `feat: per-thread parked items with /park and t3_park`            | Parked items                  |
-| `feat: per-thread Artifacts tab`                                  | Artifacts                     |
-| `refactor: take question logic from session-kit's reply.ts`       | Shared logic with session-kit |
-| `fix: read a reply that finishes after its run ended`             | A listener gap                |
-| `chore: name fork builds T3 Code (Fork) with their own bundle ID` | App identity                  |
+| Commit subject                                                              | What it adds                  |
+| --------------------------------------------------------------------------- | ----------------------------- |
+| `feat: track end-of-reply decision questions natively`                      | Questions and decisions       |
+| `feat: per-thread parked items with /park and t3_park`                      | Parked items                  |
+| `feat: per-thread Artifacts tab`                                            | Artifacts                     |
+| `refactor: take question logic from session-kit's reply.ts`                 | Shared logic with session-kit |
+| `fix: read a reply that finishes after its run ended`                       | A listener gap                |
+| `chore: name fork builds T3 Code (Fork) with their own bundle ID`           | App identity                  |
+| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`          | Outside this repo             |
+| `fix: install.sh backs up a quit app's database`                            | Installing                    |
+| `fix: the stage-label schema accepts Fork, so the fork app launches`        | App identity                  |
+| `feat: Accept and Drop add to the draft; long questions keep their buttons` | Questions and decisions       |
+| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`   | Rebasing, step 7              |
 
-`git log --oneline upstream/main..fork/main` lists them with hashes.
+The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
+`git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
+upstream release the fork sits on (`git merge-base fork/main upstream/main`).
 
 ### Questions and decisions
 
@@ -126,37 +133,67 @@ when an assistant message finishes, so those questions are not held until the ne
 
 ## Rebasing onto upstream
 
-1. `git fetch upstream main`, then `git rebase upstream/main` on `fork/main`.
-2. `git diff --name-status $(git merge-base fork/main upstream/main) fork/main` lists every
-   upstream file the fork modifies (`M`) and every file it adds (`A`). The modified ones are where
-   conflicts happen.
+1. **Pick the target: the official Nightly the owner runs, not `upstream/main`.** The Nightly is their
+   fallback; `upstream/main` may carry migrations the Nightly lacks, and a fork built from it would
+   migrate `~/.t3` past what the Nightly can open. Use that Nightly's tag
+   (`v<version>-nightly.<date>.<n>`, `git fetch upstream --tags`) and check its migration head: the last
+   entry in `apps/server/src/persistence/Migrations.ts` at the tag.
+2. Keep the old head first: `git branch fork/main-pre-<version> fork/main`, push it. Then
+   `git rebase --onto <tag> $(git merge-base fork/main upstream/main) fork/main`.
+   - Node comes from the **target's** `package.json` `engines.node` and may change between releases:
+     `mise install node@<v>`, run git through `mise exec node@<v> -- git …` (the pre-commit hook
+     runs `vp staged`), and `vp i` once the rebase is done.
+3. `git diff --name-status <tag> fork/main` lists every upstream file the fork modifies (`M`) and every
+   file it adds (`A`). The modified ones are where conflicts happen.
    - The hot spots are `ws.ts`, `server.ts`, `Sqlite.ts`, `rpc.ts`, `ChatView.tsx`,
-     `RightPanelSurfaceContent.tsx`, the composer send path, and the MCP thread toolkit.
-3. **On a conflict, re-apply the intent, not the old hunk.** If upstream rebuilt a seam the fork
-   used (for example, the right panel's surfaces or the composer's slash commands), attach the
-   feature to the new seam the way upstream's own features now do, and record the change here.
-   - If upstream shipped a native version of a fork feature, prefer upstream's and delete the
-     fork's, keeping the owner's decisions above as the acceptance test.
-4. **Check:** `vp run check:changed`, plus these tests, under Node from `package.json` `engines`,
-   using the repo's own `node_modules/.bin/vp`:
+     `rightPanelStore.ts`, `RightPanelTabs.tsx`, `RightPanelSurfaceContent.tsx`, the composer send
+     path, the MCP thread toolkit, and `ClaudeAdapterV2.ts` (the `T3CODE_OWNS_BOARD` line, in the
+     query `env` beside `PortScanner.AGENT_THREAD_ENV`).
+   - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
+     keep both.
+   - `apps/server/src/provider/agentContextBudget.json` must equal the measured size exactly; the fork's
+     `t3_park` adds to `mcpToolListJsonBytes`. Set it from `AgentContextBudget.test.ts`'s output.
+4. **On a conflict, re-apply the intent, not the old hunk.** If upstream rebuilt a seam the fork used
+   (for example, the right panel's surfaces or the composer's slash commands), attach the feature to
+   the new seam the way upstream's own features now do, and record the change here.
+   - If upstream shipped a native version of a fork feature, stop and ask the owner; if they agree,
+     prefer upstream's and delete the fork's, keeping the owner's decisions above as the acceptance test.
+   - Seams already moved: MCP tools that act as their calling thread must carry
+     `.annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients)`, or every
+     toolkit layer dies at build ("t3_park acts as its calling thread, so outside clients must not be
+     offered it"). `t3_park` has it since v0.1.11.
+   - Fix-ups go in as `git commit --fixup=<fork commit>`, then
+     `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <tag>`, so each fork commit stays whole.
+5. **Check:** `vp run check:changed <tag>`, plus these tests, under that Node, using the repo's own
+   `node_modules/.bin/vp`:
    - `packages/shared/src/sessionKit`, the drift test included.
    - `apps/server/src/decisions`.
    - `apps/server/src/persistence/ForkMigrations.test.ts` and `Sqlite.test.ts`.
-   - The desktop identity tests in `apps/desktop/src/app`.
-5. **Live check:** on a dev server on an isolated home, never `~/.t3`:
-   `vp run dev --home-dir "$PWD/.t3"`, since in a main checkout dev falls back to `~/.t3`. Use a
-   Replay thread, or one cheap Claude Haiku thread with permissions set to Supervised in a scratch
-   project:
-   - a Q-block reply, then Accept and send;
-   - `/park` while idle and mid-run;
-   - `t3_park`;
-   - an Artifacts row.
-6. **Build:** first `cp .env.example .env` (once per checkout; `.env` is gitignored). Without it the
+   - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
+     `DesktopEnvironment`, `DesktopPreReadyPlatform`).
+   - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts` and
+     `ThreadDecisions.parked-focus.browser.test.tsx`.
+6. **Live check:** on a dev server on an isolated home, never `~/.t3`. Reseed it first, since the
+   schema moved: `node apps/server/scripts/migrate-dev-db.ts --base-dir "$PWD/.t3"` (reads `~/.t3`
+   read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`, since in a main
+   checkout dev falls back to `~/.t3`.
+   - If the startup pairing URL does not sign in, mint one from `apps/server`:
+     `node src/bin.ts pair --base-dir <checkout>/.t3`.
+   - Use a desktop-width window (the strip is not shown on mobile widths). Before typing `/park`,
+     switch the thread's model to `Replay (dev)`: if the intercept ever fails, the text goes to a free
+     provider instead of starting a paid turn.
+   - A seeded thread with open questions shows the strip and the Decisions panel; Accept adds a line
+     to the composer and marks the question "in draft"; `/park x` parks without sending; a thread with
+     a `claude.ai/…artifact/…` link lists it in Artifacts; the server log has no schema errors. With a
+     cheap Claude Haiku thread (Supervised, scratch project) also: `/park` mid-run and `t3_park`.
+7. **Build:** `.env` must exist (`cp .env.example .env`, once per checkout; gitignored). Without it the
    app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
-   are upstream's public production identifiers, the same ones official builds embed. Then
+   are upstream's public production identifiers, the same ones official builds embed. Move any old
+   `release/T3-Code-*-arm64.*` aside, then
    `env -u GITHUB_REPOSITORY -u T3CODE_DESKTOP_UPDATE_REPOSITORY vp run dist:desktop:dmg:arm64`.
    No update feed may be set; the build must not contain `app-update.yml`. `scripts/fork/install.sh`
-   refuses a build without T3 Connect.
+   refuses a build without T3 Connect. Push with `git push --force-with-lease origin fork/main` only
+   after every check passes.
 
 ## Installing
 
@@ -183,5 +220,8 @@ of a newer build migrates `~/.t3` one way, and that copy is the only way back.
   upstream too: APFS is case-insensitive, so the two icon spellings are one file.
 - `check:changed`'s "unused patches" step has failed intermittently on a pnpm peer-dependency warning
   (`@tiptap/core`), also on clean branches.
+- `apps/web/src/components/ChatView.browser.test.tsx` "a shortcut conditioned on rightPanelOpen sees
+  the thread's open right panel" times out when the whole file runs on this Mac, and passes alone. It
+  fails the same on the plain `v0.1.11-nightly.20261117.4825` tag.
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"); use
   the repo's `node_modules/.bin/vp`.
