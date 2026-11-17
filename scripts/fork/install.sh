@@ -18,7 +18,7 @@ fail() { echo "install: $*" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || fail "macOS only."
 zip="$(ls -t "$repo"/release/T3-Code-*-arm64.zip 2>/dev/null | head -1 || true)"
-[ -n "$zip" ] || fail "no build in $repo/release; run: vp run dist:desktop:dmg:arm64"
+[ -n "$zip" ] || fail "no build in $repo/release; run: scripts/fork/build.sh"
 
 # Any T3 Code app (official or fork) holding the database would race the backup and the migration.
 # The pattern avoids `+` and `\(`: macOS pgrep does not read them as an extended regex would.
@@ -57,6 +57,13 @@ built="$(find "$staging" -maxdepth 1 -name '*.app' | head -1)"
 if ! LC_ALL=C grep -a -q -r -E 'pk_live_[A-Za-z0-9]+' "$built/Contents/Resources"; then
   fail "$(basename "$zip") was built without T3 Connect: run 'cp .env.example .env' in $repo, rebuild, then run this again."
 fi
+# A build without the fork version reports package.json's older one, and linked clients then call this
+# server out of date (2026-11-17). scripts/fork/build.sh stamps it from the upstream tag.
+built_version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$built/Contents/Info.plist")"
+case "$built_version" in
+  *-fork.*) ;;
+  *) fail "$(basename "$zip") has version $built_version, not a fork version: build with scripts/fork/build.sh." ;;
+esac
 
 if [ -e "/Applications/$app_name" ]; then
   mv "/Applications/$app_name" "$trash/${app_name%.app}_$stamp.app"
