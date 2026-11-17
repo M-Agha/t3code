@@ -51,6 +51,12 @@ ditto -x -k "$zip" "$staging"
 built="$(find "$staging" -maxdepth 1 -name '*.app' | head -1)"
 [ -n "$built" ] || fail "no .app inside $zip"
 [ "$(basename "$built")" = "$app_name" ] || fail "expected $app_name in $zip, found $(basename "$built"); rebuild from fork/main"
+# A build made without the repo's .env has T3 Connect switched off, and the app then cannot reach
+# machines linked through T3's relay (the work Mac, 2026-11-17). Official builds embed the same public
+# Clerk key; FORK.md, "Rebasing onto upstream", has the build steps.
+if ! LC_ALL=C grep -a -q -r -E 'pk_live_[A-Za-z0-9]+' "$built/Contents/Resources"; then
+  fail "$(basename "$zip") was built without T3 Connect: run 'cp .env.example .env' in $repo, rebuild, then run this again."
+fi
 
 if [ -e "/Applications/$app_name" ]; then
   mv "/Applications/$app_name" "$trash/${app_name%.app}_$stamp.app"
