@@ -159,8 +159,11 @@
     },
     "packages/shared": {
       "includeEntryExports": true,
-      // Fork-only: a verbatim copy of session-kit's parser keeps every export of its source.
-      "ignoreIssues": { "src/sessionKit/reply.ts": ["exports", "types"] },
+      // Fork-only: verbatim copies of session-kit's parser and judge keep every export of their source.
+      "ignoreIssues": {
+        "src/sessionKit/reply.ts": ["exports", "types"],
+        "src/sessionKit/judge.ts": ["exports", "types"],
+      },
     },
     "packages/effect-acp": {
       "includeEntryExports": true,
