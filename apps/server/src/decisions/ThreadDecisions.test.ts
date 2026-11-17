@@ -54,7 +54,13 @@ const run = Effect.fn("run")(function* (runId: string, ordinal: number, status: 
   `;
 });
 
+// Every message and card a minute after the one before, so they sort as text in the order written.
 let minute = 0;
+const nextAt = () => {
+  minute += 1;
+  return DateTime.formatIso(DateTime.makeUnsafe(Date.UTC(2026, 0, 2, 0, minute)));
+};
+
 const message = Effect.fn("message")(function* (
   messageId: string,
   runId: string,
@@ -64,8 +70,7 @@ const message = Effect.fn("message")(function* (
   streaming = false,
 ) {
   const sql = yield* SqlClient.SqlClient;
-  minute += 1;
-  const at = `2026-01-02T00:${String(minute).padStart(2, "0")}:00.000Z`;
+  const at = nextAt();
   const payload = { text, createdBy: role === "user" ? "user" : "agent", ...extra };
   yield* sql`
     INSERT INTO orchestration_v2_projection_messages (
@@ -703,3 +708,232 @@ it.effect("syncs a thread when a message finishes or its run ends", () => {
     assert.sameMembers(seen, ["assistant-done", "user-done", "run-waiting", "run-completed"]);
   }).pipe(Effect.scoped);
 });
+
+// An AskUserQuestion card as the orchestrator projects it once answered; `answers` null is a card
+// resolved without answers. Ids default to the question text, as Claude's cards use.
+const card = Effect.fn("card")(function* (
+  itemId: string,
+  runId: string,
+  questions: ReadonlyArray<{ readonly id?: string; readonly question: string }>,
+  answers: Record<string, unknown> | null,
+  status = "completed",
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const at = nextAt();
+  const requestId = `request-${itemId}`;
+  const payload = {
+    id: itemId,
+    threadId,
+    runId,
+    type: "user_input_request",
+    requestId,
+    status,
+    updatedAt: at,
+    questions: questions.map((q) => ({
+      id: q.id ?? q.question,
+      header: q.question.slice(0, 3),
+      question: q.question,
+      options: [],
+      multiSelect: false,
+    })),
+    ...(answers === null
+      ? {}
+      : { questionAnswer: { requestId, answers, attachmentsByQuestionId: {} } }),
+  };
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_turn_items (
+      turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json
+    ) VALUES (${itemId}, ${threadId}, ${runId}, 1, 'user_input_request', ${status}, ${at},
+      ${JSON.stringify(payload)})
+    ON CONFLICT (turn_item_id) DO UPDATE SET
+      status = excluded.status, updated_at = excluded.updated_at,
+      payload_json = excluded.payload_json
+  `;
+  return at;
+});
+
+const asks = (...labels: ReadonlyArray<string>) =>
+  labels.map((label) => `${label}, key words: Settle ${label}? My pick is yes: why.`).join("\n");
+
+const answers = Effect.fn("answers")(function* () {
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  const snapshot = yield* decisions.snapshot(threadId);
+  return Object.fromEntries(
+    snapshot.questions.map((q) => [q.label, [q.state, q.answerText, q.answerMessageId]]),
+  );
+});
+
+const withDecisions = ThreadDecisions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+
+it.effect("closes questions answered on AskUserQuestion cards, each card once", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q1", "Q2", "Q3", "Q4"));
+    assert.isTrue(yield* decisions.sync(threadId));
+
+    yield* run("r2", 2, "completed");
+    const shipped = yield* card("c1", "r2", [{ question: "Q1: Ship it now?" }], {
+      "Q1: Ship it now?": "Yes, ship",
+    });
+    // Older cards key answers by the question's text, not its id.
+    yield* card("c2", "r2", [{ id: "q-legacy", question: "Q4 Keep the old card?" }], {
+      "Q4 Keep the old card?": ["Keep", " Note it "],
+    });
+    // Resolved without answers, an empty answer, an unusable one, and a card never answered.
+    yield* card("c3", "r2", [{ question: "Q2: Update docs?" }], null);
+    yield* card("c4", "r2", [{ question: "Q2: Update docs?" }], { "Q2: Update docs?": "" });
+    yield* card("c5", "r2", [{ question: "Q3: Rename?" }], { "Q3: Rename?": [" "] });
+    yield* card("c6", "r2", [{ question: "Q3: Rename?" }], { "Q3: Rename?": { label: "x" } });
+    yield* card(
+      "c7",
+      "r2",
+      [{ question: "Q2: Update docs?" }],
+      { "Q2: Update docs?": "Yes" },
+      "cancelled",
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* answers(), {
+      Q1: ["answered", "Q1: Yes, ship", null],
+      Q2: ["open", null, null],
+      Q3: ["open", null, null],
+      Q4: ["answered", "Q4: Keep, Note it", null],
+    });
+    assert.strictEqual((yield* question("Q1"))?.resolvedAt, shipped);
+    // Every card is read once: nothing left to change.
+    assert.isFalse(yield* decisions.sync(threadId));
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "gathers a question asked in parts, in the card's order, only when every part is answered",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", asks("Q28", "Q29"));
+      yield* decisions.sync(threadId);
+      yield* run("r2", 2, "completed");
+      const parts = (label: string) =>
+        [1, 2, 3].map((n) => ({ question: `${label} (${n} of 3), part ${n}: which picks?` }));
+      yield* card("c1", "r2", [...parts("Q28"), ...parts("Q29")], {
+        // Answers listed out of order; the reply follows the card's questions.
+        [`Q28 (3 of 3), part 3: which picks?`]: "Fable alone",
+        [`Q28 (1 of 3), part 1: which picks?`]: ["Artifacts design", "Evals owed"],
+        [`Q28 (2 of 3), part 2: which picks?`]: ["No core folder"],
+        [`Q29 (1 of 3), part 1: which picks?`]: "One",
+        [`Q29 (3 of 3), part 3: which picks?`]: "Three",
+      });
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* answers(), {
+        Q28: ["answered", "Q28: Artifacts design, Evals owed; No core folder; Fable alone", null],
+        Q29: ["open", null, null],
+      });
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("reads a card's answer as the reply it stands for, for that question alone", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q27", "Q28", "Q30", "Q31"));
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "completed");
+    yield* card(
+      "c1",
+      "r2",
+      [{ question: "Q28: Which?" }, { question: "Q30: Which?" }, { question: "Q31: Which?" }],
+      {
+        "Q28: Which?": "Same as Q27",
+        "Q30: Which?": "Not a decision",
+        "Q31: Which?": "Go with your picks",
+      },
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    // Q27, named in an option and swept by "your picks", stays open.
+    assert.deepEqual(yield* answers(), {
+      Q27: ["open", null, null],
+      Q28: ["answered", "Q28: Same as Q27", null],
+      Q30: ["dropped", "Q30: Not a decision", null],
+      Q31: ["answered", "Q31: Go with your picks", null],
+    });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("leaves a question asked again after the card, or reopened by hand, open", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q5", "Q6"));
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "completed");
+    yield* card("c1", "r2", [{ question: "Q5: Go?" }, { question: "Q6: Go?" }], {
+      "Q5: Go?": "Yes",
+      "Q6: Go?": "Yes",
+    });
+    yield* run("r3", 3, "completed");
+    yield* message(
+      "a2",
+      "r3",
+      "assistant",
+      "Q5, key words: Settle Q5 again? My pick is no: changed.",
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* answers(), {
+      Q5: ["open", null, null],
+      Q6: ["answered", "Q6: Yes", null],
+    });
+    assert.strictEqual((yield* question("Q5"))?.sourceMessageId, "a2");
+
+    yield* decisions.reopen({ threadId, label: "Q6" });
+    assert.isFalse(yield* decisions.sync(threadId));
+    assert.deepEqual((yield* answers()).Q6, ["open", null, null]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("waits to read a card answered while its run still runs", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q8"));
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "running");
+    yield* message("u1", "r2", "user", "Keep going.");
+    // The running reply asks Q8 again before the card answers it; read first, it would reopen Q8.
+    yield* message("a2", "r2", "assistant", "Q8, key words: Ship it now? My pick is yes: ready.");
+    yield* card("c1", "r2", [{ question: "Q8: Ship it now?" }], { "Q8: Ship it now?": "Ship" });
+    assert.isFalse(yield* decisions.sync(threadId));
+    assert.deepEqual((yield* answers()).Q8, ["open", null, null]);
+
+    yield* run("r2", 2, "waiting");
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual((yield* answers()).Q8, ["answered", "Q8: Ship", null]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("leaves a question its message-mode answer already closed to that message", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q9"));
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "completed");
+    yield* card("c1", "r2", [{ question: "Q9: Ship?" }], { "Q9: Ship?": "Yes" });
+    // The orchestrator sends a message-mode card's answers on as a user message.
+    yield* message("async-answer:request-c1", "r2", "user", "Q9: Ship?\nYes", {
+      creationSource: "server",
+    });
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual((yield* answers()).Q9, [
+      "answered",
+      "Q9: Ship?\nYes",
+      "async-answer:request-c1",
+    ]);
+  }).pipe(Effect.provide(withDecisions)),
+);
