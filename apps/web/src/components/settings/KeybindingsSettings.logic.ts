@@ -490,6 +490,8 @@ const LATE_COMMAND_LABELS: Partial<Record<KeybindingCommand, string>> = {
   "view.reopenClosed": msg("Reopen Closed Tab"),
   "preview.focusUrl": msg("Preview: Focus URL"),
   "preview.find": msg("Preview: Find on Page"),
+  // The fork's right panel is shown as Tracker; its command id stays, so saved bindings still apply.
+  "decisions.toggle": msg("Tracker: Toggle"),
 };
 
 export function commandLabel(command: KeybindingCommand, resolve: MessageResolver = m): string {
