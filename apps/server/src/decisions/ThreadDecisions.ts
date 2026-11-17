@@ -16,6 +16,7 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
   closingFor,
+  Q_LINE,
   readReplyDecisions,
   splitQuestion,
 } from "@t3tools/shared/sessionKit/decisions";
@@ -95,6 +96,53 @@ interface ArtifactItemRow {
   readonly description: unknown;
 }
 
+// An answered AskUserQuestion card (a `user_input_request` turn item) is provider data: its questions
+// in the card's order, and answers keyed by question id, or by the question's text in older cards.
+const decodeCard = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      questions: Schema.Array(Schema.Struct({ id: Schema.String, question: Schema.String })),
+      questionAnswer: Schema.Struct({ answers: Schema.Record(Schema.String, Schema.Unknown) }),
+    }),
+  ),
+);
+
+/** One card question's selections as reply text: a string or an array of strings, else unusable. */
+const cardSelections = (answer: unknown): string | null => {
+  const chosen: ReadonlyArray<unknown> = Array.isArray(answer) ? answer : [answer];
+  if (!chosen.every((value): value is string => typeof value === "string")) return null;
+  const text = chosen
+    .map((value) => value.trim())
+    .filter((value) => value !== "")
+    .join(", ");
+  return text === "" ? null : text;
+};
+
+/**
+ * What a card answers, as the reply a person would type, by the label its question text starts with
+ * (session-kit's Q_LINE, as the terminal reads it). A label asked in parts ("Q28 (1 of 3)") gathers
+ * them in the card's order; one missing or unusable part leaves the label unanswered.
+ */
+const cardReplies = (
+  questions: ReadonlyArray<{ readonly id: string; readonly question: string }>,
+  answers: Readonly<Record<string, unknown>>,
+): ReadonlyMap<string, string> => {
+  const parts = new Map<string, Array<string | null>>();
+  for (const question of questions) {
+    const label = Q_LINE.exec(question.question)?.[1];
+    if (label === undefined) continue;
+    const answer = answers[question.id] ?? answers[question.question];
+    parts.set(label, [...(parts.get(label) ?? []), cardSelections(answer)]);
+  }
+  const replies = new Map<string, string>();
+  for (const [label, selections] of parts) {
+    if (selections.every((part) => part !== null)) {
+      replies.set(label, `${label}: ${selections.join("; ")}`);
+    }
+  }
+  return replies;
+};
+
 export interface ThreadParkRequest {
   readonly threadId: ThreadId;
   readonly items: ReadonlyArray<{ readonly kind: ThreadParkedKind; readonly text: string }>;
@@ -109,7 +157,10 @@ const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped", sent: "sent" } as
 export class ThreadDecisions extends Context.Service<
   ThreadDecisions,
   {
-    /** Reads the thread's messages and Artifact tool calls after its watermarks; true when a row changed. */
+    /**
+     * Reads the thread's messages, answered question cards and Artifact tool calls after their
+     * watermarks; true when a row changed.
+     */
     readonly sync: (threadId: ThreadId) => Effect.Effect<boolean, ThreadDecisionsError>;
     readonly snapshot: (
       threadId: ThreadId,
@@ -298,6 +349,95 @@ export const layer = Layer.effect(
       return changed;
     }, sql.withTransaction);
 
+    // Answers given on AskUserQuestion cards. A card is read once, in (updated_at, turn_item_id) order,
+    // so a question reopened by hand stays open. Its own watermark: it runs whether or not new messages
+    // arrived, since a card is answered mid-run and the run's end is what syncs.
+    const syncCards = Effect.fn("ThreadDecisions.syncCards")(function* (threadId: ThreadId) {
+      const [watermark] = yield* sql<{
+        readonly afterCreatedAt: string;
+        readonly afterMessageId: string;
+        readonly afterItemUpdatedAt: string;
+        readonly afterItemId: string;
+      }>`
+        SELECT
+          after_created_at AS "afterCreatedAt",
+          after_message_id AS "afterMessageId",
+          after_item_updated_at AS "afterItemUpdatedAt",
+          after_item_id AS "afterItemId"
+        FROM fork_thread_decision_sync WHERE thread_id = ${threadId}
+      `;
+      // The message pass stops before a message that may still change. A card answered after it waits,
+      // so it never closes a question before the questions asked up to then are recorded.
+      const [unread] = yield* sql<{ readonly createdAt: string }>`
+        SELECT created_at AS "createdAt"
+        FROM orchestration_v2_projection_messages
+        WHERE thread_id = ${threadId}
+          AND (created_at, message_id) >
+            (${watermark?.afterCreatedAt ?? ""}, ${watermark?.afterMessageId ?? ""})
+        ORDER BY created_at, message_id
+        LIMIT 1
+      `;
+      const cards = yield* sql<{
+        readonly itemId: string;
+        readonly updatedAt: string;
+        readonly payload: string;
+      }>`
+        SELECT turn_item_id AS "itemId", updated_at AS "updatedAt", payload_json AS payload
+        FROM orchestration_v2_projection_turn_items
+        WHERE thread_id = ${threadId} AND type = 'user_input_request' AND status = 'completed'
+          AND (updated_at, turn_item_id) >
+            (${watermark?.afterItemUpdatedAt ?? ""}, ${watermark?.afterItemId ?? ""})
+          ${unread === undefined ? sql`` : sql`AND updated_at < ${unread.createdAt}`}
+        ORDER BY updated_at, turn_item_id
+      `;
+      const last = cards.at(-1);
+      if (last === undefined) return false;
+
+      let changed = false;
+      for (const card of cards) {
+        const read = Option.getOrNull(decodeCard(card.payload));
+        if (read === null) continue;
+        for (const [label, text] of cardReplies(read.questions, read.questionAnswer.answers)) {
+          // Only this label's row: option text naming another label, or "go with your picks",
+          // answers nothing else. A question asked again after the card stays open.
+          const open = yield* sql<{
+            readonly label: string;
+            readonly sourceMessageId: string;
+            readonly askedAt: string;
+          }>`
+            SELECT label, source_message_id AS "sourceMessageId", asked_at AS "askedAt"
+            FROM fork_thread_decision_questions
+            WHERE thread_id = ${threadId} AND label = ${label} AND state = 'open'
+              AND asked_at < ${card.updatedAt}
+          `;
+          if (open.length === 0) continue;
+          const closing = closingFor(text, open);
+          for (const [state, labels] of [
+            ["answered", closing.answered],
+            ["dropped", closing.dropped],
+          ] as const) {
+            if (labels.length === 0) continue;
+            yield* sql`
+              UPDATE fork_thread_decision_questions
+              SET state = ${state}, answer_text = ${text}, answer_message_id = NULL,
+                resolved_at = ${card.updatedAt}
+              WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
+            `;
+            changed = true;
+          }
+        }
+      }
+      yield* sql`
+        INSERT INTO fork_thread_decision_sync (
+          thread_id, after_created_at, after_message_id, after_item_updated_at, after_item_id
+        ) VALUES (${threadId}, '', '', ${last.updatedAt}, ${last.itemId})
+        ON CONFLICT (thread_id) DO UPDATE SET
+          after_item_updated_at = excluded.after_item_updated_at,
+          after_item_id = excluded.after_item_id
+      `;
+      return changed;
+    }, sql.withTransaction);
+
     const syncArtifacts = Effect.fn("ThreadDecisions.syncArtifacts")(function* (
       threadId: ThreadId,
     ) {
@@ -466,7 +606,16 @@ export const layer = Layer.effect(
           threadId,
           Effect.all([
             syncUnlocked(threadId),
-            // Its own transaction: a failure here must not hide decisions already committed.
+            // After the messages, so a card never closes a question before its reply is read. Each in its
+            // own transaction: a failure here must not hide decisions already committed.
+            syncCards(threadId).pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("Failed to read answers on question cards", {
+                  threadId,
+                  cause,
+                }).pipe(Effect.as(false)),
+              ),
+            ),
             syncArtifacts(threadId).pipe(
               Effect.catch((cause) =>
                 Effect.logWarning("Failed to sync thread artifacts", { threadId, cause }).pipe(
@@ -474,7 +623,7 @@ export const layer = Layer.effect(
                 ),
               ),
             ),
-          ]).pipe(Effect.map(([decisions, artifacts]) => decisions || artifacts)),
+          ]).pipe(Effect.map((changes) => changes.some(Boolean))),
         )
         .pipe(Effect.mapError(fail("Could not read this thread's decisions.")));
       if (changed) yield* PubSub.publish(changes, threadId);

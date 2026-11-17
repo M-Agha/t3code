@@ -38,6 +38,7 @@ reasons are the ones they accepted.
 | `feat: Accept and Drop add to the draft; long questions keep their buttons`         | Questions and decisions       |
 | `fix: fork builds keep T3 Connect, and install.sh refuses one without it`           | Rebasing, step 7              |
 | `(fork) decisions: open questions show one at a time, like T3's own question panel` | Questions and decisions       |
+| `(fork) decisions: answers on AskUserQuestion cards close the matching question`    | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -54,6 +55,16 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   each to the composer instead of sending, so several answers go out as one ordinary message and the
   agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
   messages close nothing. _Rejected:_ a model judging each message; an agent "close" tool.
+- **Answers on AskUserQuestion cards** close the question whose label leads the card question's
+  text (session-kit's `Q_LINE`, as the terminal reads it). Parts asked as "Q28 (1 of 3)" … gather in
+  the card's order into one reply (`Q28: a, b; c; d`); a part left unanswered closes nothing. The
+  reply goes through `closingFor` with that label's row alone, so "Not a decision" drops it and option
+  text naming another label closes nothing else. Only a question asked before the card was answered
+  closes. Each card is read once, after the messages, through its own watermark (fork migration 004's
+  columns on `fork_thread_decision_sync`), so a question reopened by hand stays open; a card answered
+  while a reply is still unread waits for it. (2026-11-17: Q28 was answered on a card and stayed
+  open.) _Rejected:_ a label anywhere in the card's text (a card can cite an older label); a new
+  turn-item listener (the run's end already syncs).
 - **Reopening:** only a shaped re-ask of a known label (one with "My pick is") reopens or rewords
   it. An unshaped line naming a known label ("Q7: nothing to change." right after the user's
   "Q7: yes") changes nothing; a label never seen before is still recorded. (2026-11-17: agent
