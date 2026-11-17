@@ -33,7 +33,6 @@ const actions = {
   canOperate: true,
   send: async () => true,
   insert: () => true,
-  insertAndSend: async () => true,
   inDraft: {},
 };
 
