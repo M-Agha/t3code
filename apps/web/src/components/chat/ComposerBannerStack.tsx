@@ -24,6 +24,8 @@ export interface ComposerBannerStackItem {
   readonly actions?: ReactNode;
   readonly dismissLabel?: string;
   readonly onDismiss?: () => void;
+  /** Fork: drawn in place of the icon/title row, in the same card and stack position. */
+  readonly content?: ReactNode;
 }
 
 const GROUPS = ["environment", "attention"] as const;
@@ -172,7 +174,6 @@ function NoticeCard({
   readonly item: ComposerBannerStackItem;
   readonly detached?: boolean;
 }) {
-  const gt = useGT();
   return (
     <ComposerBanner.Root
       role={item.variant === "error" || item.variant === "warning" ? "alert" : undefined}
@@ -181,6 +182,15 @@ function NoticeCard({
       density="comfortable"
       data-chat-composer-collapsed-controls="true"
     >
+      {item.content ?? <NoticeRow item={item} />}
+    </ComposerBanner.Root>
+  );
+}
+
+function NoticeRow({ item }: { readonly item: ComposerBannerStackItem }) {
+  const gt = useGT();
+  return (
+    <>
       <ComposerBanner.Row layout="wrap-actions">
         <ComposerBanner.Icon className="h-(--composer-banner-icon-column) self-start">
           {item.icon}
@@ -222,6 +232,6 @@ function NoticeCard({
         ) : null}
       </ComposerBanner.Row>
       {item.children ? <ComposerBanner.Children>{item.children}</ComposerBanner.Children> : null}
-    </ComposerBanner.Root>
+    </>
   );
 }

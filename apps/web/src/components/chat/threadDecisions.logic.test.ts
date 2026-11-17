@@ -10,6 +10,7 @@ import {
   asDraftLine,
   isParkedBusy,
   latestReplyOpenQuestions,
+  nextUndrafted,
   openQuestionsByReply,
   parkedFocusAfter,
   questionsClosedByDraft,
@@ -81,11 +82,49 @@ describe("answers added to the composer", () => {
   });
 
   it("marks the open questions the draft already closes, and no resolved ones", () => {
-    expect(questionsClosedByDraft("", snapshot)).toEqual([]);
-    expect(questionsClosedByDraft("Q2: yes\nQ4: not a decision\nQ5: no", snapshot)).toEqual([
-      "Q2",
-      "Q4",
-    ]);
+    expect(questionsClosedByDraft("", snapshot)).toEqual({});
+    expect(questionsClosedByDraft("Q2: yes\nQ4: not a decision\nQ5: no", snapshot)).toEqual({
+      Q2: "answer",
+      Q4: "drop",
+    });
+  });
+
+  it("names the option the draft chose for each question", () => {
+    const picked = {
+      ...snapshot,
+      questions: [
+        { ...question("Q4", "newer", "open"), pick: "yes" },
+        { ...question("Q6", "newer", "open"), pick: "no" },
+        question("Q7", "newer", "open"),
+      ],
+    };
+    // The Accept line as the button adds it, and stray spaces around it.
+    expect(questionsClosedByDraft("Q4: yes\n  Q6: no ", picked)).toEqual({
+      Q4: "accept",
+      Q6: "accept",
+    });
+    // Another answer, or the pick inside a longer line, is the user's own answer.
+    expect(questionsClosedByDraft("Q4: no\nQ6: no, but rename it", picked)).toEqual({
+      Q4: "answer",
+      Q6: "answer",
+    });
+    // Answer… adds the bare label; without a pick nothing reads as Accept.
+    expect(questionsClosedByDraft("Q4: \nQ7: ", picked)).toEqual({ Q4: "answer", Q7: "answer" });
+    // "Go with your picks" names no label, so what it sweeps is accepted; a named one keeps its own.
+    expect(questionsClosedByDraft("Q6: not a decision. Go with your picks", picked)).toEqual({
+      Q6: "drop",
+      Q4: "accept",
+      Q7: "accept",
+    });
+  });
+
+  it("moves to the next question the draft does not close, wrapping, or nowhere", () => {
+    const labels = ["Q4", "Q5", "Q6"];
+    expect(nextUndrafted(labels, "Q4", {})).toBe("Q5");
+    expect(nextUndrafted(labels, "Q4", { Q5: "accept" })).toBe("Q6");
+    expect(nextUndrafted(labels, "Q6", {})).toBe("Q4");
+    expect(nextUndrafted(labels, "Q5", { Q4: "drop", Q6: "answer" })).toBeUndefined();
+    expect(nextUndrafted(["Q4"], "Q4", {})).toBeUndefined();
   });
 });
 

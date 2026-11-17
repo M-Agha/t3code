@@ -8,6 +8,8 @@ import {
   trailingQuestions,
 } from "./reply.ts";
 
+export { readReply };
+
 export interface QuestionParts {
   readonly keyWords: string;
   readonly question: string;

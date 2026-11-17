@@ -24,19 +24,20 @@ reasons are the ones they accepted.
 
 ## The changes (oldest first)
 
-| Commit subject                                                              | What it adds                  |
-| --------------------------------------------------------------------------- | ----------------------------- |
-| `feat: track end-of-reply decision questions natively`                      | Questions and decisions       |
-| `feat: per-thread parked items with /park and t3_park`                      | Parked items                  |
-| `feat: per-thread Artifacts tab`                                            | Artifacts                     |
-| `refactor: take question logic from session-kit's reply.ts`                 | Shared logic with session-kit |
-| `fix: read a reply that finishes after its run ended`                       | A listener gap                |
-| `chore: name fork builds T3 Code (Fork) with their own bundle ID`           | App identity                  |
-| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`          | Outside this repo             |
-| `fix: install.sh backs up a quit app's database`                            | Installing                    |
-| `fix: the stage-label schema accepts Fork, so the fork app launches`        | App identity                  |
-| `feat: Accept and Drop add to the draft; long questions keep their buttons` | Questions and decisions       |
-| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`   | Rebasing, step 7              |
+| Commit subject                                                                      | What it adds                  |
+| ----------------------------------------------------------------------------------- | ----------------------------- |
+| `feat: track end-of-reply decision questions natively`                              | Questions and decisions       |
+| `feat: per-thread parked items with /park and t3_park`                              | Parked items                  |
+| `feat: per-thread Artifacts tab`                                                    | Artifacts                     |
+| `refactor: take question logic from session-kit's reply.ts`                         | Shared logic with session-kit |
+| `fix: read a reply that finishes after its run ended`                               | A listener gap                |
+| `chore: name fork builds T3 Code (Fork) with their own bundle ID`                   | App identity                  |
+| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`                  | Outside this repo             |
+| `fix: install.sh backs up a quit app's database`                                    | Installing                    |
+| `fix: the stage-label schema accepts Fork, so the fork app launches`                | App identity                  |
+| `feat: Accept and Drop add to the draft; long questions keep their buttons`         | Questions and decisions       |
+| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`           | Rebasing, step 7              |
+| `(fork) decisions: open questions show one at a time, like T3's own question panel` | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -49,9 +50,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   remember to call.
 - **Closing:** deterministic, from the user's own messages, with session-kit's `readReply`
   (`Q4: yes`, "go with your picks", "not a decision"). A message naming no label closes nothing, so
-  clarifying questions are safe. The buttons (Accept, Answer, Drop) add one line each to the
-  composer instead of sending, so several answers go out as one ordinary message and the agent
-  sees every answer; a question the draft already closes shows "in draft". Only messages a person typed count: agent, scheduled-task and relayed
+  clarifying questions are safe. The panel's answers (Accept, Answer…, Not a decision) add one line
+  each to the composer instead of sending, so several answers go out as one ordinary message and the
+  agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
   messages close nothing. _Rejected:_ a model judging each message; an agent "close" tool.
 - **Reopening:** only a shaped re-ask of a known label (one with "My pick is") reopens or rewords
   it. An unshaped line naming a known label ("Q7: nothing to change." right after the user's
@@ -60,8 +61,19 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
-- **Display:** the latest open questions in a strip above the composer; a right-panel "Decisions"
-  surface with Questions and Decisions tabs; nothing inside replies. Not on mobile.
+- **Display:** the latest reply's open questions above the composer, one at a time, built like T3's
+  own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, All
+  decisions, whose tooltip counts earlier open questions), the question as markdown, then option rows
+  Accept: <pick> (its reason below it), Answer… and Not a decision. The selected row follows the draft
+  (`questionsClosedByDraft`, the server's `closingFor`: "go with your picks" or an exact Accept line
+  selects Accept) and the header says "In draft". Accept and Not a decision move to the next question
+  the draft does not close, only once the composer took the line; Answer… stays. Collapse lasts for
+  one reply. While T3's own question is pending, the composer hides this panel (`shelfItems`), and a
+  browser test holds that. A right-panel "Decisions" surface has Questions and Decisions tabs; nothing
+  shows inside replies, and nothing on mobile. (2026-11-17, replacing a strip of one row per question
+  that the owner called ugly; design approved by a two-model council.) _Rejected:_ a two-line list (tall,
+  three buttons per row); chips with popovers (hide the question); one banner per question; real
+  radios with arrow-key selection (the native panel uses buttons too).
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/web/src/components/chat/ThreadDecisions.tsx`, contracts in
   `packages/contracts/src/threadDecisions.ts`.
@@ -153,6 +165,11 @@ when an assistant message finishes, so those questions are not held until the ne
      `rightPanelStore.ts`, `RightPanelTabs.tsx`, `RightPanelSurfaceContent.tsx`, the composer send
      path, the MCP thread toolkit, and `ClaudeAdapterV2.ts` (the `T3CODE_OWNS_BOARD` line, in the
      query `env` beside `PortScanner.AGENT_THREAD_ENV`).
+   - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a
+     stack item, drawn in place of the notice row inside the same card (the decisions panel uses it
+     so it keeps its place in the stack with no notice header); and `ComposerPendingUserInputPanel.tsx`
+     exports `OptionRadio`, so the decisions panel's rows look like the native ones. If upstream
+     rebuilds the banner stack, give the panel the new stack's way to draw a custom card.
    - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
      keep both.
    - `apps/server/src/provider/agentContextBudget.json` must equal the measured size exactly; the fork's
@@ -175,8 +192,8 @@ when an assistant message finishes, so those questions are not held until the ne
    - `apps/server/src/persistence/ForkMigrations.test.ts` and `Sqlite.test.ts`.
    - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
      `DesktopEnvironment`, `DesktopPreReadyPlatform`).
-   - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts` and
-     `ThreadDecisions.parked-focus.browser.test.tsx`.
+   - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts`,
+     `ThreadDecisions.parked-focus.browser.test.tsx` and `ThreadDecisions.question-panel.browser.test.tsx`.
 6. **Live check:** on a dev server on an isolated home, never `~/.t3`. Reseed it first, since the
    schema moved: `node apps/server/scripts/migrate-dev-db.ts --base-dir "$PWD/.t3"` (reads `~/.t3`
    read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`, since in a main
@@ -186,8 +203,8 @@ when an assistant message finishes, so those questions are not held until the ne
    - Use a desktop-width window (the strip is not shown on mobile widths). Before typing `/park`,
      switch the thread's model to `Replay (dev)`: if the intercept ever fails, the text goes to a free
      provider instead of starting a paid turn.
-   - A seeded thread with open questions shows the strip and the Decisions panel; Accept adds a line
-     to the composer and marks the question "in draft"; `/park x` parks without sending; a thread with
+   - A seeded thread with open questions shows the question panel and the Decisions panel; Accept adds a line
+     to the composer, selects it and moves to the next question; `/park x` parks without sending; a thread with
      a `claude.ai/…artifact/…` link lists it in Artifacts; the server log has no schema errors. With a
      cheap Claude Haiku thread (Supervised, scratch project) also: `/park` mid-run and `t3_park`.
 7. **Build:** `.env` must exist (`cp .env.example .env`, once per checkout; gitignored). Without it the
