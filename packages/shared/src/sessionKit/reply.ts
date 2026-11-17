@@ -1,5 +1,5 @@
 // Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 02e78bb1 (blob 59f4f3d8).
-// Fork-only: refresh by copying the source again below the marker; reply.drift.test.ts compares them.
+// Fork-only: refresh by copying the source again below the marker; drift.test.ts compares them.
 // Fork logic built on it lives in ./decisions.ts, never in this file.
 // ---- verbatim copy below ----
 // The board's capture rules, kept free of `$` so the tests run them alone.

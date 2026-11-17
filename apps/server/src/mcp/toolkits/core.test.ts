@@ -51,6 +51,7 @@ import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import * as ThreadManagement from "../../orchestration-v2/ThreadManagementService.ts";
 import type * as ProjectionStore from "../../orchestration-v2/ProjectionStore.ts";
 import * as ThreadSearch from "../../orchestration-v2/ThreadSearch.ts";
+import * as DecisionJudge from "../../decisions/DecisionJudge.ts";
 import * as ThreadDecisions from "../../decisions/ThreadDecisions.ts";
 import * as SqlitePersistence from "../../persistence/Sqlite.ts";
 import * as PreviewBrowser from "../../preview/PreviewBrowser.ts";
@@ -375,6 +376,8 @@ it.effect(
             }),
           ),
           Layer.provideMerge(ThreadDecisions.layer),
+          // Parking never asks the decision judge.
+          Layer.provide(Layer.mock(DecisionJudge.DecisionJudge)({})),
           Layer.provideMerge(SqlitePersistence.layerMemory),
         ),
       ),
