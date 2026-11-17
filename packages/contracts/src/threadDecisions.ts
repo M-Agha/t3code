@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
@@ -39,6 +40,11 @@ export const ThreadDecidedWithoutAsking = Schema.Struct({
   ordinal: Schema.Int,
   text: Schema.String,
   createdAt: IsoDateTime,
+  /**
+   * A message the user sent after the reply holds the line `Veto: <text>`. Defaults to false for a
+   * server that predates it.
+   */
+  vetoed: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
 });
 export type ThreadDecidedWithoutAsking = typeof ThreadDecidedWithoutAsking.Type;
 
