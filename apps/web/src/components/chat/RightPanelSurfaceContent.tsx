@@ -215,7 +215,14 @@ export function RightPanelSurfaceContent(props: {
     case "pull-requests":
       return <ThreadPullRequestsPanel threadRef={threadRef} />;
     case "decisions":
-      return <ThreadDecisionsPanel threadRef={threadRef} actions={props.decisionActions} />;
+      return (
+        // Per thread, so Select mode and its selection never carry over to another thread.
+        <ThreadDecisionsPanel
+          key={scopedThreadKey(threadRef)}
+          threadRef={threadRef}
+          actions={props.decisionActions}
+        />
+      );
     case "side-chat":
       // Not lazy: revealing a suspended tiptap editor tears down its view and crashes the composer.
       return (
