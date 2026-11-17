@@ -29,7 +29,13 @@ import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
 import { ThreadDecisionsPanel } from "./ThreadDecisions";
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
-const actions = { canOperate: true, send: async () => true, insert: () => true, inDraft: {} };
+const actions = {
+  canOperate: true,
+  send: async () => true,
+  insert: () => true,
+  insertAndSend: async () => true,
+  inDraft: {},
+};
 
 const item = (id: number): ThreadParkedItem => ({
   id,
