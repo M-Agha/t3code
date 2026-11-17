@@ -1970,9 +1970,10 @@ export default function ChatView(props: ChatViewProps) {
         title: "Unable to add to chat",
         description: "The composer is busy; try again once it is ready.",
       });
-      return;
+      return false;
     }
     scheduleComposerFocusStable();
+    return true;
   };
   const parkFromComposerStable = useStableCallback(parkFromComposer);
   const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
@@ -2735,6 +2736,8 @@ export default function ChatView(props: ChatViewProps) {
       snapshot: threadDecisions,
       actions: decisionActions,
       onOpenPanel: addDecisionsSurfaceStable,
+      threadRef: routeThreadRef,
+      cwd: gitCwd ?? undefined,
     });
     const decisionItems = decisionsBanner === null ? [] : [decisionsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
