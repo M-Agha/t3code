@@ -13,31 +13,52 @@ import {
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
-import { ArrowUpRightIcon, MessageCircleQuestionIcon } from "lucide-react";
-import { type KeyboardEvent, type MouseEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  ArrowUpRightIcon,
+  ChevronDownIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  MessageCircleQuestionIcon,
+  PanelRightIcon,
+} from "lucide-react";
+import {
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { flushSync } from "react-dom";
 
 import { useOpenLink } from "~/browser/useOpenLink";
+import ChatMarkdown from "~/components/ChatMarkdown";
 import { RelativeTime } from "~/components/RelativeTime";
 import { readLocalApi } from "~/localApi";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { ScrollArea } from "../ui/scroll-area";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import { OptionRadio } from "./ComposerPendingUserInputPanel";
 import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
 import {
   ariaItemText,
   decidedWithoutAskingByReply,
   decisionMessages,
+  type DraftChoice,
   isParkedBusy,
   latestReplyOpenQuestions,
+  nextUndrafted,
   openQuestionsByReply,
   type ParkedBusy,
   parkedFocusAfter,
@@ -49,12 +70,11 @@ export interface ThreadDecisionActions {
   readonly canOperate: boolean;
   /** Resolves true once the message was sent or queued; failures are reported to the user. */
   readonly send: (text: string) => Promise<boolean>;
-  readonly insert: (text: string) => void;
-  /** Labels the composer's draft already closes. */
-  readonly inDraft: ReadonlyArray<string>;
+  /** True once the composer took the text; failures are reported to the user. */
+  readonly insert: (text: string) => boolean;
+  /** The open questions the composer's draft already closes, and how. */
+  readonly inDraft: Readonly<Record<string, DraftChoice>>;
 }
-
-const STRIP_VISIBLE_ROWS = 3;
 
 export function useThreadDecisions(
   threadRef: ScopedThreadRef | null,
@@ -76,7 +96,7 @@ function QuestionActions(props: {
   readonly actions: ThreadDecisionActions;
 }) {
   const { question, actions } = props;
-  const drafted = actions.inDraft.includes(question.label);
+  const drafted = actions.inDraft[question.label] !== undefined;
   const disabled = !actions.canOperate || drafted;
   return (
     <span className="ms-auto flex shrink-0 items-center gap-0.5">
@@ -140,90 +160,241 @@ function PickBadge({ question }: { readonly question: ThreadDecisionQuestion }) 
   );
 }
 
-function StripRow(props: {
-  readonly question: ThreadDecisionQuestion;
-  readonly actions: ThreadDecisionActions;
-}) {
-  const { question } = props;
-  return (
-    <li
-      className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 py-0.5"
-      data-thread-decision={question.label}
-    >
-      <QuestionLabel question={question} />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <span
-              tabIndex={0}
-              aria-label={question.question}
-              className="min-w-24 flex-1 basis-40 truncate rounded-sm text-sm text-foreground/80 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-            />
-          }
-        >
-          {question.question}
-        </TooltipTrigger>
-        <TooltipPopup side="top" className="max-w-96">
-          <p>{question.question}</p>
-          {question.reason === "" ? null : (
-            <p className="mt-1 text-muted-foreground">
-              {question.pick}: {question.reason}
-            </p>
-          )}
-        </TooltipPopup>
-      </Tooltip>
-      <PickBadge question={question} />
-      <QuestionActions question={question} actions={props.actions} />
-    </li>
-  );
-}
+const OPTION_ROW =
+  "group flex w-full items-start gap-2.5 rounded-md bg-transparent py-1.5 ps-2 text-start outline-none transition-colors duration-150 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary/25 sm:ps-1.5";
 
-function StripRows(props: {
-  readonly questions: ReadonlyArray<ThreadDecisionQuestion>;
-  readonly actions: ThreadDecisionActions;
+/** One answer of the composer panel, drawn like T3's own question panel's option rows. */
+function OptionRow(props: {
+  readonly label: string;
+  readonly ariaLabel: string;
+  readonly selected: boolean;
+  readonly disabled: boolean;
+  readonly onChoose: () => void;
+  readonly preview?: ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const hidden = props.questions.length - STRIP_VISIBLE_ROWS;
-  const shown =
-    expanded || hidden <= 0 ? props.questions : props.questions.slice(0, STRIP_VISIBLE_ROWS);
   return (
-    // min-w-0: as a grid item this div would otherwise widen to its nowrap question's full length.
-    <div className="min-w-0 pb-1.5">
-      <ul aria-label="Open questions from the latest reply">
-        {shown.map((question) => (
-          <StripRow key={question.label} question={question} actions={props.actions} />
-        ))}
-      </ul>
-      {hidden > 0 ? (
-        <Button size="xs" variant="ghost-muted" onClick={() => setExpanded(!expanded)}>
-          {expanded ? "Show fewer" : `Show ${hidden} more`}
-        </Button>
-      ) : null}
+    <div>
+      <button
+        type="button"
+        aria-pressed={props.selected}
+        aria-label={props.ariaLabel}
+        disabled={props.disabled}
+        onClick={props.onChoose}
+        className={cn(
+          OPTION_ROW,
+          props.selected ? "text-foreground" : "text-foreground/70",
+          props.disabled
+            ? cn("cursor-not-allowed", !props.selected && "opacity-50")
+            : "cursor-pointer hover:bg-muted/30",
+        )}
+      >
+        <span className="pointer-events-none flex h-5 shrink-0 items-center">
+          <OptionRadio checked={props.selected} />
+        </span>
+        <span className="min-w-0 flex-1 text-sm font-medium wrap-anywhere">{props.label}</span>
+      </button>
+      {props.preview}
     </div>
   );
 }
 
-/** The composer strip: the latest reply's open questions, or nothing. */
+/**
+ * The composer's open questions, one at a time, built like T3's AskUserQuestion panel. Mounted per
+ * reply (keyed by its message), so the shown question and the collapse start over with a new one.
+ */
+function QuestionPanel(props: {
+  readonly questions: readonly [ThreadDecisionQuestion, ...ThreadDecisionQuestion[]];
+  readonly earlier: number;
+  readonly actions: ThreadDecisionActions;
+  readonly onOpenPanel: () => void;
+  readonly threadRef: ScopedThreadRef;
+  readonly cwd: string | undefined;
+}) {
+  const { questions, actions } = props;
+  // By label, never index: answered questions leave the list as the snapshot updates.
+  const [currentLabel, setCurrentLabel] = useState(props.questions[0].label);
+  const [collapsed, setCollapsed] = useState(false);
+  const question = questions.find((q) => q.label === currentLabel) ?? questions[0];
+  const index = questions.indexOf(question);
+  const choice = actions.inDraft[question.label];
+  const disabled = !actions.canOperate || choice !== undefined;
+  const choose = (text: string, advance: boolean) => {
+    if (!actions.insert(text) || !advance) return;
+    const next = nextUndrafted(
+      questions.map((q) => q.label),
+      question.label,
+      actions.inDraft,
+    );
+    if (next !== undefined) setCurrentLabel(next);
+  };
+  const goTo = (at: number) => {
+    const target = questions[at];
+    if (target !== undefined) setCurrentLabel(target.label);
+  };
+  const allDecisions =
+    props.earlier > 0 ? `All decisions (+${props.earlier} earlier)` : "All decisions";
+  return (
+    <Collapsible
+      open={!collapsed}
+      onOpenChange={(open) => setCollapsed(!open)}
+      data-thread-decision={question.label}
+    >
+      <ComposerBanner.Row>
+        <CollapsibleTrigger
+          title={
+            collapsed ? "Show the question and its answers" : "Hide the question and its answers"
+          }
+          className="col-[1/3] row-start-1 flex min-h-7 min-w-0 items-center gap-1 self-stretch rounded-xl ps-4 pe-2 text-start hover:bg-foreground/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:min-h-6"
+        >
+          <span className="shrink-0 font-medium text-foreground">{question.label}</span>
+          {question.keyWords === "" ? null : (
+            <>
+              <ComposerBanner.Separator />
+              <span className="min-w-0 truncate text-muted-foreground">{question.keyWords}</span>
+            </>
+          )}
+          {collapsed ? (
+            <>
+              <ComposerBanner.Separator />
+              {/* One plain line, so the markdown's code ticks are dropped rather than shown raw. */}
+              <span className="min-w-0 flex-1 truncate text-secondary-label">
+                {question.question.replaceAll("`", "")}
+              </span>
+            </>
+          ) : null}
+        </CollapsibleTrigger>
+        <ComposerBanner.Actions className="flex-nowrap gap-0">
+          {choice === undefined ? null : (
+            <span className="px-1.5 text-muted-foreground">In draft</span>
+          )}
+          {questions.length > 1 ? (
+            <>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Previous question"
+                disabled={index === 0}
+                onClick={() => goTo(index - 1)}
+              >
+                <ChevronLeftIcon className="size-3.5" />
+              </Button>
+              <ComposerBanner.Count>
+                {index + 1}/{questions.length}
+              </ComposerBanner.Count>
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label="Next question"
+                disabled={index === questions.length - 1}
+                onClick={() => goTo(index + 1)}
+              >
+                <ChevronRightIcon className="size-3.5" />
+              </Button>
+            </>
+          ) : null}
+          <CollapsibleTrigger
+            render={<Button size="icon-xs" variant="ghost" />}
+            aria-label={collapsed ? `Show ${question.label}` : `Hide ${question.label}`}
+          >
+            <ChevronDownIcon className={cn("size-3.5", collapsed && "rotate-180")} />
+          </CollapsibleTrigger>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={allDecisions}
+                  onClick={props.onOpenPanel}
+                />
+              }
+            >
+              <PanelRightIcon className="size-3.5" />
+            </TooltipTrigger>
+            <TooltipPopup side="top">{allDecisions}</TooltipPopup>
+          </Tooltip>
+        </ComposerBanner.Actions>
+      </ComposerBanner.Row>
+      <CollapsiblePanel>
+        <ComposerBanner.Scroll>
+          <ComposerBanner.Body className="ps-6 pe-4 pb-1 wrap-anywhere sm:ps-5.5">
+            <ChatMarkdown
+              text={question.question}
+              cwd={props.cwd}
+              threadRef={props.threadRef}
+              lineBreaks
+              className="pt-0.5 text-foreground/85"
+            />
+            <div className="-ms-2 mt-1.5 sm:-ms-1.5">
+              {question.pick === "" ? null : (
+                <OptionRow
+                  label={`Accept: ${question.pick}`}
+                  ariaLabel={`Accept ${question.label}: ${question.pick} (adds to your message)`}
+                  selected={choice === "accept"}
+                  disabled={disabled}
+                  onChoose={() => choose(decisionMessages.accept(question), true)}
+                  preview={
+                    question.reason === "" ? undefined : (
+                      <ChatMarkdown
+                        text={question.reason}
+                        cwd={props.cwd}
+                        threadRef={props.threadRef}
+                        lineBreaks
+                        className="ps-9 pe-2 pb-1.5 text-xs text-foreground/70 sm:ps-8"
+                      />
+                    )
+                  }
+                />
+              )}
+              <OptionRow
+                label="Answer…"
+                ariaLabel={`Answer ${question.label} in the composer`}
+                selected={choice === "answer"}
+                disabled={disabled}
+                onChoose={() => choose(decisionMessages.answer(question), false)}
+              />
+              <OptionRow
+                label="Not a decision"
+                ariaLabel={`Drop ${question.label} as not a decision (adds to your message)`}
+                selected={choice === "drop"}
+                disabled={disabled}
+                onChoose={() => choose(decisionMessages.drop(question), true)}
+              />
+            </div>
+          </ComposerBanner.Body>
+        </ComposerBanner.Scroll>
+      </CollapsiblePanel>
+    </Collapsible>
+  );
+}
+
+/** The composer panel: the latest reply's open questions, or nothing. */
 export function threadDecisionsBannerItem(input: {
   readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
   readonly onOpenPanel: () => void;
+  readonly threadRef: ScopedThreadRef;
+  readonly cwd: string | undefined;
 }): ComposerBannerStackItem | null {
-  const questions = latestReplyOpenQuestions(input.snapshot);
-  if (questions.length === 0) return null;
-  const earlier = (input.snapshot?.openCount ?? 0) - questions.length;
+  const [first, ...rest] = latestReplyOpenQuestions(input.snapshot);
+  if (first === undefined) return null;
   return {
     id: "thread-decisions",
     variant: "info",
-    icon: <MessageCircleQuestionIcon />,
-    title: questions.length === 1 ? "1 open question" : `${questions.length} open questions`,
-    ...(earlier > 0 ? { description: `${earlier} more from earlier replies` } : {}),
-    actions: (
-      <Button size="xs" variant="ghost" onClick={input.onOpenPanel}>
-        All decisions
-      </Button>
+    // The panel draws its own header, so the notice row's icon and title are not used.
+    icon: null,
+    title: null,
+    content: (
+      <QuestionPanel
+        key={first.sourceMessageId}
+        questions={[first, ...rest]}
+        earlier={(input.snapshot?.openCount ?? 0) - rest.length - 1}
+        actions={input.actions}
+        onOpenPanel={input.onOpenPanel}
+        threadRef={input.threadRef}
+        cwd={input.cwd}
+      />
     ),
-    children: <StripRows questions={questions} actions={input.actions} />,
   };
 }
 
