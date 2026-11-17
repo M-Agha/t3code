@@ -159,16 +159,17 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
     const long = (yield* question("Q4"))?.answerText ?? "";
     assert.deepEqual([long.length, long.at(-1)], [300, "…"]);
 
-    // A label line without the question's shape reopens it but keeps the question it asked. ("Q4 is still
-    // open" asks nothing at all now: session-kit's reply.ts reads it as a status line. "Q4 remains open" is
-    // that filter's named ceiling, still read as asking, so it stands in for any shapeless re-mention.)
+    // An unshaped line about a known label changes nothing: an agent echoing an answered label as it acts on
+    // the answer ("Q7: nothing to change." right after the user's "Q7: yes", 2026-11-17) must not reopen it.
+    const answered = yield* question("Q4");
+    assert.equal(answered?.state, "answered");
     yield* run("r3", 3, "completed");
-    yield* message("a4", "r3", "assistant", "Done.\n\nQ4 remains open: the log is not in yet.");
-    assert.isTrue(yield* decisions.sync(threadId));
+    yield* message("a4", "r3", "assistant", "Done.\n\nQ4: nothing to change, the log is in.");
+    yield* decisions.sync(threadId);
     const status = yield* question("Q4");
     assert.deepEqual(
-      [status?.state, status?.question, status?.sourceMessageId, status?.askedAt],
-      ["open", "Resume now?", "a3", reasked?.askedAt],
+      [status?.state, status?.question, status?.sourceMessageId, status?.answerText],
+      ["answered", answered?.question, answered?.sourceMessageId, answered?.answerText],
     );
 
     // Only the newest choices made without asking reach the snapshot.

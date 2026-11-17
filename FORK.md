@@ -53,6 +53,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   composer instead of sending, so several answers go out as one ordinary message and the agent
   sees every answer; a question the draft already closes shows "in draft". Only messages a person typed count: agent, scheduled-task and relayed
   messages close nothing. _Rejected:_ a model judging each message; an agent "close" tool.
+- **Reopening:** only a shaped re-ask of a known label (one with "My pick is") reopens or rewords
+  it. An unshaped line naming a known label ("Q7: nothing to change." right after the user's
+  "Q7: yes") changes nothing; a label never seen before is still recorded. (2026-11-17: agent
+  echoes reopened answered questions under the earlier rule, which let any line reopen one.)
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
