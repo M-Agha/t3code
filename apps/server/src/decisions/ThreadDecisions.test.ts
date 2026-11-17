@@ -234,6 +234,34 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
   }).pipe(Effect.provide(withDecisions)),
 );
 
+it.effect("marks a choice vetoed once the user sends its Veto line, and publishes it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const vetoed = Effect.fn("vetoed")(function* () {
+      const snapshot = yield* decisions.snapshot(threadId);
+      return snapshot.decidedWithoutAsking.map((item) => [item.text, item.vetoed]);
+    });
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* vetoed(), [["Kept the old index.", false]]);
+
+    // Not a line of its own, or not typed by the user: no veto.
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "Why not Veto: Kept the old index.?");
+    yield* message("u2", "r2", "user", "Veto: Kept the old index.", { createdBy: "agent" });
+    yield* decisions.sync(threadId);
+    assert.deepEqual(yield* vetoed(), [["Kept the old index.", false]]);
+
+    // Closes no question, yet changes the snapshot, so subscribers get it. Lines are read trimmed, as
+    // the panel reads its draft.
+    yield* message("u3", "r2", "user", "Also rename it.\n  Veto: Kept the old index. ");
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* vetoed(), [["Kept the old index.", true]]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
 // Shapes copied from a Claude thread's projected Artifact tool calls; ids and paths shortened.
 const artifactItem = Effect.fn("artifactItem")(function* (
   itemId: string,
