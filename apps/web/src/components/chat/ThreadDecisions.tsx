@@ -1,5 +1,6 @@
 /* oxlint-disable t3code/no-untranslated-copy -- Fork-only English copy: upstream's translation catalogs have no entries for it, so wrapping it would change nothing on screen. FORK.md, "Translation". */
 import {
+  MessageId,
   type ScopedThreadRef,
   type ThreadArtifact,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
@@ -20,11 +21,18 @@ import {
   ChevronRightIcon,
   MessageCircleQuestionIcon,
   PanelRightIcon,
+  PencilLineIcon,
 } from "lucide-react";
+import { useNavigate } from "@tanstack/react-router";
 import {
+  createContext,
+  Fragment,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
+  type RefObject,
+  useContext,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -32,6 +40,11 @@ import {
 import { flushSync } from "react-dom";
 
 import { useOpenLink } from "~/browser/useOpenLink";
+import { collapseExpandedComposerCursor } from "~/composer-logic";
+import { assistantCitationNavigation } from "~/lib/assistantCitationNavigation";
+import { readThreadShell } from "~/state/entities";
+import { useComposerDraftStore } from "~/composerDraftStore";
+import { useStableCallback } from "~/hooks/useStableCallback";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { RelativeTime } from "~/components/RelativeTime";
 import { readLocalApi } from "~/localApi";
@@ -41,7 +54,10 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
+import { Label } from "../ui/label";
+import { Radio, RadioGroup } from "../ui/radio-group";
 import { ScrollArea } from "../ui/scroll-area";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
@@ -49,21 +65,33 @@ import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import type { ChatComposerHandle, ChatComposerProps } from "./ChatComposer";
 import { OptionRadio } from "./ComposerPendingUserInputPanel";
 import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
 import {
+  acceptsPick,
   answerLines,
   ariaItemText,
+  choicesToReview,
   decidedWithoutAskingByReply,
   decisionMessages,
   type DraftChoice,
+  draftLineOf,
+  draftSummary,
+  groupSelection,
   isParkedBusy,
   latestReplyOpenQuestions,
+  lineEnd,
   nextUndrafted,
+  openQuestions,
   openQuestionsByReply,
   type ParkedBusy,
   parkedFocusAfter,
+  plural,
   resolvedQuestions,
+  unfinishedLabels,
+  vetoInDraft,
+  withoutLine,
 } from "./threadDecisions.logic";
 
 /** How the decision buttons reach the thread: an ordinary message, or a line added to the composer. */
@@ -71,8 +99,27 @@ export interface ThreadDecisionActions {
   readonly canOperate: boolean;
   /** Resolves true once the message was sent or queued; failures are reported to the user. */
   readonly send: (text: string) => Promise<boolean>;
-  /** True once the composer took the text; failures are reported to the user. */
-  readonly insert: (text: string) => boolean;
+  /**
+   * True once the composer took the text; failures are reported to the user. The composer takes
+   * focus unless `focus` is false (the Tracker keeps it, so rows can be answered one after another).
+   */
+  readonly insert: (text: string, options?: { readonly focus?: boolean }) => boolean;
+  /**
+   * Sends the draft as the composer's send button does, so a busy run queues or steers as the user
+   * set. Resolves true once sent or queued.
+   */
+  readonly sendDraft: () => Promise<boolean>;
+  /** Puts the caret at the end of the draft's line in the composer; at the draft's end for null. */
+  readonly focusLine: (line: string | null) => void;
+  /** Takes the draft's line out of the composer. */
+  readonly removeLine: (line: string) => void;
+  /** The composer's draft text. */
+  readonly draft: string;
+  /**
+   * The composer is answering T3's own pending question, so what it shows is that answer, not the
+   * draft: the Tracker's line edits and Send draft wait.
+   */
+  readonly answeringPendingInput: boolean;
   /** The open questions the composer's draft already closes, and how. */
   readonly inDraft: Readonly<Record<string, DraftChoice>>;
 }
@@ -92,73 +139,59 @@ export function useThreadDecisions(
   );
 }
 
-function QuestionActions(props: {
-  readonly question: ThreadDecisionQuestion;
-  readonly actions: ThreadDecisionActions;
-}) {
-  const { question, actions } = props;
-  const drafted = actions.inDraft[question.label] !== undefined;
-  const disabled = !actions.canOperate || drafted;
-  return (
-    <span className="ms-auto flex shrink-0 items-center gap-0.5">
-      {drafted ? (
-        <Badge size="sm" variant="outline">
-          in draft
-        </Badge>
-      ) : null}
-      <Button
-        size="xs"
-        variant="outline"
-        disabled={disabled || question.pick === ""}
-        aria-label={`Accept ${question.label}: ${question.pick} (adds to your message)`}
-        onClick={() => actions.insert(decisionMessages.accept(question))}
-      >
-        Accept
-      </Button>
-      <Button
-        size="xs"
-        variant="ghost"
-        disabled={disabled}
-        aria-label={`Answer ${question.label} in the composer`}
-        onClick={() => actions.insert(decisionMessages.answer(question))}
-      >
-        Answer
-      </Button>
-      <Button
-        size="xs"
-        variant="ghost-muted"
-        disabled={disabled}
-        aria-label={`Drop ${question.label} as not a decision (adds to your message)`}
-        onClick={() => actions.insert(decisionMessages.drop(question))}
-      >
-        Drop
-      </Button>
-    </span>
-  );
-}
-
-function QuestionLabel({ question }: { readonly question: ThreadDecisionQuestion }) {
-  return (
-    <span className="flex min-w-0 items-center gap-1.5">
-      <span className="shrink-0 font-mono text-xs font-medium text-foreground">
-        {question.label}
-      </span>
-      {question.keyWords === "" ? null : (
-        <Badge size="sm" variant="outline" className="max-w-40">
-          <span className="truncate">{question.keyWords}</span>
-        </Badge>
-      )}
-    </span>
-  );
-}
-
-function PickBadge({ question }: { readonly question: ThreadDecisionQuestion }) {
-  if (question.pick === "") return null;
-  return (
-    <Badge size="sm" variant="info" className="max-w-48">
-      <span className="truncate">pick: {question.pick}</span>
-    </Badge>
-  );
+/**
+ * The draft actions the Tracker needs from the composer. Kept out of ChatView's body so the callbacks
+ * hold these inputs, never a render's thread state.
+ */
+export function useDraftActions(input: {
+  readonly composerRef: RefObject<ChatComposerHandle | null>;
+  readonly promptRef: RefObject<string>;
+  /** The composer's send in flight, which `submit` starts. */
+  readonly sendingRef: RefObject<Promise<void> | null>;
+  readonly draftTarget: ChatComposerProps["composerDraftTarget"];
+}): Pick<ThreadDecisionActions, "sendDraft" | "focusLine" | "removeLine"> {
+  const { composerRef, promptRef, sendingRef, draftTarget } = input;
+  const sendDraft = useStableCallback(async () => {
+    const composer = composerRef.current;
+    if (composer === null) return false;
+    sendingRef.current = null;
+    const submitted = composer.submit();
+    // Every other refusal already told the user why.
+    if (submitted === "blocked") {
+      toastManager.add({
+        type: "warning",
+        title: "Not sent",
+        description: "The composer cannot send right now, so your draft is as it was.",
+      });
+    }
+    if (submitted !== "sent") return false;
+    try {
+      await sendingRef.current;
+      return true;
+    } catch {
+      // A failed send is T3's to report, and T3 puts the draft back.
+      return false;
+    }
+  });
+  // The draft from the store: while T3's own question is answered, the composer's prompt is that answer.
+  const readDraft = () =>
+    useComposerDraftStore.getState().getComposerDraft(draftTarget)?.prompt ?? "";
+  const focusLine = useStableCallback((line: string | null) => {
+    const composer = composerRef.current;
+    const prompt = readDraft();
+    const end = line === null ? null : lineEnd(prompt, line);
+    if (end === null) composer?.focusAtEnd();
+    else composer?.focusAt(collapseExpandedComposerCursor(prompt, end));
+  });
+  const removeLine = useStableCallback((line: string) => {
+    const prompt = readDraft();
+    const next = withoutLine(prompt, line);
+    if (next === prompt) return;
+    promptRef.current = next;
+    useComposerDraftStore.getState().setPrompt(draftTarget, next);
+    composerRef.current?.resetCursorState({ prompt: next, cursor: next.length });
+  });
+  return { sendDraft, focusLine, removeLine };
 }
 
 const OPTION_ROW =
@@ -443,33 +476,460 @@ function EmptyState(props: { readonly title: string; readonly description: strin
   );
 }
 
-function OpenQuestionCard(props: {
-  readonly question: ThreadDecisionQuestion;
-  readonly actions: ThreadDecisionActions;
+const CHIP_TONES = {
+  open: "bg-warning-surface text-warning-foreground",
+  draft: "bg-tracker-draft/12 text-tracker-draft",
+  answered: "bg-success/8 text-success-foreground dark:bg-success/16",
+  dropped: "bg-muted text-secondary-foreground",
+} as const;
+
+/** A question's label, coloured by its state; the state is also said in words beside it or above it. */
+function StateChip(props: { readonly label: string; readonly tone: keyof typeof CHIP_TONES }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex h-4.5 shrink-0 items-center rounded-sm px-1 font-mono text-xs font-medium",
+        CHIP_TONES[props.tone],
+      )}
+    >
+      {props.label}
+    </span>
+  );
+}
+
+/** A line as it stands in the draft, in the draft colour. */
+function DraftLineCode(props: { readonly line: string }) {
+  return (
+    <code className="min-w-0 truncate rounded-sm bg-tracker-draft/10 px-1 font-mono text-xs text-tracker-draft">
+      {props.line}
+    </code>
+  );
+}
+
+/** Where focus goes once an action re-renders the panel: a row, and its controls in order of preference. */
+interface FocusTarget {
+  readonly row: string;
+  readonly controls: ReadonlyArray<string>;
+}
+
+/**
+ * Moves focus after a Tracker action that replaces the clicked control (Accept becomes Edit, Remove
+ * brings Accept back), so a keyboard user can go on to the next row. Rows carry `data-tracker-row`,
+ * controls `data-tracker-control`.
+ */
+const FocusAfterContext = createContext<(target: FocusTarget) => void>(() => {});
+
+function useFocusAfter(panelRef: RefObject<HTMLElement | null>) {
+  const pending = useRef<FocusTarget | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus to a control the last action's re-render brought in
+  useLayoutEffect(() => {
+    const target = pending.current;
+    const panel = panelRef.current;
+    if (target === null || panel === null) return;
+    // Focus that fell to the body with the clicked control is the panel's to move; anywhere else,
+    // the user moved it.
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && !panel.contains(active)) {
+      pending.current = null;
+      return;
+    }
+    const row = panel.querySelector(`[data-tracker-row="${CSS.escape(target.row)}"]`);
+    for (const control of target.controls) {
+      const element = row?.querySelector(`[data-tracker-control="${control}"]`);
+      if (element instanceof HTMLElement) {
+        pending.current = null;
+        element.focus();
+        return;
+      }
+    }
+  });
+  return (target: FocusTarget) => {
+    pending.current = target;
+  };
+}
+
+/** The bar under the tabs: a tab's counts, and its mode's control. */
+function StatusBar(props: { readonly children: ReactNode }) {
+  return (
+    <div
+      data-tracker-row="status"
+      className="flex min-h-9 shrink-0 items-center gap-1.5 border-b border-border px-4 py-1 text-xs text-muted-foreground"
+    >
+      {props.children}
+    </div>
+  );
+}
+
+function Dot() {
+  return <span aria-hidden>·</span>;
+}
+
+/**
+ * A reply's text to cite so the chat shows it: T3's citation reveal scrolls to the message and
+ * highlights the quote. Markdown marks are dropped, as the rendered reply drops them.
+ */
+const replyQuote = (text: string) => text.replaceAll("`", "").replaceAll("**", "").slice(0, 80);
+
+/** Shows a reply in the chat, through the same reveal a quote's citation uses. */
+function useShowReply(threadRef: ScopedThreadRef) {
+  const navigate = useNavigate();
+  return (messageId: MessageId, quote: string) => {
+    const text = replyQuote(quote);
+    void navigate(
+      assistantCitationNavigation(
+        {
+          version: 1,
+          environmentId: threadRef.environmentId,
+          threadId: threadRef.threadId,
+          messageId,
+          text,
+          // No real offsets or context: the reveal then finds a quote that occurs once in the reply.
+          start: 0,
+          end: text.length,
+          prefix: "",
+          suffix: "",
+        },
+        readThreadShell(threadRef),
+      ),
+    );
+  };
+}
+
+/** A reply group's heading: which reply, its age, and a button that shows it in the chat. */
+function ReplyHeading(props: {
+  readonly title: string;
+  readonly at: string;
+  readonly onShow: () => void;
+  readonly children?: ReactNode;
 }) {
+  return (
+    <div className="flex min-h-8 items-center gap-1.5 ps-4 pe-3 pt-3 text-xs text-muted-foreground">
+      <span className="font-medium text-foreground/80">{props.title}</span>
+      <Dot />
+      <RelativeTime timestamp={props.at} />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label={`Show the ${props.title.toLowerCase()} in the chat`}
+              onClick={props.onShow}
+            />
+          }
+        >
+          <ArrowUpRightIcon />
+        </TooltipTrigger>
+        <TooltipPopup side="top">Show in the chat</TooltipPopup>
+      </Tooltip>
+      {props.children === undefined ? null : <span className="ms-auto">{props.children}</span>}
+    </div>
+  );
+}
+
+/** "Pick: <pick>." and the reason, in the pick colour; nothing for a question without a pick. */
+function PickLine(props: { readonly question: ThreadDecisionQuestion }) {
+  const { question } = props;
+  if (question.pick === "") return null;
+  return (
+    <div className="mt-1 text-xs text-muted-foreground wrap-anywhere">
+      <span className="font-medium text-tracker-pick">Pick: {question.pick}.</span>{" "}
+      {/* Inline, so the reason runs on after the pick as one paragraph. */}
+      <ChatMarkdown
+        text={question.reason}
+        cwd={undefined}
+        className="inline text-xs [&_p]:inline"
+      />
+    </div>
+  );
+}
+
+function QuestionBody(props: { readonly question: ThreadDecisionQuestion }) {
   const { question } = props;
   return (
-    <li className="rounded-lg border border-border/70 p-2.5" data-thread-decision={question.label}>
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <QuestionLabel question={question} />
-        <PickBadge question={question} />
+    <>
+      <ChatMarkdown text={question.question} cwd={undefined} lineBreaks className="mt-1 text-sm" />
+      <PickLine question={question} />
+    </>
+  );
+}
+
+/** An open question in the Questions tab: its answers, or its line once the draft holds one. */
+function QuestionRow(props: {
+  readonly question: ThreadDecisionQuestion;
+  readonly open: ReadonlyArray<ThreadDecisionQuestion>;
+  readonly actions: ThreadDecisionActions;
+}) {
+  const { question, actions } = props;
+  const focusAfter = useContext(FocusAfterContext);
+  const drafted = actions.inDraft[question.label] !== undefined;
+  const line = drafted ? draftLineOf(actions.draft, question, props.open) : null;
+  // Accept and Not a decision keep focus in the panel, on the row's Edit once it is drafted.
+  const answer = (text: string) => {
+    if (actions.insert(text, { focus: false })) {
+      focusAfter({ row: question.label, controls: ["edit", "edit-in-composer"] });
+    }
+  };
+  return (
+    <li
+      className="border-b border-border px-4 py-2.5"
+      data-thread-decision={question.label}
+      data-tracker-row={question.label}
+    >
+      <div className="flex min-h-5 items-center gap-2">
+        <StateChip label={question.label} tone={drafted ? "draft" : "open"} />
+        <span className="min-w-0 truncate text-xs text-muted-foreground">{question.keyWords}</span>
+        {drafted ? (
+          <span className="ms-auto shrink-0 text-xs font-medium text-tracker-draft">In draft</span>
+        ) : null}
       </div>
-      <p className="mt-1.5 text-sm text-foreground wrap-anywhere">{question.question}</p>
-      {question.reason === "" ? null : (
-        <p className="mt-1 text-xs text-muted-foreground wrap-anywhere">{question.reason}</p>
+      <QuestionBody question={question} />
+      {drafted ? (
+        <div className="mt-1.5 flex min-w-0 items-center gap-1">
+          {line === null ? null : <DraftLineCode line={line.line} />}
+          <span className="ms-auto flex shrink-0 items-center">
+            {line?.own ? (
+              <>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={actions.answeringPendingInput}
+                  data-tracker-control="edit"
+                  aria-label={`Edit ${question.label}'s line in the composer`}
+                  onClick={() => actions.focusLine(line.line)}
+                >
+                  Edit
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={actions.answeringPendingInput}
+                  aria-label={`Remove ${question.label}'s line from your draft`}
+                  onClick={() => {
+                    actions.removeLine(line.line);
+                    focusAfter({ row: question.label, controls: ["accept", "answer"] });
+                  }}
+                >
+                  Remove
+                </Button>
+              </>
+            ) : (
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={actions.answeringPendingInput}
+                data-tracker-control="edit-in-composer"
+                aria-label={`Edit the line that answers ${question.label} in the composer`}
+                onClick={() => actions.focusLine(line?.line ?? null)}
+              >
+                Edit in composer
+              </Button>
+            )}
+          </span>
+        </div>
+      ) : (
+        <div className="-ms-2 mt-1 flex flex-wrap items-center">
+          {question.pick === "" ? null : (
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={!actions.canOperate}
+              data-tracker-control="accept"
+              aria-label={`Accept ${question.label}: ${question.pick} (adds to your draft)`}
+              onClick={() => answer(decisionMessages.accept(question))}
+            >
+              <span className="font-medium text-tracker-pick">Accept: {question.pick}</span>
+            </Button>
+          )}
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!actions.canOperate}
+            data-tracker-control="answer"
+            aria-label={`Answer ${question.label} in your draft`}
+            onClick={() => actions.insert(decisionMessages.answer(question))}
+          >
+            Answer…
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!actions.canOperate}
+            aria-label={`${question.label} is not a decision (adds to your draft)`}
+            onClick={() => answer(decisionMessages.drop(question))}
+          >
+            Not a decision
+          </Button>
+        </div>
       )}
-      <div className="mt-2 flex justify-end">
-        <QuestionActions question={question} actions={props.actions} />
-      </div>
     </li>
   );
 }
 
+/** A question in Select mode: the whole row toggles it; one the draft holds cannot be selected. */
+function SelectableRow(props: {
+  readonly question: ThreadDecisionQuestion;
+  readonly drafted: boolean;
+  readonly selected: boolean;
+  readonly onToggle: () => void;
+}) {
+  const { question, drafted, selected } = props;
+  return (
+    <li data-thread-decision={question.label}>
+      <label
+        className={cn(
+          "grid grid-cols-[auto_minmax(0,1fr)] gap-x-2.5 border-b border-border py-2.5 pe-4",
+          drafted ? "cursor-default" : "cursor-pointer",
+          selected ? "border-s-2 border-s-ring bg-info/8 ps-3.5" : "ps-4",
+        )}
+      >
+        <Checkbox
+          className="mt-0.5"
+          checked={selected}
+          disabled={drafted}
+          aria-label={
+            drafted ? `${question.label} is already in your draft` : `Select ${question.label}`
+          }
+          onCheckedChange={props.onToggle}
+        />
+        <div className="min-w-0">
+          <div className="flex min-h-5 items-center gap-2">
+            <StateChip label={question.label} tone={drafted ? "draft" : "open"} />
+            <span className="min-w-0 truncate text-xs text-muted-foreground">
+              {question.keyWords}
+            </span>
+            {drafted ? (
+              <span className="ms-auto shrink-0 text-xs font-medium text-tracker-draft">
+                In draft
+              </span>
+            ) : null}
+          </div>
+          <QuestionBody question={question} />
+        </div>
+      </label>
+    </li>
+  );
+}
+
+type BulkChoice = "accept" | "drop";
+
+/** Select mode's dock: what the selection adds, shown against the whole draft, and one Add. */
+function SelectDock(props: {
+  readonly selected: ReadonlyArray<ThreadDecisionQuestion>;
+  readonly actions: ThreadDecisionActions;
+  readonly onClear: () => void;
+  readonly onAdded: () => void;
+}) {
+  const { selected, actions } = props;
+  const [choice, setChoice] = useState<BulkChoice>("accept");
+  const added = answerLines(selected, choice, actions.inDraft);
+  const skipped = choice === "accept" ? selected.filter((question) => question.pick === "") : [];
+  const existing = actions.draft.split("\n").filter((line) => line.trim() !== "");
+  const replies = new Set(selected.map((question) => question.sourceMessageId)).size;
+  const previewRef = useRef<HTMLDivElement>(null);
+  const addedKey = added.join("\n");
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- scrolls the capped preview to the lines this action adds, which come last
+  useLayoutEffect(() => {
+    const preview = previewRef.current;
+    // Nothing to add, nothing to show.
+    if (preview !== null && addedKey !== "") preview.scrollTop = preview.scrollHeight;
+  }, [addedKey, previewRef]);
+  const add = () => {
+    if (actions.insert(added.join("\n"), { focus: false })) props.onAdded();
+  };
+  return (
+    <section
+      aria-label={`Answer ${plural(selected.length, "selected question")}`}
+      className="shrink-0 border-t border-border bg-muted px-4 pt-2.5 pb-3"
+    >
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="font-semibold text-foreground">{selected.length} selected</span>
+        <Dot />
+        <span>from {plural(replies, "reply", "replies")}</span>
+        <Button
+          size="xs"
+          variant="ghost"
+          className="ms-auto"
+          disabled={selected.length === 0}
+          onClick={props.onClear}
+        >
+          Clear
+        </Button>
+      </div>
+      <RadioGroup
+        aria-label="Answer the selected questions with"
+        value={choice}
+        onValueChange={(value) => setChoice(value === "drop" ? "drop" : "accept")}
+        className="mt-2 flex-row"
+      >
+        <Label className="cursor-pointer">
+          <Radio value="accept" />
+          Accept picks
+        </Label>
+        <Label className="cursor-pointer">
+          <Radio value="drop" />
+          Not a decision
+        </Label>
+      </RadioGroup>
+      {existing.length + added.length === 0 ? null : (
+        <div
+          ref={previewRef}
+          role="group"
+          // Focusable, so the capped preview scrolls from the keyboard too.
+          tabIndex={0}
+          aria-label="Your draft after this action"
+          className="mt-2.5 max-h-24 overflow-y-auto rounded-md border border-border bg-background px-2.5 py-1.5 font-mono text-xs leading-relaxed text-muted-foreground wrap-anywhere"
+        >
+          {existing.map((line, index) => (
+            // oxlint-disable-next-line react/no-array-index-key -- draft lines can repeat; their order is their identity
+            <div key={`existing-${index}`} className="grid grid-cols-[1rem_minmax(0,1fr)]">
+              <span />
+              <span>{line}</span>
+            </div>
+          ))}
+          {added.map((line) => (
+            <div key={line} className="grid grid-cols-[1rem_minmax(0,1fr)] text-foreground">
+              <span className="text-info-foreground">
+                <span aria-hidden>+</span>
+                <span className="sr-only">Adds </span>
+              </span>
+              <span>{line}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {skipped.length === 0 ? null : (
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Skipped, no pick: {skipped.map((question) => question.label).join(", ")}
+        </p>
+      )}
+      <div className="mt-2.5 flex items-center gap-2">
+        <Button size="sm" disabled={added.length === 0 || !actions.canOperate} onClick={add}>
+          Add {added.length} to draft
+        </Button>
+        <span className="ms-auto text-xs text-muted-foreground">Send from the draft bar</span>
+      </div>
+    </section>
+  );
+}
+
+const replyTitle = (index: number) => (index === 0 ? "Latest reply" : "Earlier reply");
+
 function QuestionsTab(props: {
+  readonly threadRef: ScopedThreadRef;
   readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
+  readonly selecting: boolean;
+  readonly onSelecting: (selecting: boolean) => void;
 }) {
+  const { actions, selecting } = props;
+  const showReply = useShowReply(props.threadRef);
+  const focusAfter = useContext(FocusAfterContext);
+  const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const groups = openQuestionsByReply(props.snapshot);
+  const open = openQuestions(props.snapshot);
+  // A selection ends with Select mode, however it ends.
+  if (!selecting && selected.size > 0) setSelected(new Set());
   if (groups.length === 0) {
     return (
       <EmptyState
@@ -478,59 +938,370 @@ function QuestionsTab(props: {
       />
     );
   }
-  return groups.map((group, index) => (
-    <section key={group.messageId} aria-label={index === 0 ? "Latest reply" : "Earlier reply"}>
-      <SectionHeading at={group.at}>
-        {index === 0 ? "Latest reply" : "Earlier reply"}
-      </SectionHeading>
-      <ul className="flex flex-col gap-1.5">
-        {group.items.map((question) => (
-          <OpenQuestionCard key={question.label} question={question} actions={props.actions} />
-        ))}
-      </ul>
-    </section>
-  ));
+  const drafted = (question: ThreadDecisionQuestion) =>
+    actions.inDraft[question.label] !== undefined;
+  const inDraftCount = open.filter(drafted).length;
+  // What the draft now holds cannot stay selected.
+  const selectedQuestions = open.filter(
+    (question) => selected.has(question.label) && !drafted(question),
+  );
+  const toggle = (labels: ReadonlyArray<string>, on: boolean) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      for (const label of labels) {
+        if (on) next.add(label);
+        else next.delete(label);
+      }
+      return next;
+    });
+  const stopSelecting = () => {
+    setSelected(new Set());
+    props.onSelecting(false);
+  };
+  return (
+    <>
+      <StatusBar>
+        {selecting ? (
+          <>
+            <span className="font-medium text-info-foreground">Selecting</span>
+            <Dot />
+            <span className="min-w-0 truncate">questions in your draft can't be selected</span>
+            <Button size="xs" variant="ghost" className="ms-auto" onClick={stopSelecting}>
+              Done
+            </Button>
+          </>
+        ) : (
+          <>
+            <span>{open.length - inDraftCount} to answer</span>
+            {inDraftCount > 0 ? (
+              <>
+                <Dot />
+                <span className="text-tracker-draft">{inDraftCount} in draft</span>
+              </>
+            ) : null}
+            <Button
+              size="xs"
+              variant="ghost"
+              className="ms-auto"
+              disabled={!actions.canOperate}
+              data-tracker-control="select"
+              onClick={() => props.onSelecting(true)}
+            >
+              Select
+            </Button>
+          </>
+        )}
+      </StatusBar>
+      <ScrollArea className="min-h-0 flex-1">
+        {groups.map((group, index) => {
+          const title = replyTitle(index);
+          const [first] = group.items;
+          const show = () =>
+            showReply(
+              MessageId.make(group.messageId),
+              first === undefined || first.keyWords === ""
+                ? (first?.label ?? "")
+                : `${first.label}, ${first.keyWords}`,
+            );
+          const selectable = group.items.filter((question) => !drafted(question));
+          const picks = answerLines(group.items, "accept", actions.inDraft);
+          return (
+            <section key={group.messageId} aria-label={title}>
+              {selecting ? (
+                <label className="flex min-h-8 cursor-pointer items-center gap-2.5 ps-4 pe-3 pt-3 text-xs text-muted-foreground">
+                  <GroupCheckbox
+                    title={title}
+                    selectable={selectable.map((question) => question.label)}
+                    selected={selected}
+                    onChange={(on) =>
+                      toggle(
+                        selectable.map((question) => question.label),
+                        on,
+                      )
+                    }
+                  />
+                  <span className="font-medium text-foreground/80">{title}</span>
+                  <Dot />
+                  <RelativeTime timestamp={group.at} />
+                </label>
+              ) : (
+                <ReplyHeading title={title} at={group.at} onShow={show}>
+                  {picks.length === 0 ? null : (
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      disabled={!actions.canOperate}
+                      aria-label={`Accept ${plural(picks.length, "pick")} (adds ${picks.join(", ")} to your draft)`}
+                      onClick={() => {
+                        if (!actions.insert(picks.join("\n"), { focus: false })) return;
+                        // The button leaves at zero; the first row it answered takes focus.
+                        const label = group.items.find(
+                          (question) => !drafted(question) && question.pick !== "",
+                        )?.label;
+                        if (label !== undefined) {
+                          focusAfter({ row: label, controls: ["edit", "edit-in-composer"] });
+                        }
+                      }}
+                    >
+                      <span className="font-medium text-tracker-pick">
+                        Accept {plural(picks.length, "pick")}
+                      </span>
+                    </Button>
+                  )}
+                </ReplyHeading>
+              )}
+              <ul>
+                {group.items.map((question) =>
+                  selecting ? (
+                    <SelectableRow
+                      key={question.label}
+                      question={question}
+                      drafted={drafted(question)}
+                      selected={selected.has(question.label) && !drafted(question)}
+                      onToggle={() => toggle([question.label], !selected.has(question.label))}
+                    />
+                  ) : (
+                    <QuestionRow
+                      key={question.label}
+                      question={question}
+                      open={open}
+                      actions={actions}
+                    />
+                  ),
+                )}
+              </ul>
+            </section>
+          );
+        })}
+      </ScrollArea>
+      {selecting ? (
+        <SelectDock
+          selected={selectedQuestions}
+          actions={actions}
+          onClear={() => setSelected(new Set())}
+          onAdded={() => {
+            stopSelecting();
+            focusAfter({ row: "status", controls: ["select"] });
+          }}
+        />
+      ) : null}
+    </>
+  );
 }
+
+function GroupCheckbox(props: {
+  readonly title: string;
+  readonly selectable: ReadonlyArray<string>;
+  readonly selected: ReadonlySet<string>;
+  readonly onChange: (on: boolean) => void;
+}) {
+  const state = groupSelection(props.selectable, props.selected);
+  return (
+    <Checkbox
+      checked={state === true}
+      indeterminate={state === "mixed"}
+      disabled={props.selectable.length === 0}
+      aria-label={`Select every question of the ${props.title.toLowerCase()} you can select`}
+      onCheckedChange={() => props.onChange(state !== true)}
+    />
+  );
+}
+
+/** How long Reopen waits for an Undo before it reopens the question. */
+const REOPEN_UNDO_MS = 5_000;
+
+/**
+ * Reopen, held back while its toast offers Undo; the only Tracker action that skips the draft. Held
+ * by the panel, so a tab switch keeps the toast's Undo working; when the panel goes, what is still
+ * held goes ahead, since the user asked for it.
+ */
+function useReopenWithUndo() {
+  const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
+  const held = useRef(
+    new Map<
+      string,
+      { readonly timer: number; readonly toastId: string; readonly run: () => void }
+    >(),
+  );
+  // Held, or sent and not yet failed. A sent reopen leaves its row once the snapshot shows the
+  // question open; the key carries resolvedAt, so a question answered again starts afresh.
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const unpend = (key: string) =>
+    setPending((current) => {
+      const next = new Set(current);
+      next.delete(key);
+      return next;
+    });
+  const release = (key: string) => {
+    const entry = held.current.get(key);
+    if (entry === undefined) return undefined;
+    held.current.delete(key);
+    window.clearTimeout(entry.timer);
+    toastManager.close(entry.toastId);
+    return entry;
+  };
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the reopens still held back when the panel unmounts
+  useEffect(() => {
+    const entries = held.current;
+    return () => {
+      for (const entry of entries.values()) {
+        window.clearTimeout(entry.timer);
+        toastManager.close(entry.toastId);
+        entry.run();
+      }
+      entries.clear();
+    };
+  }, [held]);
+  const keyOf = (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) =>
+    `${threadRef.threadId}:${question.label}:${question.resolvedAt ?? ""}`;
+  const start = (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) => {
+    const key = keyOf(threadRef, question);
+    if (pending.has(key)) return;
+    // The thread is fixed now, so a panel that moves to another thread still reopens this one.
+    const run = () =>
+      void reopen({
+        environmentId: threadRef.environmentId,
+        input: { threadId: threadRef.threadId, label: question.label },
+      }).then((result) => {
+        // A failed reopen was reported; its row may be tried again.
+        if (result._tag !== "Success") unpend(key);
+      });
+    const goAhead = () => release(key)?.run();
+    const toastId = toastManager.add({
+      type: "info",
+      title: `Reopening ${question.label}`,
+      description: "It goes back to Questions.",
+      timeout: 0,
+      actionProps: {
+        children: "Undo",
+        onClick: () => {
+          if (release(key) !== undefined) unpend(key);
+        },
+      },
+      data: { onClose: goAhead },
+    });
+    held.current.set(key, { timer: window.setTimeout(goAhead, REOPEN_UNDO_MS), toastId, run });
+    setPending((current) => new Set(current).add(key));
+  };
+  return {
+    isPending: (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) =>
+      pending.has(keyOf(threadRef, question)),
+    start,
+  };
+}
+
+type ReopenWithUndo = ReturnType<typeof useReopenWithUndo>;
 
 function ResolvedRow(props: {
   readonly question: ThreadDecisionQuestion;
   readonly canReopen: boolean;
-  readonly onReopen: (question: ThreadDecisionQuestion) => void;
+  readonly reopening: boolean;
+  readonly onReopen: () => void;
 }) {
   const { question } = props;
+  const answered = question.state === "answered";
+  const departed =
+    answered &&
+    question.pick !== "" &&
+    question.answerText !== null &&
+    !acceptsPick(question.answerText, question);
   return (
-    <li className="rounded-lg border border-border/70 p-2.5" data-thread-decision={question.label}>
-      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-        <QuestionLabel question={question} />
-        <span className="flex shrink-0 items-center gap-1.5">
-          <Badge size="sm" variant={question.state === "answered" ? "success" : "secondary"}>
-            {question.state}
-          </Badge>
-          {question.resolvedAt === null ? null : (
-            <span className="text-2xs text-muted-foreground">
-              <RelativeTime timestamp={question.resolvedAt} />
-            </span>
-          )}
+    <li className="border-b border-border ps-4 pe-3 py-2.5" data-thread-decision={question.label}>
+      <div className="flex min-h-6 items-center gap-2">
+        <StateChip label={question.label} tone={answered ? "answered" : "dropped"} />
+        <span className="min-w-0 truncate text-xs text-muted-foreground">{question.keyWords}</span>
+        <span className="ms-auto shrink-0 text-xs text-muted-foreground">
+          {question.resolvedAt === null ? null : <RelativeTime timestamp={question.resolvedAt} />}
         </span>
-      </div>
-      <p className="mt-1.5 text-sm text-foreground/80 wrap-anywhere">{question.question}</p>
-      {question.answerText === null ? null : (
-        <p className="mt-1 text-xs text-muted-foreground wrap-anywhere">
-          <span className="font-medium text-foreground/70">You: </span>
-          {question.answerText}
-        </p>
-      )}
-      <div className="mt-2 flex justify-end">
         <Button
           size="xs"
           variant="ghost"
-          disabled={!props.canReopen}
+          disabled={!props.canReopen || props.reopening}
           aria-label={`Reopen ${question.label}`}
-          onClick={() => props.onReopen(question)}
+          onClick={props.onReopen}
         >
-          Reopen
+          {props.reopening ? "Reopening…" : "Reopen"}
         </Button>
       </div>
+      <ChatMarkdown
+        text={question.question}
+        cwd={undefined}
+        lineBreaks
+        className="mt-1 text-sm text-muted-foreground"
+      />
+      {question.answerText === null ? null : (
+        <p className="mt-0.5 text-sm whitespace-pre-wrap wrap-anywhere">
+          <span className="me-1.5 text-xs font-semibold text-success-foreground">You</span>
+          {question.answerText}
+        </p>
+      )}
+      {departed ? (
+        <p className="mt-0.5 text-xs text-tracker-pick wrap-anywhere">Pick was: {question.pick}</p>
+      ) : null}
+    </li>
+  );
+}
+
+function UnaskedRow(props: {
+  readonly item: ThreadDecidedWithoutAsking;
+  readonly actions: ThreadDecisionActions;
+}) {
+  const { item, actions } = props;
+  const focusAfter = useContext(FocusAfterContext);
+  const row = `veto:${item.messageId}:${item.ordinal}`;
+  const line = decisionMessages.veto(item);
+  const drafted = !item.vetoed && vetoInDraft(actions.draft, item);
+  return (
+    <li
+      className="flex items-start gap-2.5 border-b border-border py-2 ps-4 pe-3"
+      data-tracker-row={row}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "w-0.75 self-stretch rounded-full",
+          item.vetoed ? "bg-border" : drafted ? "bg-tracker-draft" : "bg-tracker-agent",
+        )}
+      />
+      <div className="min-w-0 flex-1">
+        <ChatMarkdown text={item.text} cwd={undefined} lineBreaks className="text-sm" />
+        {drafted ? (
+          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs">
+            <span className="shrink-0 font-medium text-tracker-draft">In draft</span>
+            <DraftLineCode line={line} />
+            <Button
+              size="xs"
+              variant="ghost"
+              className="ms-auto"
+              disabled={actions.answeringPendingInput}
+              data-tracker-control="remove"
+              aria-label={`Remove the veto from your draft: ${ariaItemText(item.text)}`}
+              onClick={() => {
+                actions.removeLine(line);
+                focusAfter({ row, controls: ["veto"] });
+              }}
+            >
+              Remove
+            </Button>
+          </div>
+        ) : null}
+      </div>
+      {item.vetoed ? (
+        <span className="shrink-0 py-0.5 text-xs font-medium text-muted-foreground">Vetoed</span>
+      ) : drafted ? null : (
+        <Button
+          size="xs"
+          variant="ghost"
+          disabled={!actions.canOperate}
+          data-tracker-control="veto"
+          aria-label={`Veto: ${ariaItemText(item.text)} (adds to your draft)`}
+          onClick={() => {
+            if (actions.insert(line, { focus: false })) focusAfter({ row, controls: ["remove"] });
+          }}
+        >
+          <span className="font-medium text-tracker-agent">Veto</span>
+        </Button>
+      )}
     </li>
   );
 }
@@ -539,13 +1310,15 @@ function DecisionsTab(props: {
   readonly threadRef: ScopedThreadRef;
   readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
+  readonly reopen: ReopenWithUndo;
 }) {
+  const { threadRef, snapshot, actions, reopen } = props;
   const canReopen = useAtomValue(
-    serverEnvironment.reopenThreadDecision.permissionAtom(props.threadRef.environmentId),
+    serverEnvironment.reopenThreadDecision.permissionAtom(threadRef.environmentId),
   );
-  const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
-  const resolved = resolvedQuestions(props.snapshot);
-  const unasked = decidedWithoutAskingByReply(props.snapshot);
+  const showReply = useShowReply(threadRef);
+  const resolved = resolvedQuestions(snapshot);
+  const unasked = decidedWithoutAskingByReply(snapshot);
   if (resolved.length === 0 && unasked.length === 0) {
     return (
       <EmptyState
@@ -554,63 +1327,115 @@ function DecisionsTab(props: {
       />
     );
   }
-  const onReopen = (question: ThreadDecisionQuestion) => {
-    void reopen({
-      environmentId: props.threadRef.environmentId,
-      input: { threadId: props.threadRef.threadId, label: question.label },
-    });
-  };
+  const answered = resolved.filter((question) => question.state === "answered");
+  const dropped = resolved.filter((question) => question.state !== "answered");
+  const toReview = choicesToReview(snapshot, actions.draft);
+  const vetoesInDraft = (snapshot?.decidedWithoutAsking ?? []).filter(
+    (item) => !item.vetoed && vetoInDraft(actions.draft, item),
+  ).length;
+  const counts = [
+    ...(vetoesInDraft > 0 ? [`${plural(vetoesInDraft, "veto", "vetoes")} in draft`] : []),
+    ...(answered.length > 0 ? [`${answered.length} answered`] : []),
+    ...(dropped.length > 0 ? [`${dropped.length} not a decision`] : []),
+  ];
+  const resolvedSection = (title: string, questions: ReadonlyArray<ThreadDecisionQuestion>) =>
+    questions.length === 0 ? null : (
+      <section aria-label={title}>
+        <h3 className="ps-4 pe-3 pt-5 pb-1 text-xs font-medium text-foreground/80">{title}</h3>
+        <ul>
+          {questions.map((question) => (
+            <ResolvedRow
+              key={question.label}
+              question={question}
+              canReopen={canReopen}
+              reopening={reopen.isPending(threadRef, question)}
+              onReopen={() => reopen.start(threadRef, question)}
+            />
+          ))}
+        </ul>
+      </section>
+    );
   return (
     <>
-      {resolved.length === 0 ? null : (
-        <section aria-label="Resolved questions">
-          <SectionHeading>Resolved</SectionHeading>
-          <ul className="flex flex-col gap-1.5">
-            {resolved.map((question) => (
-              <ResolvedRow
-                key={question.label}
-                question={question}
-                canReopen={canReopen}
-                onReopen={onReopen}
+      <StatusBar>
+        <span className={cn(toReview > 0 && "text-tracker-agent")}>
+          {plural(toReview, "choice")} to review
+        </span>
+        {counts.map((count) => (
+          <Fragment key={count}>
+            <Dot />
+            <span>{count}</span>
+          </Fragment>
+        ))}
+      </StatusBar>
+      <ScrollArea className="min-h-0 flex-1">
+        {unasked.map((group, index) => {
+          const [first] = group.items;
+          return (
+            <section key={group.messageId} aria-label="Decided without asking">
+              <ReplyHeading
+                title={`Decided without asking · ${replyTitle(index).toLowerCase()}`}
+                at={group.at}
+                onShow={() => showReply(MessageId.make(group.messageId), first?.text ?? "")}
               />
-            ))}
-          </ul>
-        </section>
-      )}
-      {unasked.map((group) => (
-        <section key={group.messageId} aria-label="Decided without asking">
-          <SectionHeading at={group.at}>Decided without asking</SectionHeading>
-          <ul className="flex flex-col gap-1">
-            {group.items.map((item) => (
-              <UnaskedRow key={item.ordinal} item={item} actions={props.actions} />
-            ))}
-          </ul>
-        </section>
-      ))}
-      {props.snapshot?.decidedWithoutAsking.length === THREAD_DECIDED_WITHOUT_ASKING_LIMIT ? (
-        <p className="px-1 pt-2 text-xs text-muted-foreground">Older choices are in the thread.</p>
-      ) : null}
+              <ul>
+                {group.items.map((item) => (
+                  <UnaskedRow key={item.ordinal} item={item} actions={actions} />
+                ))}
+              </ul>
+            </section>
+          );
+        })}
+        {snapshot?.decidedWithoutAsking.length === THREAD_DECIDED_WITHOUT_ASKING_LIMIT ? (
+          <p className="px-4 pt-2 text-xs text-muted-foreground">
+            Older choices are in the thread.
+          </p>
+        ) : null}
+        {resolvedSection("Answered", answered)}
+        {resolvedSection("Not a decision", dropped)}
+      </ScrollArea>
     </>
   );
 }
 
-function UnaskedRow(props: {
-  readonly item: ThreadDecidedWithoutAsking;
+/** The draft's summary on every tab while it has content, and the composer's own send. */
+function DraftBar(props: {
+  readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
 }) {
+  const { actions } = props;
+  // One send at a time: a second click while the first is in flight would send twice.
+  const [sending, setSending] = useState(false);
+  const open = openQuestions(props.snapshot);
+  const summary = draftSummary(actions.draft, open, actions.inDraft);
+  // A bare `Qn: ` from Answer… is a place to type, not an answer, so it is not sent as one.
+  const unfinished = unfinishedLabels(actions.draft, open);
+  const send = () => {
+    setSending(true);
+    void actions.sendDraft().finally(() => setSending(false));
+  };
   return (
-    <li className="flex items-start gap-2 rounded-md px-1 py-1">
-      <p className="min-w-0 flex-1 text-sm text-foreground/80 wrap-anywhere">{props.item.text}</p>
-      <Button
-        size="xs"
-        variant="ghost"
-        disabled={!props.actions.canOperate}
-        aria-label={`Veto: ${ariaItemText(props.item.text)}`}
-        onClick={() => props.actions.insert(decisionMessages.veto(props.item))}
-      >
-        Veto
+    <section
+      aria-label="Your draft"
+      className="flex shrink-0 items-center gap-2 border-t border-border bg-muted px-4 py-2 text-xs text-muted-foreground"
+    >
+      <PencilLineIcon aria-hidden className="size-3.5 shrink-0 text-tracker-draft" />
+      <span className="font-medium text-foreground">Draft</span>
+      <Dot />
+      <span className="min-w-0 truncate">{summary}</span>
+      <Button size="xs" variant="ghost" className="ms-auto" onClick={() => actions.focusLine(null)}>
+        Review
       </Button>
-    </li>
+      <Button
+        size="sm"
+        disabled={
+          !actions.canOperate || sending || unfinished.length > 0 || actions.answeringPendingInput
+        }
+        onClick={send}
+      >
+        Send draft
+      </Button>
+    </section>
   );
 }
 
@@ -1025,64 +1850,135 @@ function ArtifactsTab(props: {
   );
 }
 
+function TabLabel(props: { readonly name: string; readonly count: number }) {
+  return (
+    <>
+      {props.name}
+      {props.count > 0 ? (
+        <span className="font-normal text-muted-foreground">{props.count}</span>
+      ) : null}
+    </>
+  );
+}
+
+const tabName = (name: string, count: number) => (count > 0 ? `${name}, ${count}` : name);
+
 export function ThreadDecisionsPanel(props: {
   readonly threadRef: ScopedThreadRef;
   readonly actions: ThreadDecisionActions;
 }) {
+  const { actions } = props;
   const snapshot = useThreadDecisions(props.threadRef);
   const { tab, setTab } = useDecisionsPanelTab();
+  const [selecting, setSelecting] = useState(false);
+  const reopen = useReopenWithUndo();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const focusAfter = useFocusAfter(panelRef);
   const parkedTabRef = useRef<HTMLButtonElement>(null);
   const focusParkedTab = () => parkedTabRef.current?.focus();
-  const openCount = snapshot?.openCount ?? 0;
-  const parkedOpenCount = snapshot?.parkedOpenCount ?? 0;
-  const artifactCount = snapshot?.artifactCount ?? 0;
+  const counts = {
+    questions: snapshot?.openCount ?? 0,
+    decisions: choicesToReview(snapshot, actions.draft),
+    parked: snapshot?.parkedOpenCount ?? 0,
+    artifacts: snapshot?.artifactCount ?? 0,
+  };
+  // Select mode ends once the draft or the snapshot leaves nothing to select.
+  if (
+    selecting &&
+    !openQuestions(snapshot).some((question) => actions.inDraft[question.label] === undefined)
+  ) {
+    setSelecting(false);
+  }
+  const draftShown = actions.draft.trim() !== "" && !(tab === "questions" && selecting);
   return (
-    <div className="flex h-full min-h-0 flex-col" data-thread-decisions-panel>
-      <div className="flex shrink-0 items-center px-3 pt-3">
-        <ToggleGroup
-          aria-label="Tracker view"
-          variant="segmented"
-          value={[tab]}
-          onValueChange={(value) => {
-            const next = value[0];
-            if (
-              next === "questions" ||
-              next === "decisions" ||
-              next === "parked" ||
-              next === "artifacts"
-            ) {
-              setTab(next);
-            }
-          }}
-        >
-          <Toggle value="questions">Questions{openCount > 0 ? ` (${openCount})` : ""}</Toggle>
-          <Toggle value="decisions">Decisions</Toggle>
-          <Toggle ref={parkedTabRef} value="parked">
-            Parked{parkedOpenCount > 0 ? ` (${parkedOpenCount})` : ""}
-          </Toggle>
-          <Toggle value="artifacts">
-            Artifacts{artifactCount > 0 ? ` (${artifactCount})` : ""}
-          </Toggle>
-        </ToggleGroup>
-      </div>
-      <ScrollArea className="min-h-0 flex-1">
-        <div className="px-3 pb-3">
-          {tab === "questions" ? (
-            <QuestionsTab snapshot={snapshot} actions={props.actions} />
-          ) : tab === "decisions" ? (
-            <DecisionsTab threadRef={props.threadRef} snapshot={snapshot} actions={props.actions} />
-          ) : tab === "artifacts" ? (
-            <ArtifactsTab threadRef={props.threadRef} snapshot={snapshot} />
-          ) : (
-            <ParkedTab
-              threadRef={props.threadRef}
-              snapshot={snapshot}
-              actions={props.actions}
-              focusTab={focusParkedTab}
-            />
-          )}
+    <FocusAfterContext value={focusAfter}>
+      <div ref={panelRef} className="flex h-full min-h-0 flex-col" data-thread-decisions-panel>
+        <div className="flex shrink-0 items-center px-3 pt-3 pb-2">
+          <ToggleGroup
+            aria-label="Tracker view"
+            variant="segmented"
+            value={[tab]}
+            onValueChange={(value) => {
+              const next = value[0];
+              if (
+                next === "questions" ||
+                next === "decisions" ||
+                next === "parked" ||
+                next === "artifacts"
+              ) {
+                setTab(next);
+                setSelecting(false);
+              }
+            }}
+          >
+            <Toggle
+              variant="segmented-bordered"
+              value="questions"
+              aria-label={tabName("Questions", counts.questions)}
+            >
+              <TabLabel name="Questions" count={counts.questions} />
+            </Toggle>
+            <Toggle
+              variant="segmented-bordered"
+              value="decisions"
+              aria-label={
+                counts.decisions > 0
+                  ? `Decisions, ${plural(counts.decisions, "choice")} to review`
+                  : "Decisions"
+              }
+            >
+              <TabLabel name="Decisions" count={counts.decisions} />
+            </Toggle>
+            <Toggle
+              ref={parkedTabRef}
+              variant="segmented-bordered"
+              value="parked"
+              aria-label={tabName("Parked", counts.parked)}
+            >
+              <TabLabel name="Parked" count={counts.parked} />
+            </Toggle>
+            <Toggle
+              variant="segmented-bordered"
+              value="artifacts"
+              aria-label={tabName("Artifacts", counts.artifacts)}
+            >
+              <TabLabel name="Artifacts" count={counts.artifacts} />
+            </Toggle>
+          </ToggleGroup>
         </div>
-      </ScrollArea>
-    </div>
+        {tab === "questions" ? (
+          <QuestionsTab
+            threadRef={props.threadRef}
+            snapshot={snapshot}
+            actions={actions}
+            selecting={selecting}
+            onSelecting={setSelecting}
+          />
+        ) : tab === "decisions" ? (
+          <DecisionsTab
+            threadRef={props.threadRef}
+            snapshot={snapshot}
+            actions={actions}
+            reopen={reopen}
+          />
+        ) : (
+          <ScrollArea className="min-h-0 flex-1">
+            <div className="px-3 pb-3">
+              {tab === "artifacts" ? (
+                <ArtifactsTab threadRef={props.threadRef} snapshot={snapshot} />
+              ) : (
+                <ParkedTab
+                  threadRef={props.threadRef}
+                  snapshot={snapshot}
+                  actions={actions}
+                  focusTab={focusParkedTab}
+                />
+              )}
+            </div>
+          </ScrollArea>
+        )}
+        {draftShown ? <DraftBar snapshot={snapshot} actions={actions} /> : null}
+      </div>
+    </FocusAfterContext>
   );
 }
