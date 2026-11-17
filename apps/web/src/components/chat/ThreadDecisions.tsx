@@ -230,8 +230,8 @@ function QuestionPanel(props: {
     const target = questions[at];
     if (target !== undefined) setCurrentLabel(target.label);
   };
-  const allDecisions =
-    props.earlier > 0 ? `All decisions (+${props.earlier} earlier)` : "All decisions";
+  const openTracker =
+    props.earlier > 0 ? `Open Tracker (+${props.earlier} earlier)` : "Open Tracker";
   return (
     <Collapsible
       open={!collapsed}
@@ -303,14 +303,14 @@ function QuestionPanel(props: {
                 <Button
                   size="icon-xs"
                   variant="ghost"
-                  aria-label={allDecisions}
+                  aria-label={openTracker}
                   onClick={props.onOpenPanel}
                 />
               }
             >
               <PanelRightIcon className="size-3.5" />
             </TooltipTrigger>
-            <TooltipPopup side="top">{allDecisions}</TooltipPopup>
+            <TooltipPopup side="top">{openTracker}</TooltipPopup>
           </Tooltip>
         </ComposerBanner.Actions>
       </ComposerBanner.Row>
@@ -1017,7 +1017,7 @@ export function ThreadDecisionsPanel(props: {
     <div className="flex h-full min-h-0 flex-col" data-thread-decisions-panel>
       <div className="flex shrink-0 items-center px-3 pt-3">
         <ToggleGroup
-          aria-label="Decisions view"
+          aria-label="Tracker view"
           variant="segmented"
           value={[tab]}
           onValueChange={(value) => {

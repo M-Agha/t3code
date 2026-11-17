@@ -1496,8 +1496,16 @@ function OpenCommandPaletteDialog(props: {
     actionItems.push({
       kind: "action",
       value: "action:open-thread-decisions",
-      searchTerms: ["decisions", "questions", "open questions", "picks", "answer", "veto"],
-      title: "Show decisions",
+      searchTerms: [
+        "tracker",
+        "decisions",
+        "questions",
+        "open questions",
+        "picks",
+        "answer",
+        "veto",
+      ],
+      title: "Show Tracker",
       shortcutCommand: "decisions.toggle",
       icon: <MessageCircleQuestionIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
