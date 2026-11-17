@@ -41,6 +41,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: answers on AskUserQuestion cards close the matching question`                     | Questions and decisions       |
 | `(fork) decisions: a model judge reads your replies, as in the terminal, with its model in settings` | Questions and decisions       |
 | `(fork) decisions: the right panel is called Tracker`                                                | Questions and decisions       |
+| `(fork) decisions: Accept and send, and Yes to all, in the question panel`                           | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -112,7 +113,28 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks" or an
   exact Accept line selects Accept) and the header says "In draft". Accept and Not a decision move to
   the next question the draft does not close, only once the composer took the line; Answer… stays.
-  Collapse lasts for one reply. While T3's own question is pending, the composer hides this panel
+  Accept's row ends in a quiet send button (Accept and send: a muted arrow, primary only on hover
+  or focus, so it does not compete with the composer's own send) that adds the same line and then
+  sends the whole draft through the composer's own send (`ChatComposerHandle.submit`, the send
+  button's path, so a busy run queues or steers as the user set); adding stays the default, since
+  answers are usually chained. From two open questions up, the header has a quiet Yes to all, which
+  adds one line `Yes to your picks: Q3, Q4` (the transcript mod's `yesToAll` format: in order, only
+  questions with a pick that the draft does not already close, `yesToAllLine`), and its own send
+  button. That line selects Accept for what it names, so a second press has nothing to add. Once the
+  draft holds a send button's line (Accept selected; for Yes to all, every pick already answered),
+  the button only sends. Both send buttons are disabled while their send is in flight.
+  `useInsertAndSend` in `ThreadDecisions.tsx` does the sending: it commits the line before sending
+  (`flushSync`; otherwise the composer sends the last render's draft, and an empty draft in an
+  interrupted thread resumed the run instead), then tells by the draft: a sent or queued one is
+  cleared, and one still holding exactly the line was refused or put back after a failed send, so it
+  returns to what it was before the line. "Not sent" is shown only when the composer refused without
+  a word (`submit()` returns "blocked": dictating, sending disabled, no right to operate); every
+  other refusal already shows T3's own reason. It is a hook outside ChatView's body on purpose:
+  written inline there, its callback kept earlier renders' thread structures alive, and
+  `ChatView.browser.test.tsx` "a mounted thread view lets go of the thread structures it has
+  replaced" failed. (2026-11-17: the owner's Q31 asked for both, as the mod has them; the mod's
+  "answer all" was left out. Fable 5.2's review asked for the rest; its worry that a weak judge reads
+  the Yes to all line as a blanket accept was declined, since the line is the mod's exact format.) Collapse lasts for one reply. While T3's own question is pending, the composer hides this panel
   (`shelfItems`), and a browser test holds that. Nothing shows inside replies, and nothing on mobile.
   (2026-11-17, replacing a strip of one row per question that the owner called ugly; design approved
   by a two-model council.) _Rejected:_ a two-line list (tall, three buttons per row); chips with
@@ -227,8 +249,13 @@ when an assistant message finishes, so those questions are not held until the ne
    - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a
      stack item, drawn in place of the notice row inside the same card (the decisions panel uses it
      so it keeps its place in the stack with no notice header); and `ComposerPendingUserInputPanel.tsx`
-     exports `OptionRadio`, so the decisions panel's rows look like the native ones. If upstream
-     rebuilds the banner stack, give the panel the new stack's way to draw a custom card.
+     exports `OptionRadio`, so the decisions panel's rows look like the native ones; and
+     `ChatComposer.tsx`'s handle has `submit()`, the send button's `submitComposer` (it reports
+     whether it refused without a word), which ChatView's
+     send buttons call after adding their line (ChatView wraps the composer's `onSend` to keep the
+     send in flight, `composerSendingRef`, so it can wait for the outcome). If upstream rebuilds the
+     banner stack, give the panel the new stack's way to draw a custom card; if it renames the
+     composer's submit, follow it.
    - The decision judge's setting, `decisionJudgeModelSelection`, is built like upstream's
      `speechPostProcessingModelSelection` and sits beside it in each place: the schema and the patch
      in `packages/contracts/src/settings.ts`, `resolveDecisionJudgeModelSelection` and its patch line
