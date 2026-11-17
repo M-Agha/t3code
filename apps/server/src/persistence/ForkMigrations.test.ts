@@ -13,6 +13,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import ForkMigration0001 from "./ForkMigrations/001_ThreadDecisions.ts";
 import ForkMigration0002 from "./ForkMigrations/002_ThreadParked.ts";
+import ForkMigration0004 from "./ForkMigrations/004_ThreadDecisionCardSync.ts";
 import { FORK_MIGRATIONS_TABLE, runForkMigrations } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
@@ -28,6 +29,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
       [1, "ThreadDecisions"],
       [2, "ThreadParked"],
       [3, "ThreadArtifacts"],
+      [4, "ThreadDecisionCardSync"],
     ]);
     assert.deepEqual(yield* runForkMigrations(), []);
 
@@ -36,7 +38,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
     );
     assert.deepEqual(
       forkLedger.map((row) => row.migration_id),
-      [1, 2, 3],
+      [1, 2, 3, 4],
     );
     const upstream = yield* sql<{ readonly latest: number; readonly forkRows: number }>`
       SELECT MAX(migration_id) AS latest, SUM(name = 'ThreadDecisions') AS forkRows
@@ -54,7 +56,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 
-it.effect("runs only the artifacts migration on a database that already has 001 and 002", () =>
+it.effect("runs only the later migrations on a database that already has 001 and 002", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* runMigrations();
@@ -76,7 +78,27 @@ it.effect("runs only the artifacts migration on a database that already has 001 
       ) VALUES ('t', 'todo', 'x', 'open', 'user', '2026-01-01T00:00:00.000Z',
         '2026-01-01T00:00:00.000Z')
     `;
-    assert.deepEqual(yield* runForkMigrations(), [[3, "ThreadArtifacts"]]);
+    yield* sql`
+      INSERT INTO fork_thread_decision_sync (thread_id, after_created_at, after_message_id)
+      VALUES ('t', '2026-01-01T00:00:00.000Z', 'm')
+    `;
+    assert.deepEqual(yield* runForkMigrations(), [
+      [3, "ThreadArtifacts"],
+      [4, "ThreadDecisionCardSync"],
+    ]);
+    // A thread's message watermark stays; its card watermark starts empty, so every card is read once.
+    // 004 checks for its columns first, so running it again changes nothing.
+    yield* ForkMigration0004;
+    const sync = yield* sql`SELECT * FROM fork_thread_decision_sync`;
+    assert.deepEqual(sync, [
+      {
+        thread_id: "t",
+        after_created_at: "2026-01-01T00:00:00.000Z",
+        after_message_id: "m",
+        after_item_updated_at: "",
+        after_item_id: "",
+      },
+    ]);
     const kept = yield* sql<{
       readonly questions: number;
       readonly parked: number;
