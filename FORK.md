@@ -40,6 +40,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: open questions show one at a time, like T3's own question panel`                  | Questions and decisions       |
 | `(fork) decisions: answers on AskUserQuestion cards close the matching question`                     | Questions and decisions       |
 | `(fork) decisions: a model judge reads your replies, as in the terminal, with its model in settings` | Questions and decisions       |
+| `(fork) decisions: the right panel is called Tracker`                                                | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -105,18 +106,25 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
 - **Display:** the latest reply's open questions above the composer, one at a time, built like T3's
-  own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, All
-  decisions, whose tooltip counts earlier open questions), the question as markdown, then option rows
+  own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, Open
+  Tracker, whose tooltip counts earlier open questions), the question as markdown, then option rows
   Accept: <pick> (its reason below it), Answer… and Not a decision. The selected row follows the draft
   (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks" or an
-  exact Accept line selects Accept) and the header says "In draft". Accept and Not a decision move to the next question
-  the draft does not close, only once the composer took the line; Answer… stays. Collapse lasts for
-  one reply. While T3's own question is pending, the composer hides this panel (`shelfItems`), and a
-  browser test holds that. A right-panel "Decisions" surface has Questions and Decisions tabs; nothing
-  shows inside replies, and nothing on mobile. (2026-11-17, replacing a strip of one row per question
-  that the owner called ugly; design approved by a two-model council.) _Rejected:_ a two-line list (tall,
-  three buttons per row); chips with popovers (hide the question); one banner per question; real
-  radios with arrow-key selection (the native panel uses buttons too).
+  exact Accept line selects Accept) and the header says "In draft". Accept and Not a decision move to
+  the next question the draft does not close, only once the composer took the line; Answer… stays.
+  Collapse lasts for one reply. While T3's own question is pending, the composer hides this panel
+  (`shelfItems`), and a browser test holds that. Nothing shows inside replies, and nothing on mobile.
+  (2026-11-17, replacing a strip of one row per question that the owner called ugly; design approved
+  by a two-model council.) _Rejected:_ a two-line list (tall, three buttons per row); chips with
+  popovers (hide the question); one banner per question; real radios with arrow-key selection (the
+  native panel uses buttons too).
+- **Tracker:** the right-panel surface with the Questions, Decisions, Parked and Artifacts tabs. Its
+  user-visible name is Tracker everywhere (its tab, both add-panel menus, the command palette's "Show
+  Tracker", the keybinding's "Tracker: Toggle", the panel header's Open Tracker); the tabs keep their
+  names. Its ids stay `decisions` (the surface kind and id in `rightPanelStore.ts` and
+  `closedViewStore.ts`, the `decisions.toggle` command, `decisionsPanelTabStore.ts`): persisted panel
+  state, reopenable closed tabs and saved keybindings name them. (2026-11-17: the owner's Q31 renamed
+  it from "Decisions".)
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
   `apps/web/src/components/chat/ThreadDecisions.tsx`,
@@ -264,7 +272,7 @@ when an assistant message finishes, so those questions are not held until the ne
    - Use a desktop-width window (the strip is not shown on mobile widths). Before typing `/park`,
      switch the thread's model to `Replay (dev)`: if the intercept ever fails, the text goes to a free
      provider instead of starting a paid turn.
-   - A seeded thread with open questions shows the question panel and the Decisions panel; Accept adds a line
+   - A seeded thread with open questions shows the question panel and the Tracker panel; Accept adds a line
      to the composer, selects it and moves to the next question; `/park x` parks without sending; a thread with
      a `claude.ai/…artifact/…` link lists it in Artifacts; the server log has no schema errors. With a
      cheap Claude Haiku thread (Supervised, scratch project) also: `/park` mid-run and `t3_park`.
