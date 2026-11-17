@@ -4,6 +4,7 @@ import { JUDGE_SYSTEM, judgePrompt, parseVerdict, scopeVerdict } from "./judge.t
 import {
   type Asked,
   DECIDED_HEADING,
+  labelMentions,
   Q_LINE,
   readReply,
   settles,
@@ -92,6 +93,36 @@ export const closingFor = (message: string, open: ReadonlyArray<OpenQuestion>): 
     answered: settled.answered.map((q) => q.label),
     dropped: settled.dropped.map((q) => q.label),
   };
+};
+
+// A label or range at the start of a stretch, what may join two labels one answer covers, and what
+// follows a label that opens its own answer.
+const LEADING_LABEL = /^Q\d+(?:\s*(?:[-\u2013\u2014]|\bto\b|\bthrough\b)\s*Q\d+)?/i;
+// Same-line only: a newline between two labels ends the first's answer, it does not join them.
+const JOINER = /^[ \t,&/]*(?:\b(?:and|or)\b)?[ \t,&/]*$/i;
+const OPENS_ANSWER = /^\s*:/;
+
+/**
+ * A label's answer: from where it opens one (`Q6: …`, else its first mention) to the next label that
+ * opens its own; labels joined by "and" or commas on one line share it ("Q3 and Q4: yes"), and a cited
+ * label ("Same as Q27") neither ends it nor starts its own. The whole message when it names no label.
+ */
+export const answerPart = (message: string, label: string): string => {
+  const mentions = labelMentions(message);
+  const after = (index: number) => message.slice(index).replace(LEADING_LABEL, "");
+  const named = mentions.findIndex((mention) => mention.labels.includes(label));
+  if (named === -1) return message.trim();
+  const opening = mentions.findIndex(
+    (mention) => mention.labels.includes(label) && OPENS_ANSWER.test(after(mention.index)),
+  );
+  const at = opening === -1 ? named : opening;
+  let next = at + 1;
+  for (; next < mentions.length; next += 1) {
+    const between = message.slice(mentions[next - 1]!.index, mentions[next]!.index);
+    if (JOINER.test(between.replace(LEADING_LABEL, ""))) continue;
+    if (OPENS_ANSWER.test(after(mentions[next]!.index))) break;
+  }
+  return message.slice(mentions[at]!.index, mentions[next]?.index ?? message.length).trim();
 };
 
 /** An open question with its text, which the judge reads. */
