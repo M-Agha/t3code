@@ -228,6 +228,7 @@ import * as CodexUsageHistory from "./usage/CodexUsageHistory.ts";
 import * as RuntimeLayer from "./orchestration-v2/runtimeLayer.ts";
 import * as ThreadViewers from "./orchestration-v2/ThreadViewers.ts";
 import * as WorkflowForge from "./workflows/WorkflowForge.ts";
+import * as DecisionJudge from "./decisions/DecisionJudge.ts";
 import * as ThreadDecisions from "./decisions/ThreadDecisions.ts";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
@@ -928,7 +929,7 @@ const layerMakeRoutes = Layer.mergeAll(
   Layer.provide(
     PullRequestReviewGuideService.layer.pipe(Layer.provide(PullRequestReviewGuides.layer)),
   ),
-  Layer.provide(ThreadDecisions.layer),
+  Layer.provide(ThreadDecisions.layer.pipe(Layer.provide(DecisionJudge.layer))),
   // delegate_task to a linked environment, from /mcp and the follower above.
   Layer.provide(RemoteDelegation.layer.pipe(Layer.provide(ProjectionStoreV2.layer))),
   // Links agents ask for: shown in a thread from /mcp, answered over WebSocket.
