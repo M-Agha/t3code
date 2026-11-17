@@ -7,6 +7,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  answerLines,
   asDraftLine,
   isParkedBusy,
   latestReplyOpenQuestions,
@@ -14,7 +15,6 @@ import {
   openQuestionsByReply,
   parkedFocusAfter,
   questionsClosedByDraft,
-  yesToAllLine,
 } from "./threadDecisions.logic";
 
 const question = (
@@ -119,7 +119,7 @@ describe("answers added to the composer", () => {
     });
   });
 
-  it("says yes to the picks the draft leaves open, once", () => {
+  it("writes one line per question the draft leaves open, skipping no-pick ones for Accept, once", () => {
     const reply = [
       { ...question("Q3", "newer", "open"), pick: "yes" },
       { ...question("Q4", "newer", "open"), pick: "no" },
@@ -127,21 +127,23 @@ describe("answers added to the composer", () => {
       { ...question("Q6", "newer", "open"), pick: "later" },
     ];
     const picked = { ...snapshot, questions: reply, openCount: reply.length };
-    // Q5 has no pick to say yes to; Q6 is answered in the draft already.
+    // Q5 has no pick to accept; Q6 is answered in the draft already.
     const draft = "Q6: not yet";
-    const line = yesToAllLine(reply, questionsClosedByDraft(draft, picked));
-    expect(line).toBe("Yes to your picks: Q3, Q4");
-    // Once the line is in the draft, it closes what it names, so there is nothing to add again.
-    const withLine = `${draft}${asDraftLine(draft, line ?? "")}`;
-    expect(withLine).toBe("Q6: not yet\nYes to your picks: Q3, Q4");
-    // Q5 had no pick, so the line leaves it open; what it names reads as Accept.
-    expect(questionsClosedByDraft(withLine, picked)).toEqual({
+    const lines = answerLines(reply, "accept", questionsClosedByDraft(draft, picked));
+    expect(lines).toEqual(["Q3: yes", "Q4: no"]);
+    // Once the lines are in the draft, they close what they name, so there is nothing to add again.
+    const withLines = `${draft}${asDraftLine(draft, lines.join("\n"))}`;
+    expect(withLines).toBe("Q6: not yet\nQ3: yes\nQ4: no");
+    expect(questionsClosedByDraft(withLines, picked)).toEqual({
       Q3: "accept",
       Q4: "accept",
       Q6: "answer",
     });
-    expect(yesToAllLine(reply, questionsClosedByDraft(withLine, picked))).toBeNull();
-    expect(yesToAllLine([question("Q5", "newer", "open")], {})).toBeNull();
+    expect(answerLines(reply, "accept", questionsClosedByDraft(withLines, picked))).toEqual([]);
+    // Not a decision needs no pick.
+    expect(answerLines(reply, "drop", questionsClosedByDraft(withLines, picked))).toEqual([
+      "Q5: not a decision",
+    ]);
   });
 
   it("moves to the next question the draft does not close, wrapping, or nowhere", () => {

@@ -18,30 +18,46 @@ export const decisionMessages = {
 export const asDraftLine = (draft: string, text: string) =>
   draft === "" || draft.endsWith("\n") ? text : `\n${text}`;
 
-const YES_TO_ALL = "Yes to your picks: ";
-
-/**
- * The one line "Yes to all" adds, as the transcript mod's `yesToAll` writes it: the latest reply's
- * questions that have a pick and that the draft does not already close, in order. None when no
- * question is left, so a second press adds nothing: the labels the line names are then in the draft.
- */
-export const yesToAllLine = (
-  questions: ReadonlyArray<ThreadDecisionQuestion>,
-  inDraft: Readonly<Record<string, DraftChoice>>,
-): string | null => {
-  const labels = questions
-    .filter((question) => question.pick !== "" && inDraft[question.label] === undefined)
-    .map((question) => question.label);
-  return labels.length === 0 ? null : `${YES_TO_ALL}${labels.join(", ")}`;
-};
-
 /** The option of a question's panel that the draft has chosen. */
 export type DraftChoice = "accept" | "answer" | "drop";
 
 /**
+ * The lines one press adds for several questions, one per question as its own button writes it, in
+ * order: the composer panel's "Yes to all", the Tracker's "Accept N picks" and Select mode's Add. A
+ * question the draft already closes is skipped, and so is one with no pick for Accept; the lines
+ * then close what they name, so a second press adds nothing.
+ */
+export const answerLines = (
+  questions: ReadonlyArray<ThreadDecisionQuestion>,
+  choice: "accept" | "drop",
+  inDraft: Readonly<Record<string, DraftChoice>>,
+): ReadonlyArray<string> =>
+  questions
+    .filter(
+      (question) =>
+        inDraft[question.label] === undefined && (choice === "drop" || question.pick !== ""),
+    )
+    .map(decisionMessages[choice]);
+
+const trimmedLines = (text: string) => text.split("\n").map((line) => line.trim());
+
+/**
+ * Whether a message that closed `question` as answered took the agent's pick: it holds the Accept
+ * line (in any case: a typed "Q6: Yes" takes the pick "yes"), or it answered without naming the label
+ * ("go with your picks").
+ */
+const acceptsPick = (message: string, question: ThreadDecisionQuestion) => {
+  if (!readReply(message).answer.includes(question.label)) return true;
+  const accept = decisionMessages.accept(question).toLowerCase();
+  return (
+    question.pick !== "" && trimmedLines(message).some((line) => line.toLowerCase() === accept)
+  );
+};
+
+/**
  * The open questions the draft would close if sent now (the server's closingFor), by label, with the
- * option that says how: their buttons add nothing more. "Go with your picks", which names no label, a
- * line that is exactly the Accept line, and a "Yes to all" line naming the label all accept.
+ * option that says how: their buttons add nothing more. "Go with your picks", which names no label,
+ * and a line that is exactly the Accept line accept.
  */
 export const questionsClosedByDraft = (
   draft: string,
@@ -50,27 +66,11 @@ export const questionsClosedByDraft = (
   const open = (snapshot?.questions ?? []).filter((question) => question.state === "open");
   if (draft.trim() === "" || open.length === 0) return {};
   const { answered, dropped } = closingFor(draft, open);
-  const named = readReply(draft).answer;
-  const lines = draft.split("\n").map((line) => line.trim());
-  const yesToAll = new Set(
-    lines.flatMap((line) =>
-      line.startsWith(YES_TO_ALL)
-        ? line
-            .slice(YES_TO_ALL.length)
-            .split(",")
-            .map((label) => label.trim())
-        : [],
-    ),
-  );
   const choices: Record<string, DraftChoice> = {};
   for (const label of dropped) choices[label] = "drop";
   for (const question of open) {
     if (!answered.includes(question.label)) continue;
-    const accepted =
-      !named.includes(question.label) ||
-      (question.pick !== "" &&
-        (lines.includes(decisionMessages.accept(question)) || yesToAll.has(question.label)));
-    choices[question.label] = accepted ? "accept" : "answer";
+    choices[question.label] = acceptsPick(draft, question) ? "accept" : "answer";
   }
   return choices;
 };
