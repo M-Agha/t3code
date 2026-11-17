@@ -48,6 +48,10 @@ const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
   "rolled_back",
 ]);
 
+// The line the Tracker's Veto adds for a choice made without asking (`decisionMessages.veto`).
+const VETO_PREFIX = "Veto: ";
+const VETO_LINE = /^\s*Veto: /m;
+
 // The full answer stays in the database; the snapshot carries a preview.
 const ANSWER_TEXT_LIMIT = 300;
 
@@ -221,6 +225,18 @@ export const layer = Layer.effect(
       ),
     );
 
+    // Upstream's user-authored test (ProjectionStore), plus the payloads that mark automation, over a
+    // messages row named `message`.
+    const userAuthored = () => sql`(
+      json_extract(message.payload_json, '$.createdBy') = 'user'
+      AND json_type(message.payload_json, '$.idleCompaction') IS NULL
+      AND json_type(message.payload_json, '$.senderThreadId') IS NULL
+      AND json_type(message.payload_json, '$.scheduledTaskId') IS NULL
+      AND json_type(message.payload_json, '$.linkedSender') IS NULL
+      AND json_type(message.payload_json, '$.delegatedCompletion') IS NULL
+      AND json_type(message.payload_json, '$.notification') IS NULL
+    )`;
+
     // Rows in order, in one transaction: the questions a run's reply asks, the closing found for each user
     // message among them, then the watermark past the last row.
     const applyRows = Effect.fn("ThreadDecisions.applyRows")(function* (
@@ -273,6 +289,8 @@ export const layer = Layer.effect(
           }
           continue;
         }
+        // The snapshot reads vetoes from the user's messages, so one with a veto line changes it.
+        changed ||= row.role === "user" && row.userAuthored === 1 && VETO_LINE.test(row.text);
         const closing = closings.get(row.messageId);
         if (closing === undefined) continue;
         for (const [state, labels] of [
@@ -354,16 +372,7 @@ export const layer = Layer.effect(
           run.status AS "runStatus",
           message.streaming,
           json_extract(message.payload_json, '$.text') AS text,
-          -- Upstream's user-authored test (ProjectionStore), plus the payloads that mark automation.
-          (
-            json_extract(message.payload_json, '$.createdBy') = 'user'
-            AND json_type(message.payload_json, '$.idleCompaction') IS NULL
-            AND json_type(message.payload_json, '$.senderThreadId') IS NULL
-            AND json_type(message.payload_json, '$.scheduledTaskId') IS NULL
-            AND json_type(message.payload_json, '$.linkedSender') IS NULL
-            AND json_type(message.payload_json, '$.delegatedCompletion') IS NULL
-            AND json_type(message.payload_json, '$.notification') IS NULL
-          ) AS "userAuthored"
+          ${userAuthored()} AS "userAuthored"
         FROM orchestration_v2_projection_messages AS message
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
         WHERE message.thread_id = ${threadId}
@@ -714,6 +723,26 @@ export const layer = Layer.effect(
           ORDER BY created_at DESC, ordinal ASC
           LIMIT ${THREAD_DECIDED_WITHOUT_ASKING_LIMIT}
         `;
+        // A choice is vetoed once a message the user sent after its reply holds the panel's line
+        // `Veto: <text>`, trimmed as the panel reads its draft. One read for the thread's messages
+        // with a veto line; the lines are matched here.
+        const oldest = decided.at(-1)?.createdAt;
+        const vetoes =
+          oldest === undefined
+            ? []
+            : yield* sql<{ readonly createdAt: string; readonly text: string }>`
+                SELECT message.created_at AS "createdAt",
+                  json_extract(message.payload_json, '$.text') AS text
+                FROM orchestration_v2_projection_messages AS message
+                WHERE message.thread_id = ${threadId} AND message.role = 'user'
+                  AND message.created_at > ${oldest}
+                  AND ${userAuthored()}
+                  AND instr(json_extract(message.payload_json, '$.text'), ${VETO_PREFIX}) > 0
+              `;
+        const vetoLines = vetoes.map((message) => ({
+          createdAt: message.createdAt,
+          lines: new Set(message.text.split("\n").map((line) => line.trim())),
+        }));
         const parked = yield* sql<ThreadParkedItem>`
           SELECT * FROM (
             SELECT id, kind, text, state, parked_by AS "parkedBy", created_at AS "createdAt",
@@ -769,6 +798,10 @@ export const layer = Layer.effect(
           decidedWithoutAsking: decided.map((row) => ({
             ...row,
             messageId: MessageId.make(row.messageId),
+            vetoed: vetoLines.some(
+              (message) =>
+                message.createdAt > row.createdAt && message.lines.has(`${VETO_PREFIX}${row.text}`),
+            ),
           })),
           openCount: questions.filter((row) => row.state === "open").length,
           parked,
