@@ -151,8 +151,12 @@ when an assistant message finishes, so those questions are not held until the ne
    - `/park` while idle and mid-run;
    - `t3_park`;
    - an Artifacts row.
-6. **Build:** `env -u GITHUB_REPOSITORY -u T3CODE_DESKTOP_UPDATE_REPOSITORY vp run dist:desktop:dmg:arm64`.
-   No update feed may be set; the build must not contain `app-update.yml`.
+6. **Build:** first `cp .env.example .env` (once per checkout; `.env` is gitignored). Without it the
+   app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
+   are upstream's public production identifiers, the same ones official builds embed. Then
+   `env -u GITHUB_REPOSITORY -u T3CODE_DESKTOP_UPDATE_REPOSITORY vp run dist:desktop:dmg:arm64`.
+   No update feed may be set; the build must not contain `app-update.yml`. `scripts/fork/install.sh`
+   refuses a build without T3 Connect.
 
 ## Installing
 
