@@ -39,6 +39,7 @@ import * as Schema from "effect/Schema";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import { AboutVersionTitle } from "./AboutVersionTitle";
 import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
+import { DecisionJudgeModelRow } from "./DecisionJudgeModelRow";
 import { MobileAppSettingsRow } from "./MobileAppSettingsRow";
 import {
   canCheckForUpdate,
@@ -2314,6 +2315,7 @@ export function ThreadsSettingsPanel() {
             )
           }
         />
+        <DecisionJudgeModelRow />
         <AdvancedSettings
           targetIds={[setting("thread-title-instructions").id, setting("response-streaming").id]}
         >

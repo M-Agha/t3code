@@ -256,6 +256,7 @@ const TASKS = [
     label: msg("Commit messages, pull requests, and branch names"),
   },
   { key: "speechPostProcessingModelSelection", label: msg("Voice transcript cleanup") },
+  { key: "decisionJudgeModelSelection", label: msg("Decision judge") },
 ] as const;
 
 /**

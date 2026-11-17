@@ -24,21 +24,22 @@ reasons are the ones they accepted.
 
 ## The changes (oldest first)
 
-| Commit subject                                                                      | What it adds                  |
-| ----------------------------------------------------------------------------------- | ----------------------------- |
-| `feat: track end-of-reply decision questions natively`                              | Questions and decisions       |
-| `feat: per-thread parked items with /park and t3_park`                              | Parked items                  |
-| `feat: per-thread Artifacts tab`                                                    | Artifacts                     |
-| `refactor: take question logic from session-kit's reply.ts`                         | Shared logic with session-kit |
-| `fix: read a reply that finishes after its run ended`                               | A listener gap                |
-| `chore: name fork builds T3 Code (Fork) with their own bundle ID`                   | App identity                  |
-| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`                  | Outside this repo             |
-| `fix: install.sh backs up a quit app's database`                                    | Installing                    |
-| `fix: the stage-label schema accepts Fork, so the fork app launches`                | App identity                  |
-| `feat: Accept and Drop add to the draft; long questions keep their buttons`         | Questions and decisions       |
-| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`           | Rebasing, step 7              |
-| `(fork) decisions: open questions show one at a time, like T3's own question panel` | Questions and decisions       |
-| `(fork) decisions: answers on AskUserQuestion cards close the matching question`    | Questions and decisions       |
+| Commit subject                                                                                       | What it adds                  |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `feat: track end-of-reply decision questions natively`                                               | Questions and decisions       |
+| `feat: per-thread parked items with /park and t3_park`                                               | Parked items                  |
+| `feat: per-thread Artifacts tab`                                                                     | Artifacts                     |
+| `refactor: take question logic from session-kit's reply.ts`                                          | Shared logic with session-kit |
+| `fix: read a reply that finishes after its run ended`                                                | A listener gap                |
+| `chore: name fork builds T3 Code (Fork) with their own bundle ID`                                    | App identity                  |
+| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`                                   | Outside this repo             |
+| `fix: install.sh backs up a quit app's database`                                                     | Installing                    |
+| `fix: the stage-label schema accepts Fork, so the fork app launches`                                 | App identity                  |
+| `feat: Accept and Drop add to the draft; long questions keep their buttons`                          | Questions and decisions       |
+| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`                            | Rebasing, step 7              |
+| `(fork) decisions: open questions show one at a time, like T3's own question panel`                  | Questions and decisions       |
+| `(fork) decisions: answers on AskUserQuestion cards close the matching question`                     | Questions and decisions       |
+| `(fork) decisions: a model judge reads your replies, as in the terminal, with its model in settings` | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -49,17 +50,48 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
 - **Source:** T3's server reads a finished reply's Q-block text. Agents keep writing text, so the
   same reply works in a terminal and in T3, for every provider. _Rejected:_ a tool agents must
   remember to call.
-- **Closing:** deterministic, from the user's own messages, with session-kit's `readReply`
-  (`Q4: yes`, "go with your picks", "not a decision"). A message naming no label closes nothing, so
-  clarifying questions are safe. The panel's answers (Accept, Answer…, Not a decision) add one line
-  each to the composer instead of sending, so several answers go out as one ordinary message and the
-  agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
-  messages close nothing. _Rejected:_ a model judging each message; an agent "close" tool.
+- **Closing:** from the user's own messages, as the terminal closes them. session-kit's model judge
+  (`judge.ts`: `JUDGE_SYSTEM`, `judgePrompt`, `parseVerdict`, `scopeVerdict`) reads every message a
+  person typed while questions are open, with the open questions and the reply it follows, and its
+  verdict decides; `scopeVerdict` only removes labels (a blanket "yes" never closes a question an
+  earlier reply asked unless the message or the last reply names it). The rules (`closingFor`, over
+  session-kit's `readReply`: `Q4: yes`, "go with your picks", "not a decision") decide only when the
+  call fails, takes over 20 s, or its answer does not parse (logged as a warning). So a bare "yes" right after a question
+  block, "merge it" or "go with 2" closes what it answers, and a message that answers nothing (a
+  clarifying question) closes nothing. The model is the "Decision judge" setting (Settings → Threads,
+  below the text generation model; `decisionJudgeModelSelection`, where null follows
+  `textGenerationModelSelection`, as transcript cleanup's setting does), called through T3's
+  text-generation path, so any provider T3 is signed in to works. That path has no free-text
+  operation: `generateTranscriptionPostProcessing` is the one whose input is the whole prompt and
+  whose output is one string, so the verdict's JSON travels in that string, and the prompt spells out
+  the envelope `{"transcription":"<verdict JSON>"}` for text generators, which enforce no schema
+  (`DecisionJudge.ts`; a fork-only operation on every provider is the upgrade path if a model will not
+  put it there). That path also has no system slot: `JUDGE_SYSTEM` rides at the top of the user turn,
+  under the provider's own system prompt, so session-kit's measured accuracy (its judge sends
+  `JUDGE_SYSTEM` as the system prompt) does not carry over; T3's is unmeasured. The timeout is 20 s,
+  not the terminal's 8: each call starts a provider CLI (2.3 s and 4.8 s with Claude Sonnet,
+  2026-11-17). Model calls run under the thread's lock but never inside a transaction: the rows
+  before each user message commit first (so the questions it may close include those they asked),
+  then it is judged, then its closing commits with the watermark past it. The listener syncs up to 4
+  threads at once, so one thread's judge does not hold up the others. A subscriber gets the current
+  rows at once; the backlog is judged in full in the background (never handed to the rules to save
+  time) and its changes publish as they commit. A Reopen clicked while a thread's backlog is being
+  judged waits for it, as it takes the same lock. The panel's "In draft" preview stays rule-based (no model per keystroke), so it can
+  show less than what closes on send. The panel's answers (Accept, Answer…, Not a decision) add one
+  line each to the composer instead of sending, so several answers go out as one ordinary message and
+  the agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
+  messages close nothing. (2026-11-17: the owner's Q30 reversed the earlier rejection of a model
+  judge. Rules alone left answers by key words, numbered picks and bare assents open, and a judge run
+  only on messages the rules left unclosed would keep those false negatives: "Q4: yes, and merge it"
+  closes Q4 by rule, so the question "merge it" answers would never reach it. The owner asked for the
+  judge's model and effort to be chosen the way T3 chooses its text-generation model.) _Rejected:_
+  the judge only on messages the rules leave unclosed; a hard-coded judge model; an agent "close"
+  tool.
 - **Answers on AskUserQuestion cards** close the question whose label leads the card question's
   text (session-kit's `Q_LINE`, as the terminal reads it). Parts asked as "Q28 (1 of 3)" … gather in
   the card's order into one reply (`Q28: a, b; c; d`); a part left unanswered closes nothing. The
-  reply goes through `closingFor` with that label's row alone, so "Not a decision" drops it and option
-  text naming another label closes nothing else. Only a question asked before the card was answered
+  reply goes through `closingFor` (never the judge) with that label's row alone, so "Not a decision"
+  drops it and option text naming another label closes nothing else. Only a question asked before the card was answered
   closes. Each card is read once, after the messages, through its own watermark (fork migration 004's
   columns on `fork_thread_decision_sync`), so a question reopened by hand stays open; a card answered
   while a reply is still unread waits for it. (2026-11-17: Q28 was answered on a card and stayed
@@ -76,8 +108,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, All
   decisions, whose tooltip counts earlier open questions), the question as markdown, then option rows
   Accept: <pick> (its reason below it), Answer… and Not a decision. The selected row follows the draft
-  (`questionsClosedByDraft`, the server's `closingFor`: "go with your picks" or an exact Accept line
-  selects Accept) and the header says "In draft". Accept and Not a decision move to the next question
+  (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks" or an
+  exact Accept line selects Accept) and the header says "In draft". Accept and Not a decision move to the next question
   the draft does not close, only once the composer took the line; Answer… stays. Collapse lasts for
   one reply. While T3's own question is pending, the composer hides this panel (`shelfItems`), and a
   browser test holds that. A right-panel "Decisions" surface has Questions and Decisions tabs; nothing
@@ -86,7 +118,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   three buttons per row); chips with popovers (hide the question); one banner per question; real
   radios with arrow-key selection (the native panel uses buttons too).
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
-  `apps/web/src/components/chat/ThreadDecisions.tsx`, contracts in
+  `apps/server/src/decisions/DecisionJudge.ts` (the model call),
+  `apps/web/src/components/chat/ThreadDecisions.tsx`,
+  `apps/web/src/components/settings/DecisionJudgeModelRow.tsx`, contracts in
   `packages/contracts/src/threadDecisions.ts`.
 
 ### Parked items
@@ -116,12 +150,18 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
 
 ### Shared logic with session-kit
 
-- `packages/shared/src/sessionKit/reply.ts` is a **byte-for-byte copy** of session-kit's
-  `hooks/reply.ts` below its header. Never edit it here. Change session-kit, then copy.
-- `reply.drift.test.ts` byte-compares it with `~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts`
-  when that checkout exists, and skips otherwise.
-- Fork-only logic beside it (`decisions.ts`, `parks.ts`) must not re-implement anything reply.ts
-  exports. A full core extraction (folder, subtree, package) was judged not worth it.
+- `packages/shared/src/sessionKit/reply.ts` and `judge.ts` are **byte-for-byte copies** of
+  session-kit's `hooks/reply.ts` and `hooks/judge.ts` below their headers. Never edit them here.
+  Change session-kit, then copy.
+- `drift.test.ts` byte-compares each with its source in
+  `~/repos/dotfiles/.claude/mods/session-kit/hooks/` when that checkout exists, and skips otherwise.
+- judge.ts's imports resolve to fork shims, so the copy needs no edit: `sessionKit/board-file.ts`
+  re-exports `lastTurn` from reply.ts (as session-kit's board-file.ts does), and
+  `packages/shared/src/types/index.d.ts` declares the board's `Question` row. If judge.ts starts
+  importing more, add it to a shim, never to the copy.
+- Fork-only logic beside them (`decisions.ts`, `parks.ts`) must not re-implement anything reply.ts or
+  judge.ts exports; `decisions.ts`'s `judgeInput` and `judgedClosing` only map the server's rows to
+  session-kit's `Question`. A full core extraction (folder, subtree, package) was judged not worth it.
 
 ### A reply that finishes after its run ended
 
@@ -154,8 +194,8 @@ when an assistant message finishes, so those questions are not held until the ne
 3. **Before the owner installs a newer official Nightly, rebase and rebuild the fork.** The newer
    Nightly migrates `~/.t3` past the fork's head, and the fork then refuses to start until rebuilt
    from an upstream that has those migrations.
-4. **The reply.ts copy stays byte-identical** (see Shared logic). If upstream's tooling starts
-   formatting it, keep it exempt in `vite.config.ts` and `knip.jsonc`.
+4. **The reply.ts and judge.ts copies stay byte-identical** (see Shared logic). If upstream's tooling
+   starts formatting them, keep them exempt in `vite.config.ts` and `knip.jsonc`.
 5. **Mobile stays untouched** except the `/park` refusal in `use-thread-composer-state.ts`.
 
 ## Rebasing onto upstream
@@ -181,6 +221,15 @@ when an assistant message finishes, so those questions are not held until the ne
      so it keeps its place in the stack with no notice header); and `ComposerPendingUserInputPanel.tsx`
      exports `OptionRadio`, so the decisions panel's rows look like the native ones. If upstream
      rebuilds the banner stack, give the panel the new stack's way to draw a custom card.
+   - The decision judge's setting, `decisionJudgeModelSelection`, is built like upstream's
+     `speechPostProcessingModelSelection` and sits beside it in each place: the schema and the patch
+     in `packages/contracts/src/settings.ts`, `resolveDecisionJudgeModelSelection` and its patch line
+     in `packages/shared/src/serverSettings.ts`, the `decision-judge-model` entry in
+     `settingsSearch.ts`, the "Decision judge" task in `TextGeneratorsSettings.tsx`'s `TASKS`, and
+     `<DecisionJudgeModelRow />` under the text generation row in `SettingsPanels.tsx`
+     (`ThreadsSettingsPanel`). If upstream reshapes the cleanup setting, reshape this one the same way.
+     `server.ts` provides `DecisionJudge.layer` to `ThreadDecisions.layer`; the judge calls
+     `TextGeneration.generateTranscriptionPostProcessing`, so a rename of that operation lands here.
    - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
      keep both.
    - `apps/server/src/provider/agentContextBudget.json` must equal the measured size exactly; the fork's
@@ -198,7 +247,8 @@ when an assistant message finishes, so those questions are not held until the ne
      `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <tag>`, so each fork commit stays whole.
 5. **Check:** `vp run check:changed <tag>`, plus these tests, under that Node, using the repo's own
    `node_modules/.bin/vp`:
-   - `packages/shared/src/sessionKit`, the drift test included.
+   - `packages/shared/src/sessionKit`, the drift test included, and
+     `packages/shared/src/serverSettings.test.ts` (the judge's setting).
    - `apps/server/src/decisions`.
    - `apps/server/src/persistence/ForkMigrations.test.ts` and `Sqlite.test.ts`.
    - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
@@ -250,9 +300,10 @@ of a newer build migrates `~/.t3` one way, and that copy is the only way back.
   it on every rebase: without it session-kit and the fork both track questions. Keying on
   `T3CODE_THREAD_ID` was wrong, because official builds set that too, and session-kit would go quiet
   inside an official T3 that tracks nothing natively. Dotfiles PR #596.
-- session-kit's reply.ts carries the logic the fork shares (dotfiles PR #600, merged). The drift test
-  reads the file from the local dotfiles checkout, so it goes red whenever that checkout is behind or
-  ahead of the copy: compare against the copy's header commit before re-copying.
+- session-kit's reply.ts and judge.ts carry the logic the fork shares (reply.ts's shared parts came
+  with dotfiles PR #600, merged). The drift test reads the files from the local dotfiles checkout, so it
+  goes red whenever that checkout is behind or ahead of a copy: compare against the copy's header
+  commit before re-copying.
 
 ## Known noise
 
