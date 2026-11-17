@@ -13,7 +13,6 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
 import {
-  ArrowUpIcon,
   ArrowUpRightIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
@@ -25,7 +24,6 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
-  type RefObject,
   useLayoutEffect,
   useRef,
   useState,
@@ -33,8 +31,6 @@ import {
 import { flushSync } from "react-dom";
 
 import { useOpenLink } from "~/browser/useOpenLink";
-import { useComposerDraftStore } from "~/composerDraftStore";
-import { useStableCallback } from "~/hooks/useStableCallback";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { RelativeTime } from "~/components/RelativeTime";
 import { readLocalApi } from "~/localApi";
@@ -52,10 +48,10 @@ import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
-import type { ChatComposerHandle, ChatComposerProps } from "./ChatComposer";
 import { OptionRadio } from "./ComposerPendingUserInputPanel";
 import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
 import {
+  answerLines,
   ariaItemText,
   decidedWithoutAskingByReply,
   decisionMessages,
@@ -67,7 +63,6 @@ import {
   type ParkedBusy,
   parkedFocusAfter,
   resolvedQuestions,
-  yesToAllLine,
 } from "./threadDecisions.logic";
 
 /** How the decision buttons reach the thread: an ordinary message, or a line added to the composer. */
@@ -77,12 +72,6 @@ export interface ThreadDecisionActions {
   readonly send: (text: string) => Promise<boolean>;
   /** True once the composer took the text; failures are reported to the user. */
   readonly insert: (text: string) => boolean;
-  /**
-   * Adds the text as `insert` does, then sends the whole draft as the composer's send button does;
-   * null sends the draft as it is. Resolves true once sent or queued; a refused send leaves the
-   * draft as it was.
-   */
-  readonly insertAndSend: (text: string | null) => Promise<boolean>;
   /** The open questions the composer's draft already closes, and how. */
   readonly inDraft: Readonly<Record<string, DraftChoice>>;
 }
@@ -100,51 +89,6 @@ export function useThreadDecisions(
           }),
     ).data ?? null
   );
-}
-
-/**
- * The `insertAndSend` action. A sent or queued draft is cleared; one still holding exactly what the
- * line made was refused (or put back after a failed send), so it returns to what it was before the
- * line. Kept out of ChatView's body so the callback holds these inputs, never a render's thread state.
- */
-export function useInsertAndSend(input: {
-  readonly composerRef: RefObject<ChatComposerHandle | null>;
-  readonly promptRef: RefObject<string>;
-  /** The composer's send in flight, which `submit` starts. */
-  readonly sendingRef: RefObject<Promise<void> | null>;
-  readonly draftTarget: ChatComposerProps["composerDraftTarget"];
-  readonly insert: (text: string) => boolean;
-}): (text: string | null) => Promise<boolean> {
-  const { composerRef, promptRef, sendingRef, draftTarget, insert } = input;
-  return useStableCallback(async (text: string | null) => {
-    const before = promptRef.current;
-    // Committed before the send, so the composer sends this draft and not the last render's: an
-    // empty draft in an interrupted thread would otherwise resume the run instead.
-    if (text !== null && !flushSync(() => insert(text))) return false;
-    const composer = composerRef.current;
-    if (composer === null) return false;
-    const withLine = promptRef.current;
-    sendingRef.current = null;
-    const submitted = composer.submit();
-    try {
-      if (submitted === "sent") await sendingRef.current;
-    } catch {
-      // A failed send is T3's to report; the draft check below still undoes the line.
-    }
-    if (promptRef.current !== withLine) return true;
-    promptRef.current = before;
-    useComposerDraftStore.getState().setPrompt(draftTarget, before);
-    composer.resetCursorState({ prompt: before, cursor: before.length });
-    // Every other refusal already told the user why.
-    if (submitted === "blocked") {
-      toastManager.add({
-        type: "warning",
-        title: "Not sent",
-        description: "The composer cannot send right now, so your draft is as it was.",
-      });
-    }
-    return false;
-  });
 }
 
 function QuestionActions(props: {
@@ -227,67 +171,31 @@ function OptionRow(props: {
   readonly disabled: boolean;
   readonly onChoose: () => void;
   readonly preview?: ReactNode;
-  /** Drawn after the row, outside its button. */
-  readonly trailing?: ReactNode;
 }) {
   return (
     <div>
-      <div className="flex items-start gap-1">
-        <button
-          type="button"
-          aria-pressed={props.selected}
-          aria-label={props.ariaLabel}
-          disabled={props.disabled}
-          onClick={props.onChoose}
-          className={cn(
-            OPTION_ROW,
-            "min-w-0 flex-1",
-            props.selected ? "text-foreground" : "text-foreground/70",
-            props.disabled
-              ? cn("cursor-not-allowed", !props.selected && "opacity-50")
-              : "cursor-pointer hover:bg-muted/30",
-          )}
-        >
-          <span className="pointer-events-none flex h-5 shrink-0 items-center">
-            <OptionRadio checked={props.selected} />
-          </span>
-          <span className="min-w-0 flex-1 text-sm font-medium wrap-anywhere">{props.label}</span>
-        </button>
-        {props.trailing}
-      </div>
+      <button
+        type="button"
+        aria-pressed={props.selected}
+        aria-label={props.ariaLabel}
+        disabled={props.disabled}
+        onClick={props.onChoose}
+        className={cn(
+          OPTION_ROW,
+          "min-w-0 flex-1",
+          props.selected ? "text-foreground" : "text-foreground/70",
+          props.disabled
+            ? cn("cursor-not-allowed", !props.selected && "opacity-50")
+            : "cursor-pointer hover:bg-muted/30",
+        )}
+      >
+        <span className="pointer-events-none flex h-5 shrink-0 items-center">
+          <OptionRadio checked={props.selected} />
+        </span>
+        <span className="min-w-0 flex-1 text-sm font-medium wrap-anywhere">{props.label}</span>
+      </button>
       {props.preview}
     </div>
-  );
-}
-
-/** A quiet send button: it adds its line (when there is one to add), then sends the draft. */
-function SendButton(props: {
-  readonly ariaLabel: string;
-  readonly tooltip: string;
-  /** Undefined disables it. */
-  readonly onSend: (() => void) | undefined;
-  readonly className?: string;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <button
-            type="button"
-            aria-label={props.ariaLabel}
-            disabled={props.onSend === undefined}
-            onClick={props.onSend}
-            className={cn(
-              "flex size-6 shrink-0 items-center justify-center rounded-md text-muted-foreground outline-none transition-colors enabled:hover:bg-accent enabled:hover:text-primary focus-visible:text-primary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring enabled:cursor-pointer disabled:opacity-50",
-              props.className,
-            )}
-          />
-        }
-      >
-        <ArrowUpIcon aria-hidden className="size-3.5" strokeWidth={2.25} />
-      </TooltipTrigger>
-      <TooltipPopup side="top">{props.tooltip}</TooltipPopup>
-    </Tooltip>
   );
 }
 
@@ -320,28 +228,14 @@ function QuestionPanel(props: {
     );
     if (next !== undefined) setCurrentLabel(next);
   };
-  // One send at a time: a second click while the first is in flight would send twice.
-  const [sending, setSending] = useState(false);
-  const send = (text: string | null) => {
-    setSending(true);
-    void actions.insertAndSend(text).finally(() => setSending(false));
-  };
-  const canSend = actions.canOperate && !sending;
-  // Accept's send adds the Accept line, or only sends once the draft holds it.
-  const acceptSend =
-    !canSend || question.pick === "" || (choice !== undefined && choice !== "accept")
-      ? undefined
-      : () => send(choice === "accept" ? null : decisionMessages.accept(question));
-  // From two questions up, as the transcript mod draws its "yes to all"; disabled with nothing to add.
+  // From two questions up, as the transcript mod draws its "yes to all": one Accept line per question
+  // the draft leaves open, so it is disabled with nothing to add.
   const yesToAllShown = questions.length > 1;
-  const yesToAll = yesToAllShown ? yesToAllLine(questions, actions.inDraft) : null;
+  const yesToAll = answerLines(questions, "accept", actions.inDraft);
   const yesToAllInsert =
-    yesToAll === null || !actions.canOperate ? undefined : () => actions.insert(yesToAll);
-  // With nothing left to add, every pick is already answered in the draft, so its send only sends.
-  const yesToAllSend =
-    !yesToAllShown || !canSend || questions.every((q) => q.pick === "")
+    yesToAll.length === 0 || !actions.canOperate
       ? undefined
-      : () => send(yesToAll);
+      : () => actions.insert(yesToAll.join("\n"));
   const goTo = (at: number) => {
     const target = questions[at];
     if (target !== undefined) setCurrentLabel(target.label);
@@ -383,22 +277,16 @@ function QuestionPanel(props: {
             <span className="px-1.5 text-muted-foreground">In draft</span>
           )}
           {yesToAllShown ? (
-            <span className="me-1 flex items-center gap-0.5">
-              <Button
-                size="xs"
-                variant="ghost-muted"
-                disabled={yesToAllInsert === undefined}
-                aria-label="Yes to all (adds to your message)"
-                onClick={yesToAllInsert}
-              >
-                Yes to all
-              </Button>
-              <SendButton
-                ariaLabel="Yes to all and send"
-                tooltip="Yes to all and send"
-                onSend={yesToAllSend}
-              />
-            </span>
+            <Button
+              size="xs"
+              variant="ghost-muted"
+              className="me-1"
+              disabled={yesToAllInsert === undefined}
+              aria-label="Yes to all (adds to your message)"
+              onClick={yesToAllInsert}
+            >
+              Yes to all
+            </Button>
           ) : null}
           {questions.length > 1 ? (
             <>
@@ -466,14 +354,6 @@ function QuestionPanel(props: {
                   selected={choice === "accept"}
                   disabled={disabled}
                   onChoose={() => choose(decisionMessages.accept(question), true)}
-                  trailing={
-                    <SendButton
-                      ariaLabel={`Accept ${question.label} and send`}
-                      tooltip="Accept and send"
-                      onSend={acceptSend}
-                      className="mt-0.5"
-                    />
-                  }
                   preview={
                     question.reason === "" ? undefined : (
                       <ChatMarkdown
