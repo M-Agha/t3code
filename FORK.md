@@ -44,6 +44,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: Accept and send, and Yes to all, in the question panel`                           | Questions and decisions       |
 | `(fork) decisions: a sent Veto line marks its choice vetoed`                                         | Questions and decisions       |
 | `(fork) decisions: answers are one line per question, and no question sends`                         | Questions and decisions       |
+| `(fork) decisions: the Tracker's final look, with Select mode, a draft bar and Reopen with Undo`     | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -112,10 +113,11 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, Open
   Tracker, whose tooltip counts earlier open questions), the question as markdown, then option rows
   Accept: <pick> (its reason below it), Answer… and Not a decision. The selected row follows the draft
-  (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks" or an
-  Accept line, in any case, selects Accept) and the header says "In draft". Accept and Not a decision move to
+  (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks", or a
+  question's own part of the draft reading as its Accept line in any case, selects Accept) and the header says "In draft". Accept and Not a decision move to
   the next question the draft does not close, only once the composer took the line; Answer… stays
-  (its bare `Qn: ` is a place to type, and the draft state reads it as Answer chosen). From two open
+  (its bare `Qn: ` is a place to type: the draft state reads it as Answer chosen, but the Tracker's
+  draft bar names it as unanswered and will not send it). From two open
   questions up, the header has a quiet Yes to all, which adds one Accept line per question (`Q3:
   yes`, `Q4: no`: `answerLines`, the helper the Tracker's "Accept N picks" and Select mode also use),
   in order, only for questions with a pick that the draft does not already close, so a second press
@@ -135,10 +137,70 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
   names. Its ids stay `decisions` (the surface kind and id in `rightPanelStore.ts` and
   `closedViewStore.ts`, the `decisions.toggle` command, `decisionsPanelTabStore.ts`): persisted panel
   state, reopenable closed tabs and saved keybindings name them. (2026-11-17: the owner's Q31 renamed
-  it from "Decisions".)
+  it from "Decisions".) Its look is the owner's approved final design (Q36, 2026-11-17; boards and
+  spec in the dotfiles repo's `.local/.execution/t3-native-board/notes/tracker-final-design.md`):
+  - Tabs are T3's segmented toggle with neutral counts; the selected one has a `muted-foreground`
+    border (at least 3:1). Questions counts open questions; Decisions counts the choices the newest
+    reply with any made without asking, less those vetoed or in the draft (`choicesToReview`).
+  - **Questions:** a status bar ("2 to answer · 1 in draft", Select); one group per asking reply with
+    its age, a button that shows that reply in the chat, and "Accept N picks" (`answerLines`: only
+    questions with a pick the draft does not close, hidden at zero). A row has its label chip (open,
+    or "In draft" in words), key words, the question and "Pick: …" as markdown, then Accept: <pick>
+    (none without a pick), Answer… and Not a decision. Once the draft closes a question, the row shows
+    the line that does it (`draftLineOf`): its own `Qn: …` line with Edit (the caret goes to the end
+    of that line) and Remove (that line leaves the draft, `withoutLine`), or a shared line ("go with
+    your picks", one naming several) with Edit in composer only. The label may be typed in any case.
+    Only Answer… and Edit move focus to the composer: Accept, Not a decision, Accept N picks, Veto
+    and Add add their lines without it (`insert`'s `focus: false`), and focus goes to the row's next
+    control (Edit after Accept, Accept or Answer… after Remove, Remove after Veto and back, Select
+    after Add; `useFocusAfter`), so a keyboard user answers row after row. The panel is keyed by its
+    thread (`RightPanelSurfaceContent.tsx`), so Select mode never carries over to another thread.
+  - **Show in the chat** goes through T3's citation reveal (`assistantCitationNavigation`), quoting
+    the group's first `Qn, key words` (or a choice's text): it scrolls to the reply and highlights the
+    quote. The quote has no real offsets, so one that occurs twice in the reply, or whose markdown
+    renders differently, still scrolls there but shows T3's "The quoted text has changed".
+  - **Select mode:** the whole row toggles; a reply's checkbox counts only selectable rows and is
+    mixed for some; rows the draft holds are disabled (without the board's dashed box: `Checkbox`
+    owns its border and has no such variant). The dock previews the whole draft after the
+    action (existing lines, `+` new ones; questions without a pick are listed as skipped under
+    Accept picks) and has one "Add N to draft", after which Select mode ends. The capped preview
+    scrolls to the lines it adds and takes keyboard focus. Select mode also ends by itself once
+    nothing is left to select.
+  - **Draft bar** (every tab, while the draft has text, not in Select mode): what the draft holds
+    (`draftSummary`: "2 answers · 1 veto + other text"; a bare `Qn: ` is not counted but named, "Q5
+    unanswered", and holds Send draft back), Review (focuses the composer) and "Send draft", the
+    composer's own send (`ChatComposerHandle.submit()`, so the same refusals, queueing
+    and steering; "Not sent" only when it refused without a word). `useDraftActions` in
+    `ThreadDecisions.tsx` holds the send and the line edits; it is a hook outside ChatView's body on
+    purpose: written inline there, an earlier send hook's callback kept earlier renders' thread
+    structures alive, and `ChatView.browser.test.tsx` "a mounted thread view lets go of the thread
+    structures it has replaced" failed. While the composer answers T3's own pending question its
+    prompt is that answer, so the line edits read the draft from the draft store, and Edit, Remove
+    and Send draft are disabled meanwhile (`answeringPendingInput`).
+  - **Decisions:** "Decided without asking" first, a group per reply. Veto adds `Veto: <text>`; the
+    row then shows "In draft", the line and Remove; once sent it reads "Vetoed". Vetoed comes from the
+    server: the snapshot marks an item `vetoed` when a person-typed message after its reply holds
+    that line (lines read trimmed, as the panel reads its draft; one read of the thread's messages
+    with a `Veto: ` line, matched in TypeScript), and a message with a `Veto: ` line publishes a snapshot even when it closes no
+    question. (A client-side check would miss messages the timeline has not loaded.) Then Answered
+    (green chip) and Not a decision (grey chip), each with "You" and the question's own part of the
+    answer (`answerPart` in `packages/shared/src/sessionKit/decisions.ts`, derived on the server from
+    the full message: from the label to the next label that opens an answer, the whole message when
+    the label is not named), "Pick was: …" when that part's first line does not read as the Accept
+    line in any case and without trailing punctuation (`acceptsPick`), and a per-row Reopen. Reopen is held back for
+    5 s behind a toast with Undo, then calls the existing reopen RPC; it is the only Tracker action
+    that skips the draft. The hold lives in the panel, so switching tabs keeps Undo; closing the panel
+    or leaving the thread lets held reopens go ahead. The row's Reopen stays disabled while its reopen
+    is held or sent, until the snapshot moves the question back. No bulk Reopen.
+  - **Colours:** T3's tokens (`warning-foreground` on `warning-surface` for open, `success` for
+    answered, `muted`/`secondary-foreground` for not a decision, `info`/`ring` for selection,
+    `primary` for Send draft and Add) plus three fork tokens in `index.css`: `--tracker-draft`
+    (teal-800 / teal-300), `--tracker-pick` (violet-700 / violet-300) and `--tracker-agent`
+    (orange-700 / orange-300). Themes have no hue roles to derive them from, so they follow light and
+    dark; custom themes set the `.dark` class too. Each colour sits beside a word.
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
-  `apps/web/src/components/chat/ThreadDecisions.tsx`,
+  `apps/web/src/components/chat/ThreadDecisions.tsx` with its rules in `threadDecisions.logic.ts`,
   `apps/web/src/components/settings/DecisionJudgeModelRow.tsx`, contracts in
   `packages/contracts/src/threadDecisions.ts`.
 
@@ -240,11 +302,18 @@ when an assistant message finishes, so those questions are not held until the ne
      so it keeps its place in the stack with no notice header); and `ComposerPendingUserInputPanel.tsx`
      exports `OptionRadio`, so the decisions panel's rows look like the native ones; and
      `ChatComposer.tsx`'s handle has `submit()`, the send button's `submitComposer` (it reports
-     whether it refused without a word), which nothing calls
-     now that the question panel's send buttons are gone (ChatView wraps the composer's `onSend` to keep the
-     send in flight, `composerSendingRef`, so it can wait for the outcome). If upstream rebuilds the
+     whether it refused without a word), which the Tracker's Send draft calls (ChatView wraps the
+     composer's `onSend` to keep the send in flight, `composerSendingRef`, so it can wait for the
+     outcome). The Tracker's Edit and Remove use the handle's upstream `focusAt` and
+     `resetCursorState`, and its "show in the chat" upstream's `assistantCitationNavigation`. The
+     handle's `insertTextAtEnd` takes a fork option, `focus: false` (passed on as
+     `focusEditorAfterReplace: false`), so the Tracker can add a line without moving focus.
+     `toggle.tsx` has a fork variant, `segmented-bordered` (segmented, with a `muted-foreground`
+     border on the selected item), which the Tracker's tabs use: the lint's `no-restyle` rule keeps
+     colours out of a Toggle's className, and the approved design asks for that border. If upstream rebuilds the
      banner stack, give the panel the new stack's way to draw a custom card; if it renames the
-     composer's submit, follow it.
+     composer's submit, follow it; if it rebuilds citations, give "show in the chat" the new way to
+     reveal a message.
    - The decision judge's setting, `decisionJudgeModelSelection`, is built like upstream's
      `speechPostProcessingModelSelection` and sits beside it in each place: the schema and the patch
      in `packages/contracts/src/settings.ts`, `resolveDecisionJudgeModelSelection` and its patch line

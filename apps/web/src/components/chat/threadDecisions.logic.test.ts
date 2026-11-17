@@ -7,14 +7,22 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  acceptsPick,
   answerLines,
   asDraftLine,
+  choicesToReview,
+  draftLineOf,
+  draftSummary,
+  groupSelection,
   isParkedBusy,
   latestReplyOpenQuestions,
+  lineEnd,
   nextUndrafted,
   openQuestionsByReply,
   parkedFocusAfter,
   questionsClosedByDraft,
+  unfinishedLabels,
+  withoutLine,
 } from "./threadDecisions.logic";
 
 const question = (
@@ -146,6 +154,67 @@ describe("answers added to the composer", () => {
     ]);
   });
 
+  it("finds the draft line that closes a question, and whether it is that question's alone", () => {
+    const reply = [
+      { ...question("Q3", "newer", "open"), pick: "yes" },
+      { ...question("Q4", "newer", "open"), pick: "no" },
+    ];
+    const [q3, q4] = reply as [ThreadDecisionQuestion, ThreadDecisionQuestion];
+    expect(draftLineOf("Also check it.\n  Q3: yes ", q3, reply)).toEqual({
+      line: "Q3: yes",
+      own: true,
+    });
+    // A typed lowercase label is still the question's own line.
+    expect(draftLineOf("q3: no", q3, reply)).toEqual({ line: "q3: no", own: true });
+    expect(draftLineOf("Q3 and Q4: yes", q4, reply)).toEqual({
+      line: "Q3 and Q4: yes",
+      own: false,
+    });
+    // Its own line wins over a sweep before it.
+    expect(draftLineOf("Go with your picks\nQ4: maybe", q4, reply)).toEqual({
+      line: "Q4: maybe",
+      own: true,
+    });
+    expect(draftLineOf("Go with your picks", q4, reply)).toEqual({
+      line: "Go with your picks",
+      own: false,
+    });
+    expect(draftLineOf("Also check it.", q4, reply)).toBeNull();
+  });
+
+  it("removes exactly one line, and finds where a line ends", () => {
+    expect(withoutLine("Q3: yes\nQ4: no\nQ3: yes", "Q3: yes")).toBe("Q4: no\nQ3: yes");
+    expect(withoutLine("Q3: yes\n  Veto: x  \nmore", "Veto: x")).toBe("Q3: yes\nmore");
+    expect(withoutLine("Q3: yes", "Q3: ye")).toBe("Q3: yes");
+    expect(lineEnd("Q3: yes\n Q4: no \nmore", "Q4: no")).toBe(15);
+    expect(lineEnd("Q3: yes", "Q4: no")).toBeNull();
+  });
+
+  it("says what the draft holds", () => {
+    const open = [
+      { ...question("Q3", "newer", "open"), pick: "yes" },
+      { ...question("Q4", "newer", "open"), pick: "no" },
+      { ...question("Q5", "newer", "open"), pick: "later" },
+    ];
+    const summary = (draft: string) =>
+      draftSummary(draft, open, questionsClosedByDraft(draft, { ...snapshot, questions: open }));
+    expect(summary("Q3: yes\nAlso check the remote list.")).toBe("1 answer + other text");
+    expect(summary("Q3: yes\nQ4: no\nVeto: x")).toBe("2 answers · 1 veto");
+    expect(summary("Veto: x\nVeto: y\nhi")).toBe("2 vetoes + other text");
+    expect(summary("Rename it.")).toBe("text");
+    // Answer…'s bare label waits for an answer: named, not counted.
+    expect(summary("Q3: yes\nq5:\nQ4: ")).toBe("1 answer · Q5, Q4 unanswered");
+  });
+
+  it("finds the open questions whose line is only their label", () => {
+    const open = [question("Q4", "newer", "open"), question("Q5", "newer", "open")];
+    expect(unfinishedLabels("Q4: \nq5:\nQ9:\nQ4:", open)).toEqual(["Q4", "Q5"]);
+    expect(unfinishedLabels("Q4: yes\nQ5: no", open)).toEqual([]);
+    // An answer begun on the line after the label is an answer.
+    expect(unfinishedLabels("Q4:\nUse PostgreSQL instead", open)).toEqual([]);
+    expect(unfinishedLabels("Q4:\nQ5: no", open)).toEqual(["Q4"]);
+  });
+
   it("moves to the next question the draft does not close, wrapping, or nowhere", () => {
     const labels = ["Q4", "Q5", "Q6"];
     expect(nextUndrafted(labels, "Q4", {})).toBe("Q5");
@@ -153,6 +222,59 @@ describe("answers added to the composer", () => {
     expect(nextUndrafted(labels, "Q6", {})).toBe("Q4");
     expect(nextUndrafted(labels, "Q5", { Q4: "drop", Q6: "answer" })).toBeUndefined();
     expect(nextUndrafted(["Q4"], "Q4", {})).toBeUndefined();
+  });
+});
+
+describe("decisions", () => {
+  it("tells an answer that took the pick from one that departed from it", () => {
+    const q4 = { ...question("Q4", "newer", "answered"), pick: "yes" };
+    expect(acceptsPick("Q4: yes", q4)).toBe(true);
+    expect(acceptsPick("Go with your picks", q4)).toBe(true);
+    expect(acceptsPick("Q2: no\n Q4: yes", q4)).toBe(true);
+    expect(acceptsPick("Why?\nQ4: Yes", q4)).toBe(true);
+    expect(acceptsPick("Q4: yes, but later", q4)).toBe(false);
+    expect(acceptsPick("Q4: no", q4)).toBe(false);
+    // Its own part of a message naming several, without trailing punctuation.
+    expect(acceptsPick("Why? q4: Yes Q6: No", q4)).toBe(true);
+    expect(acceptsPick("Why? q6: Yes Q4: No", q4)).toBe(false);
+    expect(acceptsPick("Q4: yes.", q4)).toBe(true);
+    expect(acceptsPick("Q4: yes\nAlso rename it", q4)).toBe(true);
+    // Unlabelled answers the judge closed it with: only a blanket accept or the pick itself took it.
+    expect(acceptsPick("Use PostgreSQL instead", q4)).toBe(false);
+    expect(acceptsPick("Yes.", q4)).toBe(true);
+    expect(acceptsPick("No", q4)).toBe(false);
+  });
+
+  it("counts the newest reply's choices that are neither vetoed nor in the draft", () => {
+    const item = (messageId: string, ordinal: number, vetoed = false) => ({
+      messageId: MessageId.make(messageId),
+      ordinal,
+      text: `choice ${messageId} ${ordinal}`,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      vetoed,
+    });
+    const decided = {
+      ...snapshot,
+      // Newest first, as the snapshot sends them.
+      decidedWithoutAsking: [
+        item("newer", 0),
+        item("newer", 1),
+        item("newer", 2, true),
+        item("older", 0),
+      ],
+    };
+    expect(choicesToReview(decided, "")).toBe(2);
+    expect(choicesToReview(decided, "Veto: choice newer 1")).toBe(1);
+    // Another reply's veto, or a line that only contains it, changes nothing.
+    expect(choicesToReview(decided, "Veto: choice older 0\nNo Veto: choice newer 0")).toBe(2);
+    expect(choicesToReview(snapshot, "")).toBe(0);
+  });
+
+  it("checks a reply's box when all it can select is selected, and marks it mixed for some", () => {
+    expect(groupSelection(["Q3", "Q4"], new Set(["Q3", "Q4", "Q9"]))).toBe(true);
+    expect(groupSelection(["Q3", "Q4"], new Set(["Q4"]))).toBe("mixed");
+    expect(groupSelection(["Q3", "Q4"], new Set(["Q9"]))).toBe(false);
+    expect(groupSelection([], new Set())).toBe(false);
   });
 });
 
