@@ -452,8 +452,8 @@ function RightPanelEmptyState(props: {
     ...(props.onAddDecisions
       ? [
           {
-            label: "Decisions",
-            description: "Questions agents asked in this thread, and what you decided.",
+            label: msg("Tracker"),
+            description: msg("This thread's questions, decisions, parked items and artifacts."),
             icon: MessageCircleQuestionIcon,
             shortcut: "Q",
             available: true,
@@ -652,7 +652,7 @@ function surfaceTitle(
       // A git host numbers its issues; a tracker with keys of its own, such as Linear, names them.
       return /^\d+$/.test(surface.key) ? `#${surface.key}` : surface.key;
     case "decisions":
-      return "Decisions";
+      return resolve(msg("Tracker"));
     case "device":
       return surface.title ?? surface.target?.name ?? resolve(msg("Device"));
     case "thread":
@@ -1362,7 +1362,7 @@ export function RightPanelTabs({ ref, ...props }: RightPanelTabsProps) {
     ...(props.onAddDecisions
       ? [
           {
-            label: "Decisions",
+            label: msg("Tracker"),
             icon: MessageCircleQuestionIcon,
             shortcut: "Q",
             available: true,
