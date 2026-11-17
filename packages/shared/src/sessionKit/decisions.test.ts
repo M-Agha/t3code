@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  answerPart,
   closingFor,
   decidedWithoutAsking,
   readReplyDecisions,
@@ -99,5 +100,36 @@ describe("closingFor", () => {
     ["a bare not a decision drops the newest reply's rest", "not a decision", [], ["Q4", "Q5"]],
   ])("%s", (_name, message, answered, dropped) => {
     expect(closingFor(message, open)).toEqual({ answered, dropped });
+  });
+});
+
+describe("answerPart", () => {
+  it("cuts a message into each label's answer, up to the next label it names", () => {
+    const message = "Why is it here? q5: Yes Q6: No, keep it\nand rename it";
+    expect(answerPart(message, "Q5")).toBe("q5: Yes");
+    expect(answerPart(message, "Q6")).toBe("Q6: No, keep it\nand rename it");
+  });
+
+  it("keeps labels joined by and or commas together, and a range as one", () => {
+    expect(answerPart("Q3 and Q4: yes. Q5: no", "Q3")).toBe("Q3 and Q4: yes.");
+    expect(answerPart("Q3, Q4: yes. Q5: no", "Q4")).toBe("Q4: yes.");
+    expect(answerPart("Q3-Q5: not a decision", "Q4")).toBe("Q3-Q5: not a decision");
+  });
+
+  it("runs on past a label cited inside the answer", () => {
+    expect(answerPart("Q28: Same as Q27, but smaller. Q29: no", "Q28")).toBe(
+      "Q28: Same as Q27, but smaller.",
+    );
+  });
+
+  it("starts where a label opens its answer, not where another answer cites it, and never joins lines", () => {
+    const message = "Q3: Same as Q4\nQ4: yes\nQ5: no";
+    expect(answerPart(message, "Q3")).toBe("Q3: Same as Q4");
+    expect(answerPart(message, "Q4")).toBe("Q4: yes");
+    expect(answerPart(message, "Q5")).toBe("Q5: no");
+  });
+
+  it("is the whole message when the label is not named", () => {
+    expect(answerPart("  Go with your picks  ", "Q4")).toBe("Go with your picks");
   });
 });

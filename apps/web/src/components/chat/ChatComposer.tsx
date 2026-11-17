@@ -332,7 +332,12 @@ export interface ChatComposerHandle {
   hasPendingAttachments: () => boolean;
   insertTextAtEnd: (
     text: string,
-    options?: { ensureLeadingBoundary?: boolean; clipboardPaste?: PastedComposerClipboard },
+    // Fork: `focus: false` leaves focus where it is (the Tracker answers rows one after another).
+    options?: {
+      ensureLeadingBoundary?: boolean;
+      clipboardPaste?: PastedComposerClipboard;
+      focus?: boolean;
+    },
   ) => boolean;
   pasteTextAtEnd: (
     clipboardData: DataTransfer,
@@ -2880,6 +2885,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       ensureLeadingBoundary?: boolean;
       citationCommentAnchor?: AssistantCitationSourceAnchor;
       clipboardPaste?: PastedComposerClipboard;
+      focus?: boolean;
     },
   ): boolean => {
     if (
@@ -2912,7 +2918,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             },
             focusEditorAfterReplace: false,
           }
-        : undefined,
+        : options?.focus === false
+          ? { focusEditorAfterReplace: false }
+          : undefined,
     );
   };
   const insertComposerTextStable = useStableCallback(insertComposerText);

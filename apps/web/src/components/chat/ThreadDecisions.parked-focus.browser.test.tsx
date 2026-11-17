@@ -33,6 +33,11 @@ const actions = {
   canOperate: true,
   send: async () => true,
   insert: () => true,
+  sendDraft: async () => true,
+  focusLine: () => {},
+  removeLine: () => {},
+  draft: "",
+  answeringPendingInput: false,
   inDraft: {},
 };
 
