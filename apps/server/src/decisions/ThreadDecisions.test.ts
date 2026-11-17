@@ -234,6 +234,25 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
   }).pipe(Effect.provide(withDecisions)),
 );
 
+it.effect("serves each question its own part of the message that answered it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "Why the index? q4: Yes Q5: No,\nkeep the name");
+    yield* decisions.sync(threadId);
+    assert.deepEqual(
+      (yield* decisions.snapshot(threadId)).questions.map((q) => [q.label, q.answerText]),
+      [
+        ["Q4", "q4: Yes"],
+        ["Q5", "Q5: No,\nkeep the name"],
+      ],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
 it.effect("marks a choice vetoed once the user sends its Veto line, and publishes it", () =>
   Effect.gen(function* () {
     const decisions = yield* ThreadDecisions.ThreadDecisions;
@@ -1241,7 +1260,8 @@ it.effect("judges each message against the questions open when it was sent", () 
     assert.deepEqual(yield* answers(), {
       Q4: ["answered", "yes to the first", "u1"],
       Q5: ["answered", "Q5 and Q6: yes", "u2"],
-      Q6: ["answered", "Q5 and Q6: yes", "u2"],
+      // Each question's own part: Q5's answer covers Q6 too.
+      Q6: ["answered", "Q6: yes", "u2"],
     });
   }).pipe(
     Effect.provide(

@@ -15,6 +15,7 @@ import {
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import {
+  answerPart,
   type Closing,
   closingFor,
   type JudgedQuestion,
@@ -52,8 +53,14 @@ const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
 const VETO_PREFIX = "Veto: ";
 const VETO_LINE = /^\s*Veto: /m;
 
-// The full answer stays in the database; the snapshot carries a preview.
+// The full answer stays in the database; the snapshot carries a preview of the question's own part.
 const ANSWER_TEXT_LIMIT = 300;
+
+/** A question's own part of the message that answered it (answerPart), cut to a preview. */
+const answerPreview = (message: string, label: string) => {
+  const part = answerPart(message, label);
+  return part.length > ANSWER_TEXT_LIMIT ? `${part.slice(0, ANSWER_TEXT_LIMIT - 1)}…` : part;
+};
 
 interface MessageRow {
   readonly messageId: string;
@@ -704,7 +711,7 @@ export const layer = Layer.effect(
         const questions = yield* sql<QuestionRow>`
           SELECT
             label, text, source_message_id AS "sourceMessageId", asked_at AS "askedAt", state,
-            substr(answer_text, 1, ${ANSWER_TEXT_LIMIT + 1}) AS "answerText",
+            answer_text AS "answerText",
             answer_message_id AS "answerMessageId",
             resolved_at AS "resolvedAt"
           FROM fork_thread_decision_questions
@@ -787,10 +794,7 @@ export const layer = Layer.effect(
             sourceMessageId: MessageId.make(row.sourceMessageId),
             askedAt: row.askedAt,
             state: row.state,
-            answerText:
-              row.answerText !== null && row.answerText.length > ANSWER_TEXT_LIMIT
-                ? `${row.answerText.slice(0, ANSWER_TEXT_LIMIT - 1)}…`
-                : row.answerText,
+            answerText: row.answerText === null ? null : answerPreview(row.answerText, row.label),
             answerMessageId:
               row.answerMessageId === null ? null : MessageId.make(row.answerMessageId),
             resolvedAt: row.resolvedAt,
