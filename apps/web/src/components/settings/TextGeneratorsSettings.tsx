@@ -238,6 +238,7 @@ const TASKS = [
     label: "Commit messages, pull requests, and branch names",
   },
   { key: "speechPostProcessingModelSelection", label: "Voice transcript cleanup" },
+  { key: "decisionJudgeModelSelection", label: "Decision judge" },
 ] as const;
 
 /**

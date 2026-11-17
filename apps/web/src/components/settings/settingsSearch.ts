@@ -872,6 +872,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     scope: "project-defaults",
     searchTerms: ["generated thread titles source control content default provider"],
   },
+  // Fork-only.
+  {
+    id: "decision-judge-model",
+    title: "Decision judge",
+    to: "/settings/threads",
+    scope: "environment",
+    searchTerms: ["decision questions answers close judge model effort replies"],
+  },
   {
     id: "thread-title-instructions",
     title: "Thread title instructions",

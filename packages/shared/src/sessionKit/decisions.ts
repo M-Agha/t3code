@@ -1,4 +1,6 @@
-// Fork-only decision tracking on top of the verbatim session-kit parser in ./reply.ts.
+// Fork-only decision tracking on top of the verbatim session-kit parser in ./reply.ts and judge in ./judge.ts.
+import type { Question } from "../types/index.d.ts";
+import { JUDGE_SYSTEM, judgePrompt, parseVerdict, scopeVerdict } from "./judge.ts";
 import {
   type Asked,
   DECIDED_HEADING,
@@ -8,7 +10,7 @@ import {
   trailingQuestions,
 } from "./reply.ts";
 
-export { Q_LINE, readReply };
+export { JUDGE_SYSTEM, Q_LINE, readReply };
 
 export interface QuestionParts {
   readonly keyWords: string;
@@ -91,3 +93,52 @@ export const closingFor = (message: string, open: ReadonlyArray<OpenQuestion>): 
     dropped: settled.dropped.map((q) => q.label),
   };
 };
+
+/** An open question with its text, which the judge reads. */
+export interface JudgedQuestion extends OpenQuestion {
+  readonly text: string;
+}
+
+/** A row as session-kit's board holds one: key words apart, the question with its pick as the text. */
+const boardQuestion = (row: JudgedQuestion, id: number): Question => {
+  const parts = splitQuestion(row.text);
+  return {
+    id,
+    label: row.label,
+    keys: parts.keyWords,
+    text:
+      parts.pick === ""
+        ? parts.question
+        : `${parts.question} My pick is ${parts.pick}: ${parts.reason}`,
+    turn: row.sourceMessageId,
+    at: row.askedAt,
+    state: "open",
+  };
+};
+
+/** The judge's input, as the terminal builds it: the open questions, the last reply when known, the message. */
+export const judgeInput = (
+  open: ReadonlyArray<JudgedQuestion>,
+  reply: string | undefined,
+  message: string,
+): string => judgePrompt(open.map(boardQuestion), reply, message);
+
+/**
+ * The judge's answer as a closing, narrowed as the terminal narrows it (`scopeVerdict` only removes
+ * labels); undefined when the answer is not the asked JSON, and the caller falls back to `closingFor`.
+ */
+export const judgedClosing = (
+  answer: string,
+  open: ReadonlyArray<JudgedQuestion>,
+  message: string,
+  reply: string | undefined,
+): Closing | undefined =>
+  scopeVerdict(
+    parseVerdict(
+      answer,
+      open.map((q) => q.label),
+    ),
+    open.map(boardQuestion),
+    message,
+    reply,
+  );
