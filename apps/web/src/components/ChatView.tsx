@@ -343,7 +343,6 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   type ThreadDecisionActions,
   threadDecisionsBannerItem,
-  useInsertAndSend,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
@@ -1998,13 +1997,6 @@ export default function ChatView(props: ChatViewProps) {
     canOperate: canOperateThread && isServerThread,
     send: useStableCallback(sendDecisionMessage),
     insert: insertDecisionTextStable,
-    insertAndSend: useInsertAndSend({
-      composerRef,
-      promptRef,
-      sendingRef: composerSendingRef,
-      draftTarget: composerDraftTarget,
-      insert: insertDecisionTextStable,
-    }),
     inDraft: useComposerDraftStore(
       useShallow((store) =>
         questionsClosedByDraft(
