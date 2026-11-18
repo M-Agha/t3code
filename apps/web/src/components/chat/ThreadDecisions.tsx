@@ -1106,8 +1106,8 @@ function GroupCheckbox(props: {
   );
 }
 
-/** How long Reopen waits for an Undo before it reopens the question. */
-const REOPEN_UNDO_MS = 5_000;
+/** How long Reopen's toast waits for an Undo; Base UI pauses it on hover, focus and window blur. */
+const REOPEN_UNDO_MS = 8_000;
 
 /**
  * Reopen, held back while its toast offers Undo; the only Tracker action that skips the draft. Held
@@ -1116,12 +1116,7 @@ const REOPEN_UNDO_MS = 5_000;
  */
 function useReopenWithUndo() {
   const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
-  const held = useRef(
-    new Map<
-      string,
-      { readonly timer: number; readonly toastId: string; readonly run: () => void }
-    >(),
-  );
+  const held = useRef(new Map<string, { readonly toastId: string; readonly run: () => void }>());
   // Held, or sent and not yet failed. A sent reopen leaves its row once the snapshot shows the
   // question open; the key carries resolvedAt, so a question answered again starts afresh.
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
@@ -1135,20 +1130,24 @@ function useReopenWithUndo() {
     const entry = held.current.get(key);
     if (entry === undefined) return undefined;
     held.current.delete(key);
-    window.clearTimeout(entry.timer);
     toastManager.close(entry.toastId);
     return entry;
   };
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- runs the reopens still held back when the panel unmounts
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the reopens still held when the panel unmounts or the page goes
   useEffect(() => {
     const entries = held.current;
-    return () => {
+    // A paused toast can wait indefinitely, so a reload or quit sends what it holds (best effort).
+    const flush = () => {
       for (const entry of entries.values()) {
-        window.clearTimeout(entry.timer);
         toastManager.close(entry.toastId);
         entry.run();
       }
       entries.clear();
+    };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      flush();
     };
   }, [held]);
   const keyOf = (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) =>
@@ -1165,21 +1164,27 @@ function useReopenWithUndo() {
         // A failed reopen was reported; its row may be tried again.
         if (result._tag !== "Success") unpend(key);
       });
-    const goAhead = () => release(key)?.run();
-    const toastId = toastManager.add({
+    let toastId = "";
+    // Each toast acts on its own hold only: one still fading after Undo must not send a newer Reopen.
+    const own = () => held.current.get(key)?.toastId === toastId;
+    const goAhead = () => {
+      if (own()) release(key)?.run();
+    };
+    const undo = () => {
+      if (own() && release(key) !== undefined) unpend(key);
+    };
+    // Base UI's timer (hover pauses it); the reopen goes out once the toast is gone, so an Undo during
+    // the fade counts; ✕ cancels like Undo (2026-11-17: a late Undo and the ✕ both reopened a question).
+    toastId = toastManager.add({
       type: "info",
       title: `Reopening ${question.label}`,
       description: "It goes back to Questions.",
-      timeout: 0,
-      actionProps: {
-        children: "Undo",
-        onClick: () => {
-          if (release(key) !== undefined) unpend(key);
-        },
-      },
-      data: { onClose: goAhead },
+      timeout: REOPEN_UNDO_MS,
+      onRemove: goAhead,
+      actionProps: { children: "Undo", onClick: undo },
+      data: { onClose: undo },
     });
-    held.current.set(key, { timer: window.setTimeout(goAhead, REOPEN_UNDO_MS), toastId, run });
+    held.current.set(key, { toastId, run });
     setPending((current) => new Set(current).add(key));
   };
   return {
