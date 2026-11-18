@@ -187,11 +187,18 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`).
     answer (`answerPart` in `packages/shared/src/sessionKit/decisions.ts`, derived on the server from
     the full message: from the label to the next label that opens an answer, the whole message when
     the label is not named), "Pick was: …" when that part's first line does not read as the Accept
-    line in any case and without trailing punctuation (`acceptsPick`), and a per-row Reopen. Reopen is held back for
-    5 s behind a toast with Undo, then calls the existing reopen RPC; it is the only Tracker action
-    that skips the draft. The hold lives in the panel, so switching tabs keeps Undo; closing the panel
-    or leaving the thread lets held reopens go ahead. The row's Reopen stays disabled while its reopen
-    is held or sent, until the snapshot moves the question back. No bulk Reopen.
+    line in any case and without trailing punctuation (`acceptsPick`), and a per-row Reopen.
+  - **Reopen** is held behind a toast with Undo for 8 s of Base UI's toast timer, which pauses while
+    the pointer is over any toast, while a toast has keyboard focus, and while the window is in the
+    background. The reopen RPC goes out only once the toast is gone (`onRemove`), so an Undo that
+    reaches it while it fades still counts; each toast acts on its own hold only, so a toast still
+    fading after Undo cannot send a newer Reopen of the same row. Undo and the ✕ cancel; Escape and a
+    swipe close the toast like its timer, so they send it (Base UI reports them as an ordinary
+    close). Closing the panel, leaving the thread, or the page going away (`pagehide`, best effort)
+    sends what is still held. It is the only Tracker action that skips the draft; the row's Reopen
+    stays disabled while held or sent, until the snapshot moves the question back. No bulk Reopen.
+    (2026-11-17: a window timer that ignored hover, and a ✕ that committed, reopened a question the
+    owner had undone.)
   - **Colours:** T3's tokens (`warning-foreground` on `warning-surface` for open, `success` for
     answered, `muted`/`secondary-foreground` for not a decision, `info`/`ring` for selection,
     `primary` for Send draft and Add) plus three fork tokens in `index.css`: `--tracker-draft`

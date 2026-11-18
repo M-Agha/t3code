@@ -555,25 +555,78 @@ it("Reopen waits for its toast's Undo; undone, it never reaches the server", asy
   await page.getByRole("button", { name: "Decisions", exact: true }).click();
   await expect.element(page.getByText("Pick was: yes")).toBeVisible();
 
-  // The page's clock, faked from here, so the 5 s hold passes on demand.
+  // The page's clock, faked from here, so the 8 s hold passes on demand.
   using _timers = fakeTimers();
   await option("Reopen Q3").click();
   await expect.element(page.getByText("Reopening Q3")).toBeVisible();
   await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect.element(page.getByText("Reopening Q3")).not.toBeInTheDocument();
-  vi.advanceTimersByTime(10_000);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(reopened).toEqual([]);
+
+  // Reopen again while the undone toast still fades: when that toast goes, the new hold stays held.
+  await option("Reopen Q3").click();
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await option("Reopen Q3").click();
+  await vi.waitFor(() => expect(page.getByText("Reopening Q3").elements()).toHaveLength(1), {
+    timeout: 5_000,
+  });
+  expect(reopened).toEqual([]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect.element(page.getByText("Reopening Q3")).not.toBeInTheDocument();
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(reopened).toEqual([]);
+
+  // The toast's ✕ cancels like Undo; it never sends the reopen.
+  await option("Reopen Q3").click();
+  await expect.element(page.getByText("Reopening Q3")).toBeVisible();
+  await page.getByRole("button", { name: "Dismiss notification" }).click();
+  await expect.element(page.getByText("Reopening Q3")).not.toBeInTheDocument();
+  await vi.advanceTimersByTimeAsync(20_000);
   expect(reopened).toEqual([]);
 
   await option("Reopen Q3").click();
   await expect.element(page.getByText("Reopening Q3")).toBeVisible();
-  vi.advanceTimersByTime(4_000);
+  // A pointer resting on the toast (on its Undo, say) holds the countdown.
+  await userEvent.hover(page.getByText("Reopening Q3"));
+  await vi.advanceTimersByTimeAsync(20_000);
   expect(reopened).toEqual([]);
-  vi.advanceTimersByTime(1_000);
-  await vi.waitFor(() => expect(reopened).toHaveLength(1));
+  await userEvent.unhover(page.getByText("Reopening Q3"));
+  await vi.advanceTimersByTimeAsync(7_000);
+  expect(reopened).toEqual([]);
+  await vi.advanceTimersByTimeAsync(1_500);
+  await vi.waitFor(() => expect(reopened).toHaveLength(1), { timeout: 5_000 });
   expect(reopened[0]).toMatchObject({ label: "Q3" });
   // Sent and answered: the row waits for the snapshot that moves Q3 back to Questions.
   await vi.advanceTimersByTimeAsync(1_000);
   await expect.element(option("Reopen Q3")).toBeDisabled();
+});
+
+it("a reopen still held when the page goes away is sent", async () => {
+  const reopened: unknown[] = [];
+  using _reopen = answerRpc(WS_METHODS.threadDecisionsReopen, (input: never) => {
+    reopened.push(input);
+    return Effect.void;
+  });
+  await using _app = await openThread(threadWithHistory("thread-decision-pagehide", 1), undefined, {
+    questions: [
+      open("Q4", "yes", "a"),
+      {
+        ...open("Q3", "yes", "b"),
+        state: "answered",
+        answerText: "Q3: yes",
+        resolvedAt: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  await openTracker();
+  await page.getByRole("button", { name: "Decisions", exact: true }).click();
+  using _timers = fakeTimers();
+  await option("Reopen Q3").click();
+  await expect.element(page.getByText("Reopening Q3")).toBeVisible();
+  window.dispatchEvent(new Event("pagehide"));
+  await vi.waitFor(() => expect(reopened).toHaveLength(1));
+  expect(reopened[0]).toMatchObject({ label: "Q3" });
 });
 
 it("a send T3 refuses leaves the draft as it was, with T3's reason alone", async () => {
