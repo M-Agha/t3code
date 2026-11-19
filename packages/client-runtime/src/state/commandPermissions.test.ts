@@ -228,6 +228,8 @@ describe("command permissions", () => {
     WS_METHODS.threadDecisionsReopen,
     WS_METHODS.threadDecisionsPark,
     WS_METHODS.threadDecisionsUpdateParked,
+    WS_METHODS.threadDecisionsLinkArtifact,
+    WS_METHODS.threadDecisionsUnlinkArtifact,
     ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
   ])("uses the target grant for both availability and execution of %s", (method) =>
     Effect.gen(function* () {

@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sessionKit/artifacts": {
+      "types": "./src/sessionKit/artifacts.ts",
+      "import": "./src/sessionKit/artifacts.ts"
+    },
     "./sessionKit/decisions": {
       "types": "./src/sessionKit/decisions.ts",
       "import": "./src/sessionKit/decisions.ts"
