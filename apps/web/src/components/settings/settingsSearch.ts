@@ -971,7 +971,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Decision judge"),
     to: "/settings/threads",
     scope: "environment",
-    searchTerms: [msg("decision questions answers close judge model effort replies")],
+    searchTerms: [msg("tracker decision questions answers close judge model effort replies")],
   },
   {
     id: "thread-title-instructions",
