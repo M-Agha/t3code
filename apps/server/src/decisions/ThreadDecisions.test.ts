@@ -59,6 +59,8 @@ const offline = () =>
     }),
   );
 
+// Fork migration 005 records the judge taking over at the clock's time, TestClock's 1970 here, so every
+// message these tests write is judged unless a test moves it (`judgeFrom`).
 const decisionsWith = (answer: (prompt: string) => Effect.Effect<string, TextGenerationError>) =>
   ThreadDecisions.layer.pipe(
     Layer.provide(judgeLayer(answer)),
@@ -1085,6 +1087,7 @@ it.effect("closes what the judge reads in a bare yes right after the question bl
     yield* seed();
     yield* run("r1", 1, "completed");
     yield* message("a1", "r1", "assistant", REPLY);
+    assert.isTrue(yield* decisions.sync(threadId));
     yield* run("r2", 2, "completed");
     yield* message("u1", "r2", "user", "yes");
     const [changed, logs] = yield* judgeLogs(decisions.sync(threadId));
@@ -1130,6 +1133,7 @@ it.effect("closes the label a mixed message names and the question its words ans
         "Q6, table name: Rename it? My pick is no: nothing reads it.",
       ].join("\n"),
     );
+    assert.isTrue(yield* decisions.sync(threadId));
     yield* run("r2", 2, "completed");
     yield* message("u1", "r2", "user", "Q4: yes, and merge it");
     assert.isTrue(yield* decisions.sync(threadId));
@@ -1149,6 +1153,7 @@ const fallsBack = <E, R>(
     yield* seed();
     yield* run("r1", 1, "completed");
     yield* message("a1", "r1", "assistant", REPLY);
+    assert.isTrue(yield* decisions.sync(threadId));
     yield* run("r2", 2, "completed");
     yield* message("u1", "r2", "user", "yes");
     yield* message("u2", "r2", "user", "Q4: yes");
@@ -1246,12 +1251,13 @@ it.effect("judges each message against the questions open when it was sent", () 
     yield* seed();
     yield* run("r1", 1, "completed");
     yield* message("a1", "r1", "assistant", asks("Q4", "Q5"));
+    assert.isTrue(yield* decisions.sync(threadId));
     yield* run("r2", 2, "completed");
     yield* message("u1", "r2", "user", "yes to the first");
     yield* message("a2", "r2", "assistant", asks("Q6"));
     yield* run("r3", 3, "completed");
     yield* message("u2", "r3", "user", "Q5 and Q6: yes");
-    // One sync reads all four: u2's judge sees Q4 closed by u1 and Q6 asked after it.
+    // One sync reads the next three: u2's judge sees Q4 closed by u1 and Q6 asked after it.
     assert.isTrue(yield* decisions.sync(threadId));
     assert.deepEqual(prompts.map(openIn), [
       ["Q4", "Q5"],
@@ -1311,4 +1317,174 @@ it.effect("shows a subscriber the current rows while its backlog is judged", () 
       ),
     );
   }).pipe(Effect.scoped),
+);
+
+// The judge took over at `at`: as if fork migration 005's first start ran then.
+const judgeFrom = Effect.fn("judgeFrom")(function* (at: string) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`UPDATE fork_decision_judge_cutoff SET judged_from = ${at}`;
+});
+
+it.effect(
+  "reads messages sent before the judge took over by the rules alone, later ones judged",
+  () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      assert.isTrue(yield* decisions.sync(threadId));
+      yield* run("r2", 2, "completed");
+      // The judge would close Q4 and Q5 on this bare yes; the rules close nothing on it.
+      yield* message("u1", "r2", "user", "yes");
+      yield* message("u2", "r2", "user", "Q4: yes");
+      yield* judgeFrom(nextAt());
+      yield* message("u3", "r2", "user", "yes");
+      const [changed, logs] = yield* judgeLogs(decisions.sync(threadId));
+      assert.isTrue(changed);
+      // One call, for u3 alone, which finds Q4 already closed by u2's label.
+      assert.deepEqual(prompts.map(said), ["yes"]);
+      assert.deepEqual(prompts.map(openIn), [["Q5"]]);
+      assert.deepEqual(logs, [["Info", "Decision judge read a message"]]);
+      assert.deepEqual(yield* answers(), {
+        Q4: ["answered", "Q4: yes", "u2"],
+        Q5: ["answered", "yes", "u3"],
+      });
+    }).pipe(
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Effect.sync(() => {
+            prompts.push(prompt);
+            return verdict(["Q4", "Q5"]);
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect(
+  "asks the judge nothing for a never-read thread's backlog from before it took over",
+  () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      yield* run("r2", 2, "completed");
+      yield* message("u1", "r2", "user", "yes");
+      yield* message("u2", "r2", "user", "go with 2");
+      yield* message("a2", "r2", "assistant", asks("Q6", "Q7"));
+      yield* run("r3", 3, "completed");
+      yield* message("u3", "r3", "user", "Q6: not a decision");
+      yield* message("u4", "r3", "user", "merge it");
+      yield* judgeFrom(nextAt());
+      const snapshots = yield* Queue.unbounded<Record<string, string>>();
+      const [, logs] = yield* judgeLogs(
+        Effect.gen(function* () {
+          yield* decisions.subscribe(threadId).pipe(
+            Stream.runForEach((snapshot) =>
+              Queue.offer(
+                snapshots,
+                Object.fromEntries(snapshot.questions.map((q) => [q.label, q.state])),
+              ),
+            ),
+            Effect.forkScoped,
+          );
+          // Nothing read yet, then the whole backlog, read by the rules with no model in between.
+          assert.deepEqual(yield* Queue.take(snapshots), {});
+          assert.deepEqual(yield* Queue.take(snapshots), {
+            Q4: "open",
+            Q5: "open",
+            Q6: "dropped",
+            Q7: "open",
+          });
+        }),
+      );
+      assert.deepEqual(logs, []);
+      assert.deepEqual(prompts, []);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Effect.sync(() => {
+            prompts.push(prompt);
+            return verdict(["Q4", "Q5", "Q6", "Q7"]);
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+// Records each prompt the judge is given; its verdict closes Q4 and Q5.
+const recording = (prompts: string[]) =>
+  decisionsWith((prompt) =>
+    Effect.sync(() => {
+      prompts.push(prompt);
+      return verdict(["Q4", "Q5"]);
+    }),
+  );
+
+it.effect("judges a new thread's answers: its first pass runs before any question", () => {
+  const prompts: string[] = [];
+  return Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "running");
+    // The listener syncs on the person's first message; no question is open yet.
+    yield* message("u0", "r1", "user", "Migrate it.");
+    yield* decisions.sync(threadId);
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r1", 1, "completed");
+    assert.isTrue(yield* decisions.sync(threadId));
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "yes");
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(prompts.map(said), ["yes"]);
+    assert.deepEqual(yield* states(), { Q4: "answered", Q5: "answered" });
+  }).pipe(Effect.provide(recording(prompts)));
+});
+
+it.effect(
+  "asks the judge nothing for a never-read thread's backlog sent after it took over",
+  () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      yield* run("r2", 2, "completed");
+      // After the cutoff (TestClock's 1970), but the fork reads this thread for the first time: an
+      // imported session, or one an official build ran.
+      yield* message("u1", "r2", "user", "yes");
+      yield* message("u2", "r2", "user", "Q4: yes");
+      const [changed, logs] = yield* judgeLogs(decisions.sync(threadId));
+      assert.isTrue(changed);
+      assert.deepEqual(logs, []);
+      assert.deepEqual(prompts, []);
+      assert.deepEqual(yield* states(), { Q4: "answered", Q5: "open" });
+      // Read once, the thread's next answer is judged.
+      yield* message("u3", "r2", "user", "yes");
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(prompts.map(said), ["yes"]);
+      assert.deepEqual(yield* states(), { Q4: "answered", Q5: "answered" });
+    }).pipe(Effect.provide(recording(prompts)));
+  },
+);
+
+it.effect("warns at start when the judge's cutoff row is missing", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`DELETE FROM fork_decision_judge_cutoff`;
+    const [, logs] = yield* judgeLogs(
+      Effect.provide(Effect.void, ThreadDecisions.layer.pipe(Layer.provide(judgeLayer(offline)))),
+    );
+    assert.deepEqual(logs, [
+      ["Warn", "Decision judge cutoff is missing, so the rules alone close questions"],
+    ]);
+  }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
