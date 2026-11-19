@@ -230,6 +230,8 @@ describe("command permissions", () => {
     WS_METHODS.threadDecisionsReopen,
     WS_METHODS.threadDecisionsPark,
     WS_METHODS.threadDecisionsUpdateParked,
+    WS_METHODS.threadDecisionsLinkArtifact,
+    WS_METHODS.threadDecisionsUnlinkArtifact,
     ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
     WS_METHODS.workflowsAnswer,
     WS_METHODS.workflowsResume,

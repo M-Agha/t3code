@@ -2002,6 +2002,14 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:thread-decisions:update-parked",
       tag: WS_METHODS.threadDecisionsUpdateParked,
     }),
+    linkThreadArtifact: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:thread-decisions:link-artifact",
+      tag: WS_METHODS.threadDecisionsLinkArtifact,
+    }),
+    unlinkThreadArtifact: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:thread-decisions:unlink-artifact",
+      tag: WS_METHODS.threadDecisionsUnlinkArtifact,
+    }),
     createGuestShare: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:guest-share:create",
       tag: WS_METHODS.guestShareCreate,
