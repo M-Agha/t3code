@@ -1600,8 +1600,7 @@ function OpenCommandPaletteDialog(props: {
       title: gt("Show parked items"),
       icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
-        useDecisionsPanelTab.getState().setTab("parked");
-        useRightPanelStore.getState().open(threadRef, "decisions");
+        useRightPanelStore.getState().open(threadRef, "parked");
       },
     });
     actionItems.push({
@@ -1611,8 +1610,7 @@ function OpenCommandPaletteDialog(props: {
       title: gt("Show artifacts"),
       icon: <ShapesIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
-        useDecisionsPanelTab.getState().setTab("artifacts");
-        useRightPanelStore.getState().open(threadRef, "decisions");
+        useRightPanelStore.getState().open(threadRef, "artifacts");
       },
     });
   }

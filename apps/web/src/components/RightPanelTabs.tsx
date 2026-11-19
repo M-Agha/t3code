@@ -42,6 +42,7 @@ import { horizontalListSortingStrategy, SortableContext, useSortable } from "@dn
 import { CSS } from "@dnd-kit/utilities";
 import {
   Bot,
+  ArchiveIcon,
   CircleDotIcon,
   Smartphone,
   ChevronDown,
@@ -53,6 +54,7 @@ import {
   MessageCircleQuestionIcon,
   MessagesSquare,
   Plus,
+  ShapesIcon,
   TerminalSquare,
   Volume2Icon,
   VolumeOffIcon,
@@ -163,6 +165,10 @@ export interface RightPanelTabsProps {
   onAddSideChat?: (() => void) | undefined;
   /** Absent outside a thread. */
   onAddDecisions?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddParked?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddArtifacts?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -174,6 +180,8 @@ export interface RightPanelTabsProps {
   /** Overrides the default reason while side chats are available but cannot start. */
   sideChatDisabledReason?: string | null;
   pullRequestStatusSeeds?: Readonly<Record<string, PullRequestTabStatusSeed>>;
+  /** A count beside a tab's title, by surface id; shown and announced when above zero. */
+  surfaceCounts?: Readonly<Record<string, number>>;
   children: ReactNode;
 }
 
@@ -351,6 +359,10 @@ function RightPanelEmptyState(props: {
   onAddSideChat?: (() => void) | undefined;
   /** Absent outside a thread. */
   onAddDecisions?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddParked?: (() => void) | undefined;
+  /** Absent outside a thread. */
+  onAddArtifacts?: (() => void) | undefined;
   browserAvailable: boolean;
   terminalAvailable: boolean;
   diffAvailable: boolean;
@@ -441,12 +453,38 @@ function RightPanelEmptyState(props: {
       ? [
           {
             label: msg("Tracker"),
-            description: msg("This thread's questions, decisions, parked items and artifacts."),
+            description: msg("This thread's questions and decisions."),
             icon: MessageCircleQuestionIcon,
             shortcut: "Q",
             available: true,
             disabledReason: "",
             onClick: props.onAddDecisions,
+          },
+        ]
+      : []),
+    ...(props.onAddParked
+      ? [
+          {
+            label: msg("Parked"),
+            description: msg("What this thread set aside for later."),
+            icon: ArchiveIcon,
+            shortcut: "K",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddParked,
+          },
+        ]
+      : []),
+    ...(props.onAddArtifacts
+      ? [
+          {
+            label: msg("Artifacts"),
+            description: msg("Pages this thread published to claude.ai or linked to."),
+            icon: ShapesIcon,
+            shortcut: "A",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddArtifacts,
           },
         ]
       : []),
@@ -641,6 +679,10 @@ function surfaceTitle(
       return /^\d+$/.test(surface.key) ? `#${surface.key}` : surface.key;
     case "decisions":
       return resolve(msg("Tracker"));
+    case "parked":
+      return resolve(msg("Parked"));
+    case "artifacts":
+      return resolve(msg("Artifacts"));
     case "device":
       return surface.title ?? surface.target?.name ?? resolve(msg("Device"));
     case "thread":
@@ -743,6 +785,10 @@ function SurfaceIcon({
       return <IssueSurfaceIcon surface={surface} environmentId={environmentId} />;
     case "decisions":
       return <MessageCircleQuestionIcon className="size-3 shrink-0" />;
+    case "parked":
+      return <ArchiveIcon className="size-3 shrink-0" />;
+    case "artifacts":
+      return <ShapesIcon className="size-3 shrink-0" />;
     case "thread":
       return <SideChatTabIcon environmentId={environmentId} threadId={surface.threadId} />;
     case "linked-thread":
@@ -979,6 +1025,7 @@ function RightPanelTab(
     theme: "light" | "dark";
     environmentId: EnvironmentId | null;
     pullRequestStatusSeed: PullRequestTabStatusSeed | undefined;
+    count: number | undefined;
     renaming: boolean;
     canRename: boolean;
     ownsDesktopTitleBar: boolean;
@@ -1013,6 +1060,7 @@ function RightPanelTab(
         ? sideChatShell.title
         : formatSubagentDisplayTitle(sideChatShell.title);
   const sideChatState = sideChatTabState(sideChatShell);
+  const count = props.count !== undefined && props.count > 0 ? props.count : undefined;
   const content = (
     <>
       <PanelTabCloseButton label={gt("Close {title}", { title })} onClick={() => onClose(surface)}>
@@ -1092,16 +1140,21 @@ function RightPanelTab(
                 }}
                 className="cursor-pointer flex min-w-0 items-center"
                 aria-label={
-                  sideChatState === null
-                    ? undefined
-                    : gt("{title}, {state}", {
+                  sideChatState !== null
+                    ? gt("{title}, {state}", {
                         title,
                         state: messages(SIDE_CHAT_STATE_LABELS[sideChatState]),
                       })
+                    : count === undefined
+                      ? undefined
+                      : gt("{title}, {count}", { title, count })
                 }
                 onClick={() => onActivate(surface)}
               >
                 <span className="truncate">{title}</span>
+                {count === undefined ? null : (
+                  <span className="ms-1.5 shrink-0 tabular-nums opacity-80">{count}</span>
+                )}
               </button>
             }
           />
@@ -1268,6 +1321,30 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             available: true,
             disabledReason: "",
             onClick: props.onAddDecisions,
+          },
+        ]
+      : []),
+    ...(props.onAddParked
+      ? [
+          {
+            label: msg("Parked"),
+            icon: ArchiveIcon,
+            shortcut: "K",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddParked,
+          },
+        ]
+      : []),
+    ...(props.onAddArtifacts
+      ? [
+          {
+            label: msg("Artifacts"),
+            icon: ShapesIcon,
+            shortcut: "A",
+            available: true,
+            disabledReason: "",
+            onClick: props.onAddArtifacts,
           },
         ]
       : []),
@@ -1572,6 +1649,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     theme={resolvedTheme}
                     environmentId={props.environmentId}
                     pullRequestStatusSeed={props.pullRequestStatusSeeds?.[surface.id]}
+                    count={props.surfaceCounts?.[surface.id]}
                     renaming={renamingDevice === surface.id}
                     canRename={props.onRenameDevice !== undefined}
                     ownsDesktopTitleBar={ownsDesktopTitleBar}
@@ -1734,6 +1812,8 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddDevice={props.onAddDevice}
             onAddSideChat={props.onAddSideChat}
             onAddDecisions={props.onAddDecisions}
+            onAddParked={props.onAddParked}
+            onAddArtifacts={props.onAddArtifacts}
             browserAvailable={props.browserAvailable}
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
