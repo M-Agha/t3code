@@ -45,6 +45,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: a sent Veto line marks its choice vetoed`                                         | Questions and decisions       |
 | `(fork) decisions: answers are one line per question, and no question sends`                         | Questions and decisions       |
 | `(fork) decisions: the Tracker's final look, with Select mode, a draft bar and Reopen with Undo`     | Questions and decisions       |
+| `(fork) decisions: the judge reads only messages sent after it was in place`                         | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -58,41 +59,59 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   remember to call.
 - **Closing:** from the user's own messages, as the terminal closes them. session-kit's model judge
   (`judge.ts`: `JUDGE_SYSTEM`, `judgePrompt`, `parseVerdict`, `scopeVerdict`) reads every message a
-  person typed while questions are open, with the open questions and the reply it follows, and its
-  verdict decides; `scopeVerdict` only removes labels (a blanket "yes" never closes a question an
-  earlier reply asked unless the message or the last reply names it). The rules (`closingFor`, over
+  person typed while questions are open, in a thread the fork has read before and sent since the
+  judge took over (below), with the open questions and the reply it follows, and its verdict
+  decides; `scopeVerdict` only removes labels (a blanket "yes" never closes a question an earlier
+  reply asked unless the message or the last reply names it). The rules (`closingFor`, over
   session-kit's `readReply`: `Q4: yes`, "go with your picks", "not a decision") decide only when the
-  call fails, takes over 20 s, or its answer does not parse (logged as a warning). So a bare "yes" right after a question
-  block, "merge it" or "go with 2" closes what it answers, and a message that answers nothing (a
-  clarifying question) closes nothing. The model is the "Decision judge" setting (Settings → Threads,
-  below the text generation model; `decisionJudgeModelSelection`, where null follows
-  `textGenerationModelSelection`, as transcript cleanup's setting does), called through T3's
+  call fails, takes over 20 s, or its answer does not parse (logged as a warning). So a bare "yes"
+  right after a question block, "merge it" or "go with 2" closes what it answers, and a message that
+  answers nothing (a clarifying question) closes nothing. The model is the "Decision judge" setting
+  (Settings → Threads, below the text generation model; `decisionJudgeModelSelection`, where null
+  follows `textGenerationModelSelection`, as transcript cleanup's setting does), called through T3's
   text-generation path, so any provider T3 is signed in to works. That path has no free-text
   operation: `generateTranscriptionPostProcessing` is the one whose input is the whole prompt and
-  whose output is one string, so the verdict's JSON travels in that string, and the prompt spells out
-  the envelope `{"transcription":"<verdict JSON>"}` for text generators, which enforce no schema
-  (`DecisionJudge.ts`; a fork-only operation on every provider is the upgrade path if a model will not
-  put it there). That path also has no system slot: `JUDGE_SYSTEM` rides at the top of the user turn,
-  under the provider's own system prompt, so session-kit's measured accuracy (its judge sends
+  whose output is one string, so the verdict's JSON travels in that string, and the prompt spells
+  out the envelope `{"transcription":"<verdict JSON>"}` for text generators, which enforce no schema
+  (`DecisionJudge.ts`; a fork-only operation on every provider is the upgrade path if a model will
+  not put it there). That path also has no system slot: `JUDGE_SYSTEM` rides at the top of the user
+  turn, under the provider's own system prompt, so session-kit's measured accuracy (its judge sends
   `JUDGE_SYSTEM` as the system prompt) does not carry over; T3's is unmeasured. The timeout is 20 s,
   not the terminal's 8: each call starts a provider CLI (2.3 s and 4.8 s with Claude Sonnet,
   2026-11-17). Model calls run under the thread's lock but never inside a transaction: the rows
   before each user message commit first (so the questions it may close include those they asked),
   then it is judged, then its closing commits with the watermark past it. The listener syncs up to 4
-  threads at once, so one thread's judge does not hold up the others. A subscriber gets the current
-  rows at once; the backlog is judged in full in the background (never handed to the rules to save
-  time) and its changes publish as they commit. A Reopen clicked while a thread's backlog is being
-  judged waits for it, as it takes the same lock. The panel's "In draft" preview stays rule-based (no model per keystroke), so it can
-  show less than what closes on send. The panel's answers (Accept, Answer…, Not a decision) add one
-  line each to the composer instead of sending, so several answers go out as one ordinary message and
-  the agent sees every answer. Only messages a person typed count: agent, scheduled-task and relayed
-  messages close nothing. (2026-11-17: the owner's Q30 reversed the earlier rejection of a model
-  judge. Rules alone left answers by key words, numbered picks and bare assents open, and a judge run
-  only on messages the rules left unclosed would keep those false negatives: "Q4: yes, and merge it"
-  closes Q4 by rule, so the question "merge it" answers would never reach it. The owner asked for the
-  judge's model and effort to be chosen the way T3 chooses its text-generation model.) _Rejected:_
-  the judge only on messages the rules leave unclosed; a hard-coded judge model; an agent "close"
-  tool.
+  threads at once, so one thread's judge does not hold up the others. The rules alone, with no model
+  call, read two kinds of message. First, one sent before the judge took over: it was answered under
+  them. That time is fork migration 005's one row, `fork_decision_judge_cutoff.judged_from`, written
+  by the first start that runs 005 and never moved by a restart or a re-run; `syncMessages` compares
+  each message's `created_at` with it. A missing row logs a warning at start and leaves every
+  message to the rules. Second, every message of a pass that finds no `fork_thread_decision_sync`
+  row for its thread, that is, the first time the fork reads it: an imported terminal session (which
+  keeps its own times and `createdBy: user`) or a thread an official build ran. Opening a thread the
+  fork never read costs no model call and shows its questions at once. A new fork thread is not
+  starved: its first pass runs on its first message, before any question, so its answers are judged.
+  Accepted gaps: a message sent between the judge's first build and 005's, in a thread no build read
+  meanwhile, goes to the rules; so does one sent before 005 but held behind a run still running at
+  the restart that ran it. A subscriber gets the current rows at once; the backlog is read in the
+  background, its judged messages in full (never handed to the rules to save time), and its changes
+  publish as they commit. A Reopen clicked while a thread's backlog is being judged waits for it, as
+  it takes the same lock. The panel's "In draft" preview stays rule-based (no model per keystroke),
+  so it can show less than what closes on send. The panel's answers (Accept, Answer…, Not a
+  decision) add one line each to the composer instead of sending, so several answers go out as one
+  ordinary message and the agent sees every answer. Only messages a person typed count: agent,
+  scheduled-task and relayed messages close nothing. (2026-11-17: the owner's Q30 reversed the
+  earlier rejection of a model judge. Rules alone left answers by key words, numbered picks and bare
+  assents open, and a judge run only on messages the rules left unclosed would keep those false
+  negatives: "Q4: yes, and merge it" closes Q4 by rule, so the question "merge it" answers would
+  never reach it. The owner asked for the judge's model and effort to be chosen the way T3 chooses
+  its text-generation model.) (2026-11-19: the owner's Q38 superseded Q30's "every message" for
+  history. Opening a thread the fork had never read judged its whole history first: one old thread
+  cost 71 Sonnet calls before its panel showed, and the owner's database held 79 such threads with
+  485 user messages. That history was answered under the label rules, so they read it, and its
+  questions show at once.) _Rejected:_ the judge only on messages the rules leave unclosed; a
+  hard-coded judge model; an agent "close" tool; judging a never-read thread's whole backlog (Q30's
+  default), or only its newest message.
 - **Answers on AskUserQuestion cards** close the question whose label leads the card question's
   text (session-kit's `Q_LINE`, as the terminal reads it). Parts asked as "Q28 (1 of 3)" … gather in
   the card's order into one reply (`Q28: a, b; c; d`); a part left unanswered closes nothing. The
