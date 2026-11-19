@@ -1393,4 +1393,38 @@ describe("rightPanelStore", () => {
     expect(surfaceIds()).toEqual(["browser:tab-a", "terminal:term-1", "diff", "browser:tab-b"]);
     expect(store.getUserActionRevision(refA)).toBe(revision);
   });
+
+  it("keeps the Tracker, Parked and Artifacts tabs, their order and the active one across a reload", async () => {
+    const store = useRightPanelStore.getState();
+    store.open(refA, "decisions");
+    store.open(refA, "artifacts");
+    store.open(refA, "parked");
+    store.activateSurface(refA, "artifacts");
+    await reloadRightPanelStore();
+    const { surfaces, activeSurfaceId } = selectThreadRightPanelState(
+      useRightPanelStore.getState().byThreadKey,
+      refA,
+    );
+    expect(surfaces.map((surface) => surface.id)).toEqual(["decisions", "artifacts", "parked"]);
+    expect(activeSurfaceId).toBe("artifacts");
+  });
+
+  it("reopens a closed Parked or Artifacts tab", async () => {
+    const store = useRightPanelStore.getState();
+    for (const kind of ["parked", "artifacts"] as const) {
+      store.open(refA, kind);
+      store.closeSurface(refA, kind);
+      await expect(
+        reopenClosedView(useClosedViewStore.getState().entries[0]!, {
+          workspaceAvailable: true,
+          openPreview: () => {
+            throw new Error("A Tracker tab must not create a browser session");
+          },
+        }),
+      ).resolves.toBe(true);
+      expect(
+        selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)?.id,
+      ).toBe(kind);
+    }
+  });
 });

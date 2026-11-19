@@ -1326,20 +1326,18 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
 }
 
 /* Fork: the Tracker's three roles, each beside a word ("In draft", "Pick:", Veto): a line in the
-   draft, the agent's pick, and a choice the agent made without asking. Themes have no hue roles to
-   derive these from, so they follow light and dark, which custom themes set too (the .dark class).
-   Measured 2026-11-17 in the Tracker: text 5.0:1 or more in light, 11.3:1 or more in dark, on the
-   panel and on their own 10-12% tints. */
+   draft, the agent's pick, and a choice the agent made without asking. Each comes from a role a T3
+   theme sets (themePalette.ts APP_THEME_VARIABLES), so changing the theme restyles the Tracker:
+   the draft is the primary (message action) role, the pick the update role's text, the agent's
+   choice the warning role's text. The primary role is a button fill that no theme solves against
+   the panel (themePalette.ts only clamps its lightness), so as small text it is mixed a fifth
+   toward the foreground in both modes, which darkens it in light and lifts it in dark. Ceiling: a
+   custom theme with a pale message action can still fall short; the update and warning roles are
+   solved to 4.6:1. Measured 2026-11-19 on the default theme: 5.0:1 or more on the panel in both. */
 :root {
-  --tracker-draft: var(--color-teal-800);
-  --tracker-pick: var(--color-violet-700);
-  --tracker-agent: var(--color-orange-700);
-
-  @variant dark {
-    --tracker-draft: var(--color-teal-300);
-    --tracker-pick: var(--color-violet-300);
-    --tracker-agent: var(--color-orange-300);
-  }
+  --tracker-draft: color-mix(in oklab, var(--primary) 80%, var(--foreground));
+  --tracker-pick: var(--update-foreground);
+  --tracker-agent: var(--warning-foreground);
 }
 
 /* Blue-orange already spends blue on additions. Same specificity as the dark block above and
