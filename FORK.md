@@ -46,6 +46,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: answers are one line per question, and no question sends`                         | Questions and decisions       |
 | `(fork) decisions: the Tracker's final look, with Select mode, a draft bar and Reopen with Undo`     | Questions and decisions       |
 | `(fork) decisions: the judge reads only messages sent after it was in place`                         | Questions and decisions       |
+| `(fork) tracker: Parked and Artifacts are right-panel tabs of their own, in theme colours`           | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -67,8 +68,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   call fails, takes over 20 s, or its answer does not parse (logged as a warning). So a bare "yes"
   right after a question block, "merge it" or "go with 2" closes what it answers, and a message that
   answers nothing (a clarifying question) closes nothing. The model is the "Decision judge" setting
-  (Settings → Threads, below the text generation model; `decisionJudgeModelSelection`, where null
-  follows `textGenerationModelSelection`, as transcript cleanup's setting does), called through T3's
+  (Settings → Threads, in its own Tracker section after Text generation;
+  `decisionJudgeModelSelection`, where null follows `textGenerationModelSelection`, as transcript
+  cleanup's setting does), called through T3's
   text-generation path, so any provider T3 is signed in to works. That path has no free-text
   operation: `generateTranscriptionPostProcessing` is the one whose input is the whole prompt and
   whose output is one string, so the verdict's JSON travels in that string, and the prompt spells
@@ -151,8 +153,14 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   by a two-model council.) _Rejected:_ a two-line list (tall, three buttons per row); chips with
   popovers (hide the question); one banner per question; real radios with arrow-key selection (the
   native panel uses buttons too).
-- **Tracker:** the right-panel surface with the Questions, Decisions, Parked and Artifacts tabs. Its
-  user-visible name is Tracker everywhere (its tab, both add-panel menus, the command palette's "Show
+- **Tracker:** the right-panel surface with the Questions and Decisions tabs. Parked and Artifacts
+  are right-panel surfaces of their own beside it (kinds and ids `parked` and `artifacts`,
+  per-thread singletons like it; MAIN-57, MAIN-58, 2026-11-19), each with its count on its strip
+  tab and in the tab's accessible name (open parked items; every artifact row): `surfaceCounts` on
+  `RightPanelTabs`, filled by ChatView from the snapshot. Their add-panel letters are K (Parked) and
+  A (Artifacts), their icons the palette's `ArchiveIcon` and `ShapesIcon`; a bare `/park` and the
+  palette's "Show parked items" / "Show artifacts" open them. `decisions.toggle` still toggles the
+  Tracker alone. Its user-visible name is Tracker everywhere (its tab, both add-panel menus, the command palette's "Show
   Tracker", the keybinding's "Tracker: Toggle" in `KeybindingsSettings.logic.ts`'s
   `LATE_COMMAND_LABELS`, the panel header's Open Tracker); the tabs keep their
   names. Its ids stay `decisions` (the surface kind and id in `rightPanelStore.ts` and
@@ -160,8 +168,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   state, reopenable closed tabs and saved keybindings name them. (2026-11-17: the owner's Q31 renamed
   it from "Decisions".) Its look is the owner's approved final design (Q36, 2026-11-17; boards and
   spec in the dotfiles repo's `.local/.execution/t3-native-board/notes/tracker-final-design.md`):
-  - Tabs are T3's segmented toggle with neutral counts; the selected one has a `muted-foreground`
-    border (at least 3:1). Questions counts open questions; Decisions counts the choices the newest
+  - Tabs are T3's segmented toggle (`w-fit`, its compact `segmented` size) with neutral counts; the
+    selected one has a `muted-foreground` border (at least 3:1). Questions counts open questions; Decisions counts the choices the newest
     reply with any made without asking, less those vetoed or in the draft (`choicesToReview`).
   - **Questions:** a status bar ("2 to answer · 1 in draft", Select); one group per asking reply with
     its age, a button that shows that reply in the chat, and "Accept N picks" (`answerLines`: only
@@ -187,7 +195,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     Accept picks) and has one "Add N to draft", after which Select mode ends. The capped preview
     scrolls to the lines it adds and takes keyboard focus. Select mode also ends by itself once
     nothing is left to select.
-  - **Draft bar** (every tab, while the draft has text, not in Select mode): what the draft holds
+  - **Draft bar** (Questions and Decisions, not in Select mode, while the draft holds Tracker lines:
+    `draftSummary` is more than plain `"text"`, that is answers, vetoes or an unfinished `Qn:`; a
+    draft of plain text is the composer's alone; MAIN-61, MAIN-64), styled like T3's panel footers
+    (`ThreadPullRequestsPanel.tsx`: `border-border/60`, `text-2xs`, `xs` buttons): what the draft holds
     (`draftSummary`: "2 answers · 1 veto + other text"; a bare `Qn: ` is not counted but named, "Q5
     unanswered", and holds Send draft back), Review (focuses the composer) and "Send draft", the
     composer's own send (`ChatComposerHandle.submit()`, so the same refusals, queueing
@@ -220,15 +231,24 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     stays disabled while held or sent, until the snapshot moves the question back. No bulk Reopen.
     (2026-11-17: a window timer that ignored hover, and a ✕ that committed, reopened a question the
     owner had undone.)
-  - **Colours:** T3's tokens (`warning-foreground` on `warning-surface` for open, `success` for
-    answered, `muted`/`secondary-foreground` for not a decision, `info`/`ring` for selection,
-    `primary` for Send draft and Add) plus three fork tokens in `index.css`: `--tracker-draft`
-    (teal-800 / teal-300), `--tracker-pick` (violet-700 / violet-300) and `--tracker-agent`
-    (orange-700 / orange-300). Themes have no hue roles to derive them from, so they follow light and
-    dark; custom themes set the `.dark` class too. Each colour sits beside a word.
+  - **Colours:** every colour comes from a role a T3 theme sets (`themePalette.ts`
+    `APP_THEME_VARIABLES`), so changing the theme restyles the Tracker, Parked and Artifacts
+    (MAIN-59, 2026-11-19; _rejected:_ the fixed Tailwind palette it had before). `success` and `info`
+    are fixed Tailwind colours no theme sets, so the fork uses neither: `warning-foreground` on
+    `warning-surface` for open, `accent` with `foreground` for answered and for a selected row (its
+    `ring` border marks it), `muted`/`secondary-foreground` for not a decision, `primary` for Send
+    draft and Add, and three fork tokens in `index.css`: `--tracker-draft` is the primary (message
+    action) role, `--tracker-pick` the update role's foreground, `--tracker-agent` the warning role's
+    foreground. Primary is a button fill no theme solves against the panel, so `--tracker-draft` is
+    mixed a fifth toward the foreground in both modes (5.0:1 or more on the default theme; a custom
+    theme with a pale message action can still fall short). Reopen's toast takes no `type`, since
+    the info icon is fixed blue. On the default theme
+    the draft and the pick are both blue, since its update role is its primary; each colour sits
+    beside a word. Parked's badges use the outline, secondary and warning variants.
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
   `apps/web/src/components/chat/ThreadDecisions.tsx` with its rules in `threadDecisions.logic.ts`,
+  `ThreadParked.tsx` and `ThreadArtifacts.tsx` beside it (the two surfaces, on the same snapshot),
   `apps/web/src/components/settings/DecisionJudgeModelRow.tsx`, contracts in
   `packages/contracts/src/threadDecisions.ts`.
 
@@ -242,7 +262,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 - `t3_park` in the thread MCP toolkit, for every provider. It refuses delegated child threads and
   placeholder text. Its eval cases (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with
   `--dry-run`; a real run is owed.
-- A Parked tab: Send (an ordinary message, queued during a run), inline Edit, Done, Drop, Reopen.
+- A Parked surface (its own right-panel tab, `ThreadParked.tsx`): Send (an ordinary message, queued
+  during a run), inline Edit, Done, Drop, Reopen. When an open item leaves, focus goes to the next
+  open item (else the one before), else to the surface itself, never to the finished item's Reopen.
 - The startup sweep deletes parked rows only for soft-deleted threads: unlike questions, they
   cannot be rebuilt.
 
@@ -254,7 +276,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `artifact_id`; whether those two ids always agree is unverified, so both are stored.
 - One row per artifact: first-seen kept, title and time from the latest publish. Its own
   watermarks, the tool one advancing over every `dynamic_tool` row so threads are not re-parsed.
-- Opened through `useOpenLink`, plus a system-browser button. No embedding, no claude.ai API, no
+- An Artifacts surface (its own right-panel tab, `ThreadArtifacts.tsx`). Opened through
+  `useOpenLink`, plus a system-browser button. No embedding, no claude.ai API, no
   manual add or remove.
 
 ### Shared logic with session-kit
@@ -298,7 +321,8 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
   `resolve(msg())` / `m(msg())` outside React (`composerParkDecision` takes upstream's optional
   `resolve` argument, as `approvalRedirectNotice` does). `DecisionJudgeModelRow.tsx` follows
   upstream's `CleanupModelRow`.
-- `ThreadDecisions.tsx` is English only: one file-level `oxlint-disable` for the rule at its top. The
+- `ThreadDecisions.tsx`, `ThreadParked.tsx` and `ThreadArtifacts.tsx` are English only: one
+  file-level `oxlint-disable` for the rule at the top of each. The
   translation catalogs (`apps/web/src/i18n/translations/*.json`) are generated by upstream's tooling
   and hold no fork strings, so wrapping its ~110 strings would show the same English in every locale.
   Upgrade path if the fork ever needs another language: wrap them (`<T>`, `gt()`, `msg()`), drop the
@@ -371,8 +395,8 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      in `packages/shared/src/serverSettings.ts`, the `decision-judge-model` entry in
      `settingsSearch.ts` (the row takes it through upstream's `useSearchableSetting`), the "Decision
      judge" task in `TextGeneratorsSettings.tsx`'s `TASKS`, and
-     `<DecisionJudgeModelRow />` under the text generation row in `SettingsPanels.tsx`
-     (`ThreadsSettingsPanel`). If upstream reshapes the cleanup setting, reshape this one the same way.
+     `<DecisionJudgeModelRow />` alone in a fork `tracker` section right after the `text-generation`
+     section in `SettingsPanels.tsx` (`ThreadsSettingsPanel`). If upstream reshapes the cleanup setting, reshape this one the same way.
      `server.ts` provides `DecisionJudge.layer` to `ThreadDecisions.layer`; the judge calls
      `TextGeneration.generateTranscriptionPostProcessing`, so a rename of that operation lands here.
    - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
@@ -400,7 +424,10 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
      `DesktopEnvironment`, `DesktopPreReadyPlatform`).
    - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts`,
-     `ThreadDecisions.parked-focus.browser.test.tsx` and `ThreadDecisions.question-panel.browser.test.tsx`.
+     `ThreadParked.focus.browser.test.tsx` and `ThreadDecisions.question-panel.browser.test.tsx`.
+   - The Parked and Artifacts surfaces: `apps/web/src/rightPanelStore.test.ts` (order, active tab and
+     an older layout across a reload; reopening a closed one), `closedViewStore.test.ts` (closed
+     ones survive a migration) and `RightPanelTabs.browser.test.tsx` (strip counts).
 6. **Live check:** on a dev server on an isolated home, never `~/.t3`. Reseed it first, since the
    schema moved: `node apps/server/scripts/migrate-dev-db.ts --base-dir "$PWD/.t3"` (reads `~/.t3`
    read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`, since in a main

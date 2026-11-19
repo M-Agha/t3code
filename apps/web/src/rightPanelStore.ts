@@ -31,6 +31,8 @@ const RIGHT_PANEL_KINDS = [
   "pull-requests",
   "issue",
   "decisions",
+  "parked",
+  "artifacts",
   "thread",
   "linked-thread",
 ] as const;
@@ -105,6 +107,8 @@ export type RightPanelSurface =
       url?: string;
     }
   | { id: "decisions"; kind: "decisions" }
+  | { id: "parked"; kind: "parked" }
+  | { id: "artifacts"; kind: "artifacts" }
   /**
    * A thread of the panel's environment shown beside it: a side chat or a subagent. Which one is
    * the thread's own lineage, so the surface only names it.
@@ -303,6 +307,10 @@ const singletonSurface = (
       return { id: "pull-requests", kind };
     case "decisions":
       return { id: "decisions", kind };
+    case "parked":
+      return { id: "parked", kind };
+    case "artifacts":
+      return { id: "artifacts", kind };
     case "device":
       return { id: "device", kind };
   }
