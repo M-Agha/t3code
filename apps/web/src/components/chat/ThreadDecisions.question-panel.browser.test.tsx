@@ -257,13 +257,20 @@ it("nothing on a question sends: no send arrows in the question panel or the Tra
   expect(sentTexts()).toEqual([]);
 });
 
-it("Send draft shows only while the draft has content, and sends it through the composer", async () => {
+it("Send draft shows only while the draft holds Tracker lines, and sends it through the composer", async () => {
   await using app = await openThread(threadWithHistory("thread-decision-send-draft", 1), {
     acceptCommands: true,
   });
   await openTracker();
   await expect.element(tracker.accept("Q4", "yes")).toBeVisible();
   await expect.element(sendDraft()).not.toBeInTheDocument();
+  // Plain text is the composer's alone.
+  app.setDraft("Also rename it");
+  await expect.element(page.getByRole("region", { name: "Your draft" })).not.toBeInTheDocument();
+  await page.getByRole("button", { name: /^Decisions/ }).click();
+  await expect.element(page.getByRole("region", { name: "Your draft" })).not.toBeInTheDocument();
+  await page.getByRole("button", { name: /^Questions/ }).click();
+  app.setDraft("");
 
   await tracker.accept("Q4", "yes").click();
   app.setDraft(`${app.draft()}\nAlso rename it`);
@@ -371,7 +378,11 @@ it("Select mode: rows toggle, the reply's box goes mixed, drafted rows can't be 
   });
   await openTracker();
   app.setDraft("Q2: now");
+  const draftBar = page.getByRole("region", { name: "Your draft" });
+  await expect.element(draftBar).toBeVisible();
   await option("Select").click();
+  // Select mode shows its own preview of the draft, so the draft bar steps aside.
+  await expect.element(draftBar).not.toBeInTheDocument();
 
   const drafted = page.getByRole("checkbox", { name: "Q2 is already in your draft" });
   await expect.element(drafted).toHaveAttribute("aria-disabled", "true");
@@ -393,6 +404,7 @@ it("Select mode: rows toggle, the reply's box goes mixed, drafted rows can't be 
   await option("Add 1 to draft").click();
   await vi.waitFor(() => expect(app.draft()).toBe("Q2: now\nQ4: yes"));
   await expect.element(option("Select")).toBeVisible();
+  await expect.element(draftBar).toBeVisible();
   expect(sentTexts()).toEqual([]);
 });
 
@@ -639,11 +651,11 @@ it("a send T3 refuses leaves the draft as it was, with T3's reason alone", async
   await userEvent.click(page.getByTestId("composer-editor"));
   await userEvent.keyboard("First{Enter}");
   await vi.waitFor(() => expect(sentTexts()).toEqual(["First"]));
-  app.setDraft("Keep this");
+  app.setDraft("Q4: yes\nKeep this");
 
   await sendDraft().click();
   await expect.element(page.getByText("Still sending your previous message.")).toBeVisible();
-  await vi.waitFor(() => expect(app.draft()).toBe("Keep this"));
+  await vi.waitFor(() => expect(app.draft()).toBe("Q4: yes\nKeep this"));
   expect(page.getByText("Not sent", { exact: true }).elements()).toHaveLength(0);
   expect(sentTexts()).toHaveLength(1);
 });
@@ -720,12 +732,12 @@ it("a send the server rejects leaves the draft as it was", async () => {
     holdCommand: (command) => command.type === "message.dispatch",
   });
   await openTracker();
-  app.setDraft("Keep this");
+  app.setDraft("Q4: yes\nKeep this");
   await sendDraft().click();
-  await vi.waitFor(() => expect(sentTexts()).toEqual(["Keep this"]));
+  await vi.waitFor(() => expect(sentTexts()).toEqual(["Q4: yes\nKeep this"]));
 
   // T3 reports the failure and puts the draft back.
   await rejectPendingCommand("The provider is unavailable.");
-  await vi.waitFor(() => expect(app.draft()).toBe("Keep this"));
+  await vi.waitFor(() => expect(app.draft()).toBe("Q4: yes\nKeep this"));
   expect(page.getByText("Not sent", { exact: true }).elements()).toHaveLength(0);
 });

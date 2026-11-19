@@ -346,7 +346,6 @@ import {
   useDraftActions,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
-import { useDecisionsPanelTab } from "./chat/decisionsPanelTabStore";
 import { asDraftLine, questionsClosedByDraft } from "./chat/threadDecisions.logic";
 import type { ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
@@ -1957,8 +1956,7 @@ export default function ChatView(props: ChatViewProps) {
   const parkFromComposer = async (parks: ParkCommand["parks"]) => {
     if (activeThreadRef === null) return false;
     if (parks.length === 0) {
-      useDecisionsPanelTab.getState().setTab("parked");
-      useRightPanelStore.getState().open(activeThreadRef, "decisions");
+      useRightPanelStore.getState().open(activeThreadRef, "parked");
       return true;
     }
     const result = await parkThreadItems({
@@ -1994,6 +1992,11 @@ export default function ChatView(props: ChatViewProps) {
   const insertDecisionTextStable = useStableCallback(insertDecisionText);
   const parkFromComposerStable = useStableCallback(parkFromComposer);
   const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
+  // The strip's Parked and Artifacts tabs count what their surface lists (open items, every row).
+  const trackerSurfaceCounts = {
+    parked: threadDecisions?.parkedOpenCount ?? 0,
+    artifacts: threadDecisions?.artifactCount ?? 0,
+  };
   const decisionActions: ThreadDecisionActions = {
     canOperate: canOperateThread && isServerThread,
     send: useStableCallback(sendDecisionMessage),
@@ -2496,6 +2499,8 @@ export default function ChatView(props: ChatViewProps) {
     addPullRequestSurfaceStable,
     addPullRequestsSurfaceStable,
     addDecisionsSurfaceStable,
+    addParkedSurfaceStable,
+    addArtifactsSurfaceStable,
     closePreviewPanelStable,
     copyRightPanelFilePathStable,
     createBrowserSurface,
@@ -4184,6 +4189,9 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           onAddDecisions={isServerThread ? addDecisionsSurfaceStable : undefined}
+          onAddParked={isServerThread ? addParkedSurfaceStable : undefined}
+          onAddArtifacts={isServerThread ? addArtifactsSurfaceStable : undefined}
+          surfaceCounts={trackerSurfaceCounts}
           browserAvailable={canOperatePreview && browserAvailable}
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}

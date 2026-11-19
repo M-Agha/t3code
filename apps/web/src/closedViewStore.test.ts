@@ -132,4 +132,26 @@ describe("closedViewStore", () => {
     expect(saved).not.toContain("private.example");
     expect(saved).not.toContain("Private page");
   });
+
+  it("keeps closed Tracker, Parked and Artifacts tabs through a migration, so they can reopen", async () => {
+    const store = useClosedViewStore.getState();
+    const surfaces = [
+      { id: "decisions", kind: "decisions" },
+      { id: "parked", kind: "parked" },
+      { id: "artifacts", kind: "artifacts" },
+    ] as const;
+    const ids = surfaces.map((surface) =>
+      store.remember({ kind: "panel-tab", threadRef: refA, surface }),
+    );
+    // Saved by an earlier version, so the entries go through the migration's validation.
+    const { storage, name } = useClosedViewStore.persist.getOptions();
+    await storage!.setItem(name!, {
+      state: { entries: useClosedViewStore.getState().entries },
+      version: 1,
+    });
+    await useClosedViewStore.persist.rehydrate();
+    expect(useClosedViewStore.getState().entries.map((entry) => entry.id)).toEqual(
+      ids.toReversed(),
+    );
+  });
 });
