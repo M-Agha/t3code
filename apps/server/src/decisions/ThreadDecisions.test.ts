@@ -30,6 +30,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as DecisionJudge from "./DecisionJudge.ts";
+import ForkMigration0006 from "../persistence/ForkMigrations/006_ThreadArtifactTypes.ts";
 import * as ThreadDecisions from "./ThreadDecisions.ts";
 
 const threadId = ThreadId.make("thread-decisions");
@@ -289,12 +290,12 @@ const artifactItem = Effect.fn("artifactItem")(function* (
   updatedAt: string,
   input: Record<string, unknown>,
   output: unknown,
-  { status = "completed", toolName = "Artifact", driver = "claudeAgent" } = {},
+  { status = "completed", toolName = "Artifact", driver = "claudeAgent", thread = threadId } = {},
 ) {
   const sql = yield* SqlClient.SqlClient;
   const payload = {
     id: itemId,
-    threadId,
+    threadId: thread,
     runId: "r1",
     nodeId: `node:${itemId}`,
     nativeItemRef: { driver, nativeId: itemId, strength: "strong" },
@@ -313,7 +314,7 @@ const artifactItem = Effect.fn("artifactItem")(function* (
   yield* sql`
     INSERT INTO orchestration_v2_projection_turn_items (
       turn_item_id, thread_id, run_id, ordinal, type, status, updated_at, payload_json
-    ) VALUES (${itemId}, ${threadId}, 'r1', 1, 'dynamic_tool', ${status}, ${updatedAt},
+    ) VALUES (${itemId}, ${thread}, 'r1', 1, 'dynamic_tool', ${status}, ${updatedAt},
       ${JSON.stringify(payload)})
     ON CONFLICT (turn_item_id) DO UPDATE SET
       status = excluded.status, updated_at = excluded.updated_at,
@@ -551,6 +552,418 @@ it.effect("publishes a decisions change when reading artifacts fails", () =>
     yield* sql`DROP TABLE fork_thread_artifact_sync`;
     assert.isTrue(yield* decisions.sync(threadId));
     assert.deepEqual(Object.keys(yield* states()), ["Q4", "Q5"]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// claude.ai's answer to a read of a deleted artifact, as T3 stored the failed call (2026-11-19).
+const NOT_FOUND_OUTPUT =
+  "Error: artifact not found — it may have been deleted, or it has not been shared with you. If it was shared with you by email, accept the invitation in a browser first, and check that Claude Code is signed in to the invited account";
+const DESIGN_TYPE = "https://claude.ai/artifact/QKN21svewxgyPb6SYRqWnd";
+const ODD_TYPE = "https://claude.ai/artifact/OddType1";
+const createOutput = (url: string, title: string, typeUrl: string) => ({
+  created_from_type: true,
+  url,
+  version: "1795115338-5d3e",
+  owned: true,
+  title,
+  type: { url: typeUrl, release: "1795108001-df11" },
+  own_files: [],
+  type_files: ["SKILL.md"],
+});
+const readOutput = (url: string, type?: { url: string; title: string }) => ({
+  file_read: {
+    url,
+    title: "Board",
+    path: "project/canvas.json",
+    ...(type === undefined ? {} : { from_type: true, type }),
+  },
+});
+
+/** Each artifact row by its id: what the panel groups and labels it by. */
+const artifactsById = Effect.fn("artifactsById")(function* (thread = threadId) {
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  const snapshot = yield* decisions.snapshot(thread);
+  return Object.fromEntries(
+    snapshot.artifacts.map((a) => [
+      a.id,
+      {
+        url: a.url,
+        title: a.title,
+        mentionedOnly: a.mentionedOnly,
+        linkedByUser: a.linkedByUser,
+        type: a.type,
+        notFoundAt: a.notFoundAt,
+      },
+    ]),
+  );
+});
+const typeOf = Effect.fn("typeOf")(function* (id: string) {
+  return (yield* artifactsById())[id]?.type;
+});
+
+it.effect(
+  "names an artifact's type: a name any thread learned, then a core type's, else none",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const other = ThreadId.make("thread-other");
+      yield* seed();
+      yield* seed(null, other);
+      yield* artifactItem(
+        "create-design",
+        "2026-01-01T00:01:00.000Z",
+        { type_url: DESIGN_TYPE, title: "Board" },
+        createOutput("https://claude.ai/artifact/Board1", "Board", DESIGN_TYPE),
+      );
+      // A create whose output leaves out `type` is typed by what it asked for.
+      yield* artifactItem(
+        "create-odd",
+        "2026-01-01T00:02:00.000Z",
+        { action: "publish", type_url: ODD_TYPE, title: "Odd" },
+        { created_from_type: true, url: "https://claude.ai/artifact/Odd1", title: "Odd" },
+      );
+      yield* artifactItem(
+        "page",
+        "2026-01-01T00:03:00.000Z",
+        { file_path: "/tmp/scratchpad/t3-decisions-plan.html" },
+        publishOutput(PLAN_URL, "T3 Decisions Plan", false),
+      );
+      yield* artifactItem(
+        "markdown",
+        "2026-01-01T00:04:00.000Z",
+        { file_path: "/tmp/scratchpad/notes.MD" },
+        {
+          ...publishOutput("https://claude.ai/artifact/Notes1", "Notes", false, DRAFT_UUID),
+          path: "/tmp/scratchpad/notes.MD",
+        },
+      );
+      // Other calls name no artifact: a failed list, a list of the person's artifacts, a quickstart.
+      yield* artifactItem(
+        "failed-list",
+        "2026-01-01T00:05:00.000Z",
+        { action: "list", scope: "types", limit: 5 },
+        'Error: list with `scope: "types"` takes only `type_query` — remove limit.',
+        { status: "failed" },
+      );
+      yield* artifactItem(
+        "list-mine",
+        "2026-01-01T00:06:00.000Z",
+        { action: "list", limit: 5 },
+        { artifacts: [{ url: "https://claude.ai/artifact/Mine1", title: "Mine" }], total: 1 },
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(
+        Object.fromEntries(
+          Object.entries(yield* artifactsById()).map(([id, row]) => [id, row.type]),
+        ),
+        {
+          Board1: { kind: "typed", url: DESIGN_TYPE, name: "Design" },
+          Odd1: { kind: "typed", url: ODD_TYPE, name: null },
+          RMhcQqa7QJj15KA5R3kCxN: { kind: "page", format: "html" },
+          Notes1: { kind: "page", format: "markdown" },
+        },
+      );
+
+      // Another thread lists the types: the names reach rows written before, here.
+      yield* artifactItem(
+        "types",
+        "2026-01-02T00:00:00.000Z",
+        { action: "list", scope: "types" },
+        {
+          artifact_types: [
+            { title: "Odd Type", type_url: ODD_TYPE, description: "x", tier: "core" },
+            { title: "Design (renamed)", type_url: DESIGN_TYPE, description: "x", tier: "core" },
+            { title: "Nameless", type_url: "https://example.com/type" },
+          ],
+          docs_unfillable: false,
+        },
+        { thread: other },
+      );
+      assert.isTrue(yield* decisions.sync(other));
+      assert.deepEqual(yield* artifactsById(other), {});
+      assert.deepEqual(yield* typeOf("Odd1"), { kind: "typed", url: ODD_TYPE, name: "Odd Type" });
+      assert.deepEqual(yield* typeOf("Board1"), {
+        kind: "typed",
+        url: DESIGN_TYPE,
+        name: "Design (renamed)",
+      });
+      // A read names its type too, and the later name wins.
+      yield* artifactItem(
+        "read",
+        "2026-01-03T00:00:00.000Z",
+        { action: "read", url: "https://claude.ai/artifact/Odd1", path: "project/canvas.json" },
+        readOutput("https://claude.ai/artifact/Odd1", { url: ODD_TYPE, title: "Odd Type v2" }),
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* typeOf("Odd1"), {
+        kind: "typed",
+        url: ODD_TYPE,
+        name: "Odd Type v2",
+      });
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "marks an artifact not found from claude.ai's answer, until a later read or publish",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const notFound = Effect.fn("notFound")(function* () {
+        const rows = yield* artifactsById();
+        return Object.fromEntries(Object.entries(rows).map(([id, row]) => [id, row.notFoundAt]));
+      });
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* artifactItem(
+        "publish",
+        "2026-01-01T00:01:00.000Z",
+        {},
+        publishOutput(PLAN_URL, "T3 Decisions Plan", false),
+      );
+      yield* message("a1", "r1", "assistant", "The mock-up: https://claude.ai/artifact/MockUp2");
+      assert.isTrue(yield* decisions.sync(threadId));
+
+      // The read named the published artifact by its `code/artifact/` link: its uuid finds the row.
+      yield* artifactItem(
+        "read-plan",
+        "2026-01-03T00:00:00.000Z",
+        { action: "read", url: `https://claude.ai/code/artifact/${PLAN_UUID}` },
+        NOT_FOUND_OUTPUT,
+        { status: "failed" },
+      );
+      // Any other failure says nothing about the artifact; a link no row lists gets none.
+      yield* artifactItem(
+        "delete-mockup",
+        "2026-01-03T00:01:00.000Z",
+        { action: "delete", url: "https://claude.ai/artifact/MockUp2" },
+        "Error: Deleting an Artifact needs the user's confirmation, and no one can answer it in this session, so nothing was deleted.",
+        { status: "failed" },
+      );
+      yield* artifactItem(
+        "read-gone",
+        "2026-01-03T00:02:00.000Z",
+        { action: "read", url: "https://claude.ai/artifact/Gone1" },
+        NOT_FOUND_OUTPUT,
+        { status: "failed" },
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* notFound(), {
+        MockUp2: null,
+        RMhcQqa7QJj15KA5R3kCxN: "2026-01-03T00:00:00.000Z",
+      });
+
+      // A read that finds it clears it, whichever link form it used.
+      yield* artifactItem(
+        "read-mockup-missing",
+        "2026-01-04T00:00:00.000Z",
+        { action: "read", url: "https://claude.ai/artifact/MockUp2" },
+        NOT_FOUND_OUTPUT,
+        { status: "failed" },
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.equal((yield* notFound()).MockUp2, "2026-01-04T00:00:00.000Z");
+      yield* artifactItem(
+        "read-mockup",
+        "2026-01-04T00:01:00.000Z",
+        { action: "read", url: "https://claude.ai/artifact/MockUp2?tab=2" },
+        readOutput("https://claude.ai/artifact/MockUp2"),
+      );
+      // And a publish of it clears it.
+      yield* artifactItem(
+        "republish",
+        "2026-01-04T00:02:00.000Z",
+        {},
+        publishOutput(PLAN_URL, "T3 Decisions Plan", true),
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* notFound(), { MockUp2: null, RMhcQqa7QJj15KA5R3kCxN: null });
+      assert.equal((yield* decisions.snapshot(threadId)).artifactCount, 2);
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("links an artifact by hand and unlinks only what the user linked", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const failure = (effect: Effect.Effect<void, ThreadDecisionsError>) =>
+      Effect.flip(effect).pipe(Effect.map((error) => error.message));
+    yield* seed();
+    yield* artifactItem(
+      "publish",
+      "2026-01-01T00:01:00.000Z",
+      {},
+      publishOutput(PLAN_URL, "T3 Decisions Plan", false),
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+
+    yield* decisions.linkArtifact({
+      threadId,
+      url: "https://claude.ai/artifact/Q3shipReview?tab=1#top",
+      title: "Q3 shipping review",
+    });
+    const manual = {
+      url: "https://claude.ai/artifact/Q3shipReview",
+      title: "Q3 shipping review",
+      mentionedOnly: true,
+      linkedByUser: true,
+      type: null,
+      notFoundAt: null,
+    };
+    assert.deepEqual((yield* artifactsById()).Q3shipReview, manual);
+    // A second link of a listed artifact reuses its row, by either link form, and keeps its title.
+    yield* decisions.linkArtifact({ threadId, url: "https://claude.ai/artifact/Q3shipReview" });
+    yield* decisions.linkArtifact({
+      threadId,
+      url: `https://claude.ai/code/artifact/${PLAN_UUID}`,
+      title: "Another name",
+    });
+    const rows = yield* artifactsById();
+    assert.deepEqual(Object.keys(rows).toSorted(), ["Q3shipReview", "RMhcQqa7QJj15KA5R3kCxN"]);
+    assert.deepEqual(rows.Q3shipReview, manual);
+    assert.include(rows.RMhcQqa7QJj15KA5R3kCxN, {
+      title: "T3 Decisions Plan",
+      linkedByUser: false,
+      mentionedOnly: false,
+    });
+
+    assert.equal(
+      yield* failure(decisions.linkArtifact({ threadId, url: "https://example.com/artifact/x" })),
+      ThreadDecisions.NOT_AN_ARTIFACT_LINK,
+    );
+    assert.equal(
+      yield* failure(decisions.unlinkArtifact({ threadId, id: "RMhcQqa7QJj15KA5R3kCxN" })),
+      "Only an artifact you linked can be unlinked from this thread.",
+    );
+    yield* decisions.unlinkArtifact({ threadId, id: "Q3shipReview" });
+    assert.deepEqual(Object.keys(yield* artifactsById()), ["RMhcQqa7QJj15KA5R3kCxN"]);
+
+    // A `code/artifact/` link the user added folds into the publish that names its uuid.
+    yield* decisions.linkArtifact({ threadId, url: DRAFT_URL });
+    yield* artifactItem(
+      "publish-draft",
+      "2026-01-05T00:00:00.000Z",
+      {},
+      publishOutput("https://claude.ai/artifact/MockUp2", "Spending Canvas", false, DRAFT_UUID),
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(Object.keys(yield* artifactsById()).toSorted(), [
+      "MockUp2",
+      "RMhcQqa7QJj15KA5R3kCxN",
+    ]);
+    assert.include((yield* artifactsById()).MockUp2, { linkedByUser: false, mentionedOnly: false });
+
+    const deleted = ThreadId.make("thread-deleted");
+    yield* seed("2026-01-02T00:00:00.000Z", deleted);
+    assert.equal(
+      yield* failure(decisions.linkArtifact({ threadId: deleted, url: PLAN_URL })),
+      "This thread was not found.",
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "keeps the user's title and a known type, adopts a linked mention, and hides a type's own link",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const design = "https://claude.ai/artifact/QKN21svewxgyPb6SYRqWnd";
+      yield* seed();
+      // A reply naming the Design type's own link is not an artifact; the other link is a mention.
+      yield* message(
+        "a1",
+        "r1",
+        "assistant",
+        `Made from ${design}: https://claude.ai/artifact/Mentioned9`,
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(Object.keys(yield* artifactsById()), ["Mentioned9"]);
+      assert.equal((yield* decisions.snapshot(threadId)).artifactCount, 1);
+
+      // Linking a mentioned artifact makes it the user's: their title, and Unlink.
+      yield* decisions.linkArtifact({
+        threadId,
+        url: "https://claude.ai/artifact/Mentioned9",
+        title: "My name",
+      });
+      assert.include((yield* artifactsById()).Mentioned9, { title: "My name", linkedByUser: true });
+      yield* decisions.unlinkArtifact({ threadId, id: "Mentioned9" });
+      assert.deepEqual(Object.keys(yield* artifactsById()), []);
+
+      // A title the user gave a code/artifact link survives the fold-in when the publish names none.
+      yield* decisions.linkArtifact({ threadId, url: DRAFT_URL, title: "Kept title" });
+      const { title: _untitled, ...untitled } = publishOutput(
+        "https://claude.ai/artifact/MockUp3",
+        "",
+        false,
+        DRAFT_UUID,
+      );
+      yield* artifactItem("publish-untitled", "2026-01-06T00:00:00.000Z", {}, untitled);
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.include((yield* artifactsById()).MockUp3, {
+        title: "Kept title",
+        linkedByUser: false,
+      });
+
+      // A type, once a publish names it, stays when a later publish names none.
+      const typed = {
+        ...publishOutput("https://claude.ai/artifact/Typed1", "Canvas", false, "typed-uuid"),
+        type: { url: design, release: "r" },
+      };
+      yield* artifactItem("publish-typed", "2026-01-07T00:00:00.000Z", {}, typed);
+      yield* artifactItem(
+        "publish-typed-again",
+        "2026-01-08T00:00:00.000Z",
+        {},
+        publishOutput("https://claude.ai/artifact/Typed1", "Canvas", true, "typed-uuid"),
+      );
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual((yield* artifactsById()).Typed1?.type, {
+        kind: "typed",
+        url: design,
+        name: "Design",
+      });
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("reads every Artifact call again after fork migration 006, filling types and names", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* artifactItem(
+      "types",
+      "2026-01-01T00:00:00.000Z",
+      { action: "list", scope: "types" },
+      { artifact_types: [{ title: "Odd Type", type_url: ODD_TYPE }] },
+    );
+    yield* artifactItem(
+      "create",
+      "2026-01-01T00:01:00.000Z",
+      { type_url: ODD_TYPE, title: "Odd" },
+      createOutput("https://claude.ai/artifact/Odd1", "Odd", ODD_TYPE),
+    );
+    // As a build before 006 left it: the row without its type, the position past both calls.
+    yield* sql`
+      INSERT INTO fork_thread_artifacts (
+        thread_id, link_id, url, title, source, first_seen_at, updated_at
+      ) VALUES (${threadId}, 'Odd1', 'https://claude.ai/artifact/Odd1', 'Odd', 'tool',
+        '2026-01-01T00:01:00.000Z', '2026-01-01T00:01:00.000Z')
+    `;
+    yield* sql`
+      INSERT INTO fork_thread_artifact_sync (
+        thread_id, after_message_created_at, after_message_id, after_item_updated_at, after_item_id
+      ) VALUES (${threadId}, '', '', '2026-01-01T00:01:00.000Z', 'create')
+    `;
+    assert.isFalse(yield* decisions.sync(threadId));
+    assert.isNull(yield* typeOf("Odd1"));
+
+    yield* ForkMigration0006;
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* typeOf("Odd1"), { kind: "typed", url: ODD_TYPE, name: "Odd Type" });
+    // The replay rewrote the row in place: one row, first seen when it was.
+    const [row] = yield* sql<{ readonly firstSeenAt: string; readonly count: number }>`
+      SELECT first_seen_at AS "firstSeenAt", COUNT(*) AS count FROM fork_thread_artifacts
+    `;
+    assert.deepEqual(row, { firstSeenAt: "2026-01-01T00:01:00.000Z", count: 1 });
   }).pipe(Effect.provide(withDecisions)),
 );
 

@@ -1,4 +1,5 @@
 import type {
+  ThreadArtifact,
   ThreadDecidedWithoutAsking,
   ThreadDecisionQuestion,
   ThreadDecisionsSnapshot,
@@ -315,3 +316,15 @@ export const parkedFocusAfter = (
   if (index === -1) return null;
   return openIds[index + 1] ?? openIds[index - 1] ?? null;
 };
+
+/**
+ * The Artifacts surface's groups, each in the snapshot's order (latest first). Not found comes first
+ * of the three tests: a published artifact a read could not find is listed there, not as published.
+ */
+export const artifactGroups = (artifacts: ReadonlyArray<ThreadArtifact>) => ({
+  published: artifacts.filter(
+    (artifact) => artifact.notFoundAt === null && !artifact.mentionedOnly,
+  ),
+  linked: artifacts.filter((artifact) => artifact.notFoundAt === null && artifact.mentionedOnly),
+  notFound: artifacts.filter((artifact) => artifact.notFoundAt !== null),
+});

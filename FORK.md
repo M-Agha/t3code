@@ -24,29 +24,30 @@ reasons are the ones they accepted.
 
 ## The changes (oldest first)
 
-| Commit subject                                                                                       | What it adds                  |
-| ---------------------------------------------------------------------------------------------------- | ----------------------------- |
-| `feat: track end-of-reply decision questions natively`                                               | Questions and decisions       |
-| `feat: per-thread parked items with /park and t3_park`                                               | Parked items                  |
-| `feat: per-thread Artifacts tab`                                                                     | Artifacts                     |
-| `refactor: take question logic from session-kit's reply.ts`                                          | Shared logic with session-kit |
-| `fix: read a reply that finishes after its run ended`                                                | A listener gap                |
-| `chore: name fork builds T3 Code (Fork) with their own bundle ID`                                    | App identity                  |
-| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`                                   | Outside this repo             |
-| `fix: install.sh backs up a quit app's database`                                                     | Installing                    |
-| `fix: the stage-label schema accepts Fork, so the fork app launches`                                 | App identity                  |
-| `feat: Accept and Drop add to the draft; long questions keep their buttons`                          | Questions and decisions       |
-| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`                            | Rebasing, step 7              |
-| `(fork) decisions: open questions show one at a time, like T3's own question panel`                  | Questions and decisions       |
-| `(fork) decisions: answers on AskUserQuestion cards close the matching question`                     | Questions and decisions       |
-| `(fork) decisions: a model judge reads your replies, as in the terminal, with its model in settings` | Questions and decisions       |
-| `(fork) decisions: the right panel is called Tracker`                                                | Questions and decisions       |
-| `(fork) decisions: Accept and send, and Yes to all, in the question panel`                           | Questions and decisions       |
-| `(fork) decisions: a sent Veto line marks its choice vetoed`                                         | Questions and decisions       |
-| `(fork) decisions: answers are one line per question, and no question sends`                         | Questions and decisions       |
-| `(fork) decisions: the Tracker's final look, with Select mode, a draft bar and Reopen with Undo`     | Questions and decisions       |
-| `(fork) decisions: the judge reads only messages sent after it was in place`                         | Questions and decisions       |
-| `(fork) tracker: Parked and Artifacts are right-panel tabs of their own, in theme colours`           | Questions and decisions       |
+| Commit subject                                                                                        | What it adds                  |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------- |
+| `feat: track end-of-reply decision questions natively`                                                | Questions and decisions       |
+| `feat: per-thread parked items with /park and t3_park`                                                | Parked items                  |
+| `feat: per-thread Artifacts tab`                                                                      | Artifacts                     |
+| `refactor: take question logic from session-kit's reply.ts`                                           | Shared logic with session-kit |
+| `fix: read a reply that finishes after its run ended`                                                 | A listener gap                |
+| `chore: name fork builds T3 Code (Fork) with their own bundle ID`                                     | App identity                  |
+| `feat: mark fork-launched Claude processes with T3CODE_OWNS_BOARD`                                    | Outside this repo             |
+| `fix: install.sh backs up a quit app's database`                                                      | Installing                    |
+| `fix: the stage-label schema accepts Fork, so the fork app launches`                                  | App identity                  |
+| `feat: Accept and Drop add to the draft; long questions keep their buttons`                           | Questions and decisions       |
+| `fix: fork builds keep T3 Connect, and install.sh refuses one without it`                             | Rebasing, step 7              |
+| `(fork) decisions: open questions show one at a time, like T3's own question panel`                   | Questions and decisions       |
+| `(fork) decisions: answers on AskUserQuestion cards close the matching question`                      | Questions and decisions       |
+| `(fork) decisions: a model judge reads your replies, as in the terminal, with its model in settings`  | Questions and decisions       |
+| `(fork) decisions: the right panel is called Tracker`                                                 | Questions and decisions       |
+| `(fork) decisions: Accept and send, and Yes to all, in the question panel`                            | Questions and decisions       |
+| `(fork) decisions: a sent Veto line marks its choice vetoed`                                          | Questions and decisions       |
+| `(fork) decisions: answers are one line per question, and no question sends`                          | Questions and decisions       |
+| `(fork) decisions: the Tracker's final look, with Select mode, a draft bar and Reopen with Undo`      | Questions and decisions       |
+| `(fork) decisions: the judge reads only messages sent after it was in place`                          | Questions and decisions       |
+| `(fork) tracker: Parked and Artifacts are right-panel tabs of their own, in theme colours`            | Questions and decisions       |
+| `(fork) artifacts: rows name their type, show what claude.ai no longer finds, and take links by hand` | Artifacts                     |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -248,7 +249,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
   `apps/web/src/components/chat/ThreadDecisions.tsx` with its rules in `threadDecisions.logic.ts`,
-  `ThreadParked.tsx` and `ThreadArtifacts.tsx` beside it (the two surfaces, on the same snapshot),
+  `ThreadParked.tsx` and `ThreadArtifacts.tsx` beside it (the two surfaces, on the same snapshot;
+  Artifact calls are read by `apps/server/src/decisions/artifactCalls.ts`),
   `apps/web/src/components/settings/DecisionJudgeModelRow.tsx`, contracts in
   `packages/contracts/src/threadDecisions.ts`.
 
@@ -270,15 +272,56 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 
 ### Artifacts
 
-- Rows from Claude Code's `Artifact` tool calls (`dynamic_tool` turn items, driver `claudeAgent`,
-  output carrying a `url`) and from `claude.ai/artifact/<id>` and `claude.ai/code/artifact/<uuid>`
-  links in assistant messages. A tool call wins over a mention. `/code/` links match the publish's
-  `artifact_id`; whether those two ids always agree is unverified, so both are stored.
-- One row per artifact: first-seen kept, title and time from the latest publish. Its own
-  watermarks, the tool one advancing over every `dynamic_tool` row so threads are not re-parsed.
-- An Artifacts surface (its own right-panel tab, `ThreadArtifacts.tsx`). Opened through
-  `useOpenLink`, plus a system-browser button. No embedding, no claude.ai API, no
-  manual add or remove.
+- Rows from Claude Code's `Artifact` tool calls (`dynamic_tool` turn items, driver `claudeAgent`),
+  from `claude.ai/artifact/<id>` and `claude.ai/code/artifact/<uuid>` links in assistant messages,
+  and from links the user adds. `apps/server/src/decisions/artifactCalls.ts` reads a call: its
+  `$.status`, `$.input.action`, `url` and `type_url`, and its output as JSON or as text. Only a
+  completed create or publish (no `action`, or `publish`) adds a published row; a read, list or
+  quickstart names none. `/code/` links match the publish's `artifact_id`; whether those two ids
+  always agree is unverified, so both are stored. Links are read (both forms, `?query` and `#hash`
+  left out) by `packages/shared/src/sessionKit/artifacts.ts`, which the Link dialog shares.
+- One row per artifact: first-seen kept, title and time from the latest publish. A publish wins
+  over a mention or a manual link, and a `code/artifact/` row folds into the publish naming its
+  uuid, keeping the user's title when the publish names none. A type, once a publish names it, stays
+  when a later publish names none. A reply's link to an Artifact type itself (a core type URL, or one
+  in `fork_artifact_type_names`) is not shown as an artifact, nor counted. Ceiling: a not-found read
+  by `code/artifact/<uuid>` misses a row only ever created, since a create's output carries no uuid.
+  Its own watermarks, the tool one advancing over every `dynamic_tool` row so threads are not
+  re-parsed.
+- **Type** (MAIN-62): a create or publish output's `type.url`, else the input's `type_url`, types
+  the row; a publish without either is a plain page (markdown when its `path` ends `.md`). Mentions
+  and manual links stay "Type unknown" until such an output names them. The name comes from
+  `fork_artifact_type_names` (global: any thread's `list scope:types` output, `artifact_types[]`,
+  and any read output's `type.{url,title}`), joined when a snapshot is read, so a name learned later
+  names older rows; then `CORE_ARTIFACT_TYPE_NAMES` (the 8 core types this account listed on
+  2026-11-19; the same URLs on other accounts is unverified); else the panel says "Typed artifact".
+  Evidence: the dotfiles repo's `.local/.execution/t3-native-board/notes/artifact-types/`. Ceiling:
+  a name one thread learns reaches another thread's open panel at that panel's next snapshot.
+- **Not found** (MAIN-63): a failed call whose output contains `artifact not found` and whose
+  `input.url` names a listed row (by its own id or its publish's uuid) marks it not found at that
+  time; a later completed read or publish of it clears that. It never adds a row, and no other
+  failure counts. The exact error text is a fixture in `ThreadDecisions.test.ts`.
+- **Manual links** (MAIN-63): `threadDecisions.linkArtifact` (a URL and an optional title; an
+  artifact already listed, by either id, keeps its row and only gains a title it lacks, except a
+  mention, which becomes the user's link with their title, so it can be unlinked) and
+  `threadDecisions.unlinkArtifact`, for rows the user linked only: a published or mentioned row
+  comes from the thread itself.
+- **Surface** (`ThreadArtifacts.tsx`, its own right-panel tab), the owner's approved boards
+  (`NativeArtifacts.dc.html`, `NativeArtifactsEmpty.dc.html`, `NativeArtifactsLink.dc.html` in the
+  dotfiles repo's `.local/.execution/t3-native-board/notes/tracker-design/project/`), built from T3's
+  pull-request panel: groups Published here, Linked and Not found (a missing published artifact is
+  under Not found); rows on `PULL_REQUEST_ROW_CLASS` and `PullRequestRowLines` with a type icon whose
+  accessible name is the type, the title, then "<Type> · description" and the time at the right (the
+  not-found time on a Not found row, whose title is muted, never struck through). The row opens the
+  artifact (`useOpenLink`); Open in browser, Copy link and "…" (Open, Copy link, and Unlink from
+  thread on a row the user linked; right-click opens it too) show on hover and on keyboard focus,
+  and always on a touch screen.
+  The footer counts the groups beside a ghost Link button; the empty state has an outline Link
+  artifact button. `LinkArtifactDialog` is built like `LinkPullRequestDialog`: inline validation, a
+  line naming the artifact the link reads as, an optional title, and focus back on the Link button
+  on screen when it closes (the empty state's, or the footer's once a link fills the panel). It is
+  rendered once outside both states, so an artifact arriving while it is open keeps what was typed.
+  No embedding, no claude.ai API.
 
 ### Shared logic with session-kit
 
@@ -341,6 +384,10 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      would silently block upstream's next migrations.
    - Fork migrations are idempotent, with no foreign keys or triggers on upstream tables.
    - New fork state goes in a new numbered fork migration. Never edit a committed one.
+   - 006 (`ThreadArtifactTypes`) is also a replay: it resets every thread's artifact item
+     watermark, so the sync reads old Artifact calls again and fills the new columns and type names
+     through its own idempotent upserts, rather than parsing provider JSON in SQL. Threads replay
+     as they next sync (a subscribe or a run event), not at startup.
    - _Rejected:_ new orchestration event types, since official builds reject unknown events on
      server replay.
 2. **The fork refuses a database ahead of it.** On startup the fork refuses when
@@ -427,7 +474,8 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      `ThreadParked.focus.browser.test.tsx` and `ThreadDecisions.question-panel.browser.test.tsx`.
    - The Parked and Artifacts surfaces: `apps/web/src/rightPanelStore.test.ts` (order, active tab and
      an older layout across a reload; reopening a closed one), `closedViewStore.test.ts` (closed
-     ones survive a migration) and `RightPanelTabs.browser.test.tsx` (strip counts).
+     ones survive a migration) and `RightPanelTabs.browser.test.tsx` (strip counts), and
+     `ThreadArtifacts.browser.test.tsx` (groups, row actions, the Link dialog).
 6. **Live check:** on a dev server on an isolated home, never `~/.t3`. Reseed it first, since the
    schema moved: `node apps/server/scripts/migrate-dev-db.ts --base-dir "$PWD/.t3"` (reads `~/.t3`
    read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`, since in a main
