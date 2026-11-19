@@ -71,6 +71,8 @@ interface MessageRow {
   readonly streaming: number;
   readonly text: string | null;
   readonly userAuthored: number;
+  /** 1 when sent at or after the judge took over (fork migration 005); else the rules alone read it. */
+  readonly judged: number | null;
 }
 
 interface QuestionRow {
@@ -232,6 +234,14 @@ export const layer = Layer.effect(
       ),
     );
 
+    // Fork migration 005 writes the one row; without it no message counts as judged.
+    const cutoff = yield* sql`SELECT 1 FROM fork_decision_judge_cutoff`;
+    if (cutoff.length === 0) {
+      yield* Effect.logWarning(
+        "Decision judge cutoff is missing, so the rules alone close questions",
+      );
+    }
+
     // Upstream's user-authored test (ProjectionStore), plus the payloads that mark automation, over a
     // messages row named `message`.
     const userAuthored = () => sql`(
@@ -324,12 +334,13 @@ export const layer = Layer.effect(
       return changed;
     }, sql.withTransaction);
 
-    // What a user's message closes: the judge's verdict on every message while questions are open, as in
-    // the terminal; the rules (`closingFor`) only when it gives none. Outside any transaction: it may wait on
-    // a model for seconds.
+    // What a user's message closes while questions are open: the judge's verdict when `useJudge`, as in the
+    // terminal, the rules (`closingFor`) when it gives none; else the rules alone, with no model call (owner's
+    // Q38). Outside any transaction: it may wait on a model for seconds.
     const closingOf = Effect.fn("ThreadDecisions.closingOf")(function* (
       threadId: ThreadId,
       row: MessageRow & { readonly text: string },
+      useJudge: boolean,
     ) {
       const open = yield* sql<JudgedQuestion>`
         SELECT label, text, source_message_id AS "sourceMessageId", asked_at AS "askedAt"
@@ -338,6 +349,7 @@ export const layer = Layer.effect(
         ORDER BY asked_at, label_number
       `;
       if (open.length === 0) return undefined;
+      if (!useJudge) return closingFor(row.text, open);
       // The reply the message follows: whether a bare "yes" assents to the question block depends on it.
       const [reply] = yield* sql<{ readonly text: string }>`
         SELECT json_extract(payload_json, '$.text') AS text
@@ -370,6 +382,11 @@ export const layer = Layer.effect(
         SELECT after_created_at AS "afterCreatedAt", after_message_id AS "afterMessageId"
         FROM fork_thread_decision_sync WHERE thread_id = ${threadId}
       `;
+      // The judge reads only what a person sent since it took over, in a thread the fork has read before:
+      // older history was answered under the rules, and a thread opened for the first time (an imported
+      // session, or one an official build ran) shows its questions at once at no model cost. A new thread's
+      // first pass runs on its first message, before any question, so its answers are judged.
+      const judgedThread = watermark !== undefined;
       const rows = yield* sql<MessageRow>`
         SELECT
           message.message_id AS "messageId",
@@ -379,7 +396,8 @@ export const layer = Layer.effect(
           run.status AS "runStatus",
           message.streaming,
           json_extract(message.payload_json, '$.text') AS text,
-          ${userAuthored()} AS "userAuthored"
+          ${userAuthored()} AS "userAuthored",
+          message.created_at >= (SELECT judged_from FROM fork_decision_judge_cutoff) AS judged
         FROM orchestration_v2_projection_messages AS message
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
         WHERE message.thread_id = ${threadId}
@@ -411,7 +429,11 @@ export const layer = Layer.effect(
         if (row.role !== "user" || row.userAuthored !== 1 || row.text === null) continue;
         changed =
           (yield* applyRows(threadId, ready.slice(start, index), replies, new Map())) || changed;
-        const closing = yield* closingOf(threadId, { ...row, text: row.text });
+        const closing = yield* closingOf(
+          threadId,
+          { ...row, text: row.text },
+          judgedThread && row.judged === 1,
+        );
         changed =
           (yield* applyRows(
             threadId,
@@ -822,9 +844,9 @@ export const layer = Layer.effect(
       Stream.unwrap(
         Effect.gen(function* () {
           // Subscribes before reading, then backfills replies written while another build ran, in the
-          // background: the backlog's messages are each judged, which can take seconds, and the panel shows
-          // the current rows meanwhile. What the backfill changes publishes as usual. It runs in the
-          // service's scope, so a client leaving does not cut the backlog short.
+          // background: messages sent since the judge took over are each judged, which can take seconds,
+          // and the panel shows the current rows meanwhile. It runs in the service's scope, so a client
+          // leaving does not cut the backlog short; what it changes publishes as usual.
           const subscription = yield* PubSub.subscribe(changes);
           yield* sync(threadId).pipe(
             Effect.catchCause((cause) =>

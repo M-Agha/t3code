@@ -20,8 +20,8 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 
 // Fork-only. The model judge session-kit runs in the terminal (judge.ts, called from register.tsx's
-// boardAfterPrompt): on every message a person typed while questions are open, its verdict decides and the
-// rules (`closingFor`) only stand in when it fails. 20 s, not the terminal's 8: T3's path starts a provider
+// boardAfterPrompt): on a message a person typed while questions are open, its verdict decides and the
+// rules (`closingFor`) only stand in when it fails. ThreadDecisions decides which messages it reads. 20 s, not the terminal's 8: T3's path starts a provider
 // CLI per call (2.3 s and 4.8 s measured with Claude Sonnet, 2026-11-17), and no hook waits on this here.
 const JUDGE_TIMEOUT_MS = 20_000;
 
