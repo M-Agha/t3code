@@ -2299,7 +2299,6 @@ export function ThreadsSettingsPanel() {
             )
           }
         />
-        <DecisionJudgeModelRow />
         <AdvancedSettings
           targetIds={[setting("thread-title-instructions").id, setting("response-streaming").id]}
         >
@@ -2357,6 +2356,11 @@ export function ThreadsSettingsPanel() {
             }
           />
         </AdvancedSettings>
+      </SettingsSection>
+
+      {/* Fork-only: the Tracker's own settings. */}
+      <SettingsSection id="tracker" title={gt("Tracker")}>
+        <DecisionJudgeModelRow />
       </SettingsSection>
     </SettingsPageContainer>
   );

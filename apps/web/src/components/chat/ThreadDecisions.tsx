@@ -2,23 +2,18 @@
 import {
   MessageId,
   type ScopedThreadRef,
-  type ThreadArtifact,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
-  THREAD_PARKED_RESOLVED_LIMIT,
-  THREAD_PARKED_TEXT_MAX_LENGTH,
   type ThreadDecidedWithoutAsking,
   type ThreadDecisionQuestion,
   type ThreadDecisionsSnapshot,
-  type ThreadParkedItem,
-  type ThreadParkedUpdateInput,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
-import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
 import {
   ArrowUpRightIcon,
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  type LucideIcon,
   MessageCircleQuestionIcon,
   PanelRightIcon,
   PencilLineIcon,
@@ -27,8 +22,6 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   createContext,
   Fragment,
-  type KeyboardEvent,
-  type MouseEvent,
   type ReactNode,
   type RefObject,
   useContext,
@@ -37,9 +30,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { flushSync } from "react-dom";
 
-import { useOpenLink } from "~/browser/useOpenLink";
 import { collapseExpandedComposerCursor } from "~/composer-logic";
 import { assistantCitationNavigation } from "~/lib/assistantCitationNavigation";
 import { readThreadShell } from "~/state/entities";
@@ -47,19 +38,16 @@ import { useComposerDraftStore } from "~/composerDraftStore";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { RelativeTime } from "~/components/RelativeTime";
-import { readLocalApi } from "~/localApi";
 import { useEnvironmentQuery } from "~/state/query";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
-import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Label } from "../ui/label";
 import { Radio, RadioGroup } from "../ui/radio-group";
 import { ScrollArea } from "../ui/scroll-area";
-import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -77,16 +65,14 @@ import {
   decisionMessages,
   type DraftChoice,
   draftLineOf,
+  DRAFT_PLAIN_TEXT,
   draftSummary,
   groupSelection,
-  isParkedBusy,
   latestReplyOpenQuestions,
   lineEnd,
   nextUndrafted,
   openQuestions,
   openQuestionsByReply,
-  type ParkedBusy,
-  parkedFocusAfter,
   plural,
   resolvedQuestions,
   unfinishedLabels,
@@ -453,7 +439,10 @@ export function threadDecisionsBannerItem(input: {
   };
 }
 
-function SectionHeading(props: { readonly children: React.ReactNode; readonly at?: string }) {
+export function SectionHeading(props: {
+  readonly children: React.ReactNode;
+  readonly at?: string;
+}) {
   return (
     <h3 className="flex items-baseline justify-between gap-2 px-1 pt-3 pb-1 text-xs font-medium text-muted-foreground">
       <span>{props.children}</span>
@@ -466,10 +455,16 @@ function SectionHeading(props: { readonly children: React.ReactNode; readonly at
   );
 }
 
-function EmptyState(props: { readonly title: string; readonly description: string }) {
+export function EmptyState(props: {
+  readonly title: string;
+  readonly description: string;
+  /** The surface's own icon, as its strip tab shows it. */
+  readonly icon?: LucideIcon;
+}) {
+  const Icon = props.icon ?? MessageCircleQuestionIcon;
   return (
     <div className="flex flex-col items-center justify-center gap-2 p-6 text-center">
-      <MessageCircleQuestionIcon aria-hidden className="size-6 text-muted-foreground/60" />
+      <Icon aria-hidden className="size-6 text-muted-foreground/60" />
       <p className="text-sm font-medium">{props.title}</p>
       <p className="max-w-64 text-xs text-muted-foreground">{props.description}</p>
     </div>
@@ -479,7 +474,7 @@ function EmptyState(props: { readonly title: string; readonly description: strin
 const CHIP_TONES = {
   open: "bg-warning-surface text-warning-foreground",
   draft: "bg-tracker-draft/12 text-tracker-draft",
-  answered: "bg-success/8 text-success-foreground dark:bg-success/16",
+  answered: "bg-accent text-foreground",
   dropped: "bg-muted text-secondary-foreground",
 } as const;
 
@@ -780,7 +775,7 @@ function SelectableRow(props: {
         className={cn(
           "grid grid-cols-[auto_minmax(0,1fr)] gap-x-2.5 border-b border-border py-2.5 pe-4",
           drafted ? "cursor-default" : "cursor-pointer",
-          selected ? "border-s-2 border-s-ring bg-info/8 ps-3.5" : "ps-4",
+          selected ? "border-s-2 border-s-ring bg-accent ps-3.5" : "ps-4",
         )}
       >
         <Checkbox
@@ -889,7 +884,7 @@ function SelectDock(props: {
           ))}
           {added.map((line) => (
             <div key={line} className="grid grid-cols-[1rem_minmax(0,1fr)] text-foreground">
-              <span className="text-info-foreground">
+              <span className="text-tracker-draft">
                 <span aria-hidden>+</span>
                 <span className="sr-only">Adds </span>
               </span>
@@ -963,7 +958,7 @@ function QuestionsTab(props: {
       <StatusBar>
         {selecting ? (
           <>
-            <span className="font-medium text-info-foreground">Selecting</span>
+            <span className="font-medium text-foreground">Selecting</span>
             <Dot />
             <span className="min-w-0 truncate">questions in your draft can't be selected</span>
             <Button size="xs" variant="ghost" className="ms-auto" onClick={stopSelecting}>
@@ -1176,8 +1171,8 @@ function useReopenWithUndo() {
     };
     // Base UI's timer (hover pauses it); the reopen goes out once the toast is gone, so an Undo during
     // the fade counts; ✕ cancels like Undo (2026-11-17: a late Undo and the ✕ both reopened a question).
+    // No `type`: the info icon is a fixed blue no theme sets (FORK.md, Colours).
     toastId = toastManager.add({
-      type: "info",
       title: `Reopening ${question.label}`,
       description: "It goes back to Questions.",
       timeout: REOPEN_UNDO_MS,
@@ -1236,7 +1231,7 @@ function ResolvedRow(props: {
       />
       {question.answerText === null ? null : (
         <p className="mt-0.5 text-sm whitespace-pre-wrap wrap-anywhere">
-          <span className="me-1.5 text-xs font-semibold text-success-foreground">You</span>
+          <span className="me-1.5 text-xs font-semibold text-foreground">You</span>
           {question.answerText}
         </p>
       )}
@@ -1403,7 +1398,10 @@ function DecisionsTab(props: {
   );
 }
 
-/** The draft's summary on every tab while it has content, and the composer's own send. */
+/**
+ * The draft's summary and the composer's own send, shown while the draft holds Tracker lines
+ * (answers, vetoes or an unfinished `Qn:`); a draft of plain text is the composer's alone.
+ */
 function DraftBar(props: {
   readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
@@ -1413,6 +1411,7 @@ function DraftBar(props: {
   const [sending, setSending] = useState(false);
   const open = openQuestions(props.snapshot);
   const summary = draftSummary(actions.draft, open, actions.inDraft);
+  if (summary === DRAFT_PLAIN_TEXT) return null;
   // A bare `Qn: ` from Answer… is a place to type, not an answer, so it is not sent as one.
   const unfinished = unfinishedLabels(actions.draft, open);
   const send = () => {
@@ -1422,7 +1421,7 @@ function DraftBar(props: {
   return (
     <section
       aria-label="Your draft"
-      className="flex shrink-0 items-center gap-2 border-t border-border bg-muted px-4 py-2 text-xs text-muted-foreground"
+      className="flex shrink-0 items-center gap-1.5 border-t border-border/60 px-2 py-1.5 text-2xs text-muted-foreground"
     >
       <PencilLineIcon aria-hidden className="size-3.5 shrink-0 text-tracker-draft" />
       <span className="font-medium text-foreground">Draft</span>
@@ -1432,7 +1431,7 @@ function DraftBar(props: {
         Review
       </Button>
       <Button
-        size="sm"
+        size="xs"
         disabled={
           !actions.canOperate || sending || unfinished.length > 0 || actions.answeringPendingInput
         }
@@ -1441,417 +1440,6 @@ function DraftBar(props: {
         Send draft
       </Button>
     </section>
-  );
-}
-
-const PARKED_KIND_BADGE = { todo: "outline", later: "secondary", prompt: "info" } as const;
-
-const PARKED_STATE_BADGE = { done: "success", dropped: "secondary", sent: "info" } as const;
-
-// Distributes over the union, so an edit keeps its text.
-type ParkedChange = ThreadParkedUpdateInput extends infer Input
-  ? Input extends unknown
-    ? Omit<Input, "threadId">
-    : never
-  : never;
-
-function ParkedEditor(props: {
-  readonly item: ThreadParkedItem;
-  readonly busy: boolean;
-  readonly onSave: (text: string) => void;
-  readonly onCancel: () => void;
-}) {
-  const [text, setText] = useState(props.item.text);
-  const refused = isPlaceholder(text);
-  const save = () => {
-    if (!refused && !props.busy) props.onSave(text);
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      props.onCancel();
-    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-      event.preventDefault();
-      save();
-    }
-  };
-  return (
-    <div className="mt-1.5 flex flex-col gap-1.5">
-      <Textarea
-        size="sm"
-        autoFocus
-        aria-label="Parked item text"
-        maxLength={THREAD_PARKED_TEXT_MAX_LENGTH}
-        value={text}
-        onChange={(event) => setText(event.target.value)}
-        onKeyDown={onKeyDown}
-      />
-      <div className="flex justify-end gap-0.5">
-        <Button size="xs" variant="ghost" onClick={props.onCancel}>
-          Cancel
-        </Button>
-        <Button
-          size="xs"
-          variant="outline"
-          disabled={refused}
-          aria-disabled={props.busy || undefined}
-          onClick={save}
-        >
-          Save
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function ParkedHeader(props: { readonly item: ThreadParkedItem; readonly at: string }) {
-  const { item } = props;
-  return (
-    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-      <span className="flex items-center gap-1.5">
-        <Badge size="sm" variant={PARKED_KIND_BADGE[item.kind]}>
-          {item.kind}
-        </Badge>
-        {item.parkedBy === "agent" ? (
-          <span className="text-2xs text-muted-foreground">parked by the agent</span>
-        ) : null}
-      </span>
-      <span className="flex shrink-0 items-center gap-1.5">
-        {item.state === "open" ? null : (
-          <Badge size="sm" variant={PARKED_STATE_BADGE[item.state]}>
-            {item.state}
-          </Badge>
-        )}
-        <span className="text-2xs text-muted-foreground">
-          <RelativeTime timestamp={props.at} />
-        </span>
-      </span>
-    </div>
-  );
-}
-
-function OpenParkedCard(props: {
-  readonly item: ThreadParkedItem;
-  readonly canUpdate: boolean;
-  readonly canSend: boolean;
-  /** An action on this item is in flight; its buttons stay focusable but do nothing. */
-  readonly busy: boolean;
-  readonly editing: boolean;
-  readonly onEdit: (editing: boolean) => void;
-  readonly onSend: () => void;
-  readonly onResolve: (action: "done" | "drop") => void;
-  readonly onSave: (text: string) => Promise<boolean>;
-}) {
-  const { item } = props;
-  const label = ariaItemText(item.text);
-  const editButtonRef = useRef<HTMLButtonElement>(null);
-  const stopEditing = () => {
-    flushSync(() => props.onEdit(false));
-    editButtonRef.current?.focus();
-  };
-  const save = (text: string) => {
-    void props.onSave(text).then((saved) => {
-      if (saved) stopEditing();
-    });
-  };
-  const ifIdle = (action: () => void) => () => {
-    if (!props.busy) action();
-  };
-  return (
-    <li className="rounded-lg border border-border/70 p-2.5" data-thread-parked={item.id}>
-      <ParkedHeader item={item} at={item.createdAt} />
-      {props.editing ? (
-        <ParkedEditor item={item} busy={props.busy} onSave={save} onCancel={stopEditing} />
-      ) : (
-        <>
-          <p className="mt-1.5 text-sm whitespace-pre-wrap text-foreground wrap-anywhere">
-            {item.text}
-          </p>
-          <div className="mt-2 flex justify-end gap-0.5">
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!props.canSend}
-              aria-disabled={props.busy || undefined}
-              aria-label={`Send as a message: ${label}`}
-              onClick={ifIdle(props.onSend)}
-            >
-              Send
-            </Button>
-            <Button
-              ref={editButtonRef}
-              size="xs"
-              variant="ghost"
-              disabled={!props.canUpdate}
-              aria-disabled={props.busy || undefined}
-              aria-label={`Edit: ${label}`}
-              onClick={ifIdle(() => props.onEdit(true))}
-            >
-              Edit
-            </Button>
-            <Button
-              size="xs"
-              variant="ghost"
-              disabled={!props.canUpdate}
-              aria-disabled={props.busy || undefined}
-              aria-label={`Mark done: ${label}`}
-              onClick={ifIdle(() => props.onResolve("done"))}
-            >
-              Done
-            </Button>
-            <Button
-              size="xs"
-              variant="ghost-muted"
-              disabled={!props.canUpdate}
-              aria-disabled={props.busy || undefined}
-              aria-label={`Drop: ${label}`}
-              onClick={ifIdle(() => props.onResolve("drop"))}
-            >
-              Drop
-            </Button>
-          </div>
-        </>
-      )}
-    </li>
-  );
-}
-
-function ParkedTab(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly snapshot: ThreadDecisionsSnapshot | null;
-  readonly actions: ThreadDecisionActions;
-  readonly focusTab: () => void;
-}) {
-  const { environmentId, threadId } = props.threadRef;
-  const { focusTab } = props;
-  const canUpdate = useAtomValue(
-    serverEnvironment.updateThreadParkedItem.permissionAtom(environmentId),
-  );
-  const update = useAtomCommand(serverEnvironment.updateThreadParkedItem, {
-    reportFailure: true,
-  });
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [busy, setBusy] = useState<ParkedBusy>(new Map());
-  const openListRef = useRef<HTMLUListElement>(null);
-  // Where focus goes once the snapshot drops the item the user just sent, finished or dropped.
-  const focusAfterRef = useRef<{ readonly leaving: number; readonly next: number | null } | null>(
-    null,
-  );
-  const parked = props.snapshot?.parked ?? [];
-  const open = parked.filter((item) => item.state === "open");
-  const resolved = parked.filter((item) => item.state !== "open");
-  const openIds = open.map((item) => item.id);
-  const openKey = openIds.join(",");
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus off a card the snapshot removed
-  useLayoutEffect(() => {
-    const pending = focusAfterRef.current;
-    if (pending === null || openKey.split(",").includes(String(pending.leaving))) return;
-    focusAfterRef.current = null;
-    // Focus fell to the body with the removed button; anywhere else, the user moved it.
-    if (document.activeElement !== null && document.activeElement !== document.body) return;
-    const next =
-      pending.next === null
-        ? null
-        : openListRef.current?.querySelector<HTMLElement>(
-            `[data-thread-parked="${pending.next}"] button`,
-          );
-    if (next) next.focus();
-    else focusTab();
-  }, [openKey, focusTab, focusAfterRef, openListRef]);
-  if (parked.length === 0) {
-    return (
-      <EmptyState
-        title="Nothing parked"
-        description="Type /park and some text in the composer to set it aside for later. Agents can park follow-ups here too."
-      />
-    );
-  }
-  const change = async (input: ParkedChange) => {
-    const result = await update({ environmentId, input: { ...input, threadId } });
-    return result._tag === "Success";
-  };
-  // A finished action leaves the item busy until the snapshot shows its result (isParkedBusy).
-  const run = async (item: ThreadParkedItem, action: () => Promise<boolean>) => {
-    if (isParkedBusy(busy, item)) return false;
-    setBusy((current) => new Map(current).set(item.id, item.updatedAt));
-    const done = await action();
-    if (!done) {
-      setBusy((current) => {
-        const next = new Map(current);
-        next.delete(item.id);
-        return next;
-      });
-    }
-    return done;
-  };
-  const leave = (item: ThreadParkedItem, action: () => Promise<boolean>) => {
-    focusAfterRef.current = { leaving: item.id, next: parkedFocusAfter(openIds, item.id) };
-    void run(item, action).then((done) => {
-      if (!done && focusAfterRef.current?.leaving === item.id) focusAfterRef.current = null;
-    });
-  };
-  const send = (item: ThreadParkedItem) =>
-    leave(
-      item,
-      async () =>
-        (await props.actions.send(item.text)) && (await change({ id: item.id, action: "sent" })),
-    );
-  return (
-    <>
-      {open.length === 0 ? null : (
-        <section aria-label="Parked">
-          <SectionHeading>Parked</SectionHeading>
-          <ul ref={openListRef} className="flex flex-col gap-1.5">
-            {open.map((item) => (
-              <OpenParkedCard
-                key={item.id}
-                item={item}
-                canUpdate={canUpdate}
-                canSend={canUpdate && props.actions.canOperate}
-                busy={isParkedBusy(busy, item)}
-                editing={editingId === item.id}
-                onEdit={(editing) => setEditingId(editing ? item.id : null)}
-                onSend={() => send(item)}
-                onResolve={(action) => leave(item, () => change({ id: item.id, action }))}
-                onSave={(text) => run(item, () => change({ id: item.id, action: "edit", text }))}
-              />
-            ))}
-          </ul>
-        </section>
-      )}
-      {resolved.length === 0 ? null : (
-        <section aria-label="Resolved parked items">
-          <SectionHeading>Resolved</SectionHeading>
-          <ul className="flex flex-col gap-1.5">
-            {resolved.map((item) => (
-              <li
-                key={item.id}
-                className="rounded-lg border border-border/70 p-2.5"
-                data-thread-parked={item.id}
-              >
-                <ParkedHeader item={item} at={item.resolvedAt ?? item.updatedAt} />
-                <p className="mt-1.5 text-sm whitespace-pre-wrap text-foreground/80 wrap-anywhere">
-                  {item.text}
-                </p>
-                <div className="mt-2 flex justify-end">
-                  <Button
-                    size="xs"
-                    variant="ghost"
-                    disabled={!canUpdate}
-                    aria-disabled={isParkedBusy(busy, item) || undefined}
-                    aria-label={`Reopen: ${ariaItemText(item.text)}`}
-                    onClick={() => void run(item, () => change({ id: item.id, action: "reopen" }))}
-                  >
-                    Reopen
-                  </Button>
-                </div>
-              </li>
-            ))}
-          </ul>
-          {resolved.length === THREAD_PARKED_RESOLVED_LIMIT ? (
-            <p className="px-1 pt-2 text-xs text-muted-foreground">Older items are not shown.</p>
-          ) : null}
-        </section>
-      )}
-    </>
-  );
-}
-
-function ArtifactRow(props: {
-  readonly artifact: ThreadArtifact;
-  readonly onOpen: (event: MouseEvent<HTMLButtonElement>) => void;
-  readonly onOpenInBrowser: () => void;
-}) {
-  const { artifact } = props;
-  const title = artifact.title ?? artifact.id;
-  return (
-    <li className="flex items-start gap-1 rounded-md hover:bg-accent/50">
-      <button
-        type="button"
-        className="min-w-0 flex-1 rounded-md px-1.5 py-1.5 text-start outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
-        onClick={props.onOpen}
-        onAuxClick={props.onOpen}
-      >
-        <span className="flex min-w-0 items-baseline gap-1.5">
-          <span className="min-w-0 truncate text-sm font-medium text-foreground">{title}</span>
-          {artifact.mentionedOnly ? (
-            <span className="shrink-0 text-2xs text-muted-foreground">mentioned</span>
-          ) : null}
-          <span className="ms-auto shrink-0 text-2xs text-muted-foreground">
-            <RelativeTime timestamp={artifact.updatedAt} />
-          </span>
-        </span>
-        {artifact.description === null ? null : (
-          <span className="block truncate text-xs text-muted-foreground">
-            {artifact.description}
-          </span>
-        )}
-      </button>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              className="mt-1"
-              aria-label={`Open in browser: ${title}`}
-              onClick={props.onOpenInBrowser}
-            />
-          }
-        >
-          <ArrowUpRightIcon />
-        </TooltipTrigger>
-        <TooltipPopup side="top">Open in browser</TooltipPopup>
-      </Tooltip>
-    </li>
-  );
-}
-
-function ArtifactsTab(props: {
-  readonly threadRef: ScopedThreadRef;
-  readonly snapshot: ThreadDecisionsSnapshot | null;
-}) {
-  const openLink = useOpenLink(props.threadRef);
-  const artifacts = props.snapshot?.artifacts ?? [];
-  if (artifacts.length === 0) {
-    return (
-      <EmptyState
-        title="No artifacts"
-        description="Pages an agent publishes to claude.ai, or links to in a reply, appear here."
-      />
-    );
-  }
-  const report = (error: unknown) => {
-    console.error(error);
-    toastManager.add({ type: "error", title: "Unable to open artifact" });
-  };
-  const open = (artifact: ThreadArtifact, event: MouseEvent<HTMLButtonElement>) => {
-    if (event.button > 1) return;
-    void openLink(artifact.url, {
-      event: { metaKey: event.metaKey, ctrlKey: event.ctrlKey, button: event.button },
-    }).catch(report);
-  };
-  const openInBrowser = (artifact: ThreadArtifact) => {
-    const api = readLocalApi();
-    if (!api) return report(new Error("Link opening is unavailable."));
-    void api.shell.openExternal(artifact.url).catch(report);
-  };
-  return (
-    <>
-      <ul className="flex flex-col gap-0.5 pt-3">
-        {artifacts.map((artifact) => (
-          <ArtifactRow
-            key={artifact.id}
-            artifact={artifact}
-            onOpen={(event) => open(artifact, event)}
-            onOpenInBrowser={() => openInBrowser(artifact)}
-          />
-        ))}
-      </ul>
-      {(props.snapshot?.artifactCount ?? 0) > artifacts.length ? (
-        <p className="px-1 pt-2 text-xs text-muted-foreground">Older artifacts are not shown.</p>
-      ) : null}
-    </>
   );
 }
 
@@ -1879,13 +1467,9 @@ export function ThreadDecisionsPanel(props: {
   const reopen = useReopenWithUndo();
   const panelRef = useRef<HTMLDivElement>(null);
   const focusAfter = useFocusAfter(panelRef);
-  const parkedTabRef = useRef<HTMLButtonElement>(null);
-  const focusParkedTab = () => parkedTabRef.current?.focus();
   const counts = {
     questions: snapshot?.openCount ?? 0,
     decisions: choicesToReview(snapshot, actions.draft),
-    parked: snapshot?.parkedOpenCount ?? 0,
-    artifacts: snapshot?.artifactCount ?? 0,
   };
   // Select mode ends once the draft or the snapshot leaves nothing to select.
   if (
@@ -1894,7 +1478,6 @@ export function ThreadDecisionsPanel(props: {
   ) {
     setSelecting(false);
   }
-  const draftShown = actions.draft.trim() !== "" && !(tab === "questions" && selecting);
   return (
     <FocusAfterContext value={focusAfter}>
       <div ref={panelRef} className="flex h-full min-h-0 flex-col" data-thread-decisions-panel>
@@ -1905,12 +1488,7 @@ export function ThreadDecisionsPanel(props: {
             value={[tab]}
             onValueChange={(value) => {
               const next = value[0];
-              if (
-                next === "questions" ||
-                next === "decisions" ||
-                next === "parked" ||
-                next === "artifacts"
-              ) {
+              if (next === "questions" || next === "decisions") {
                 setTab(next);
                 setSelecting(false);
               }
@@ -1934,21 +1512,6 @@ export function ThreadDecisionsPanel(props: {
             >
               <TabLabel name="Decisions" count={counts.decisions} />
             </Toggle>
-            <Toggle
-              ref={parkedTabRef}
-              variant="segmented-bordered"
-              value="parked"
-              aria-label={tabName("Parked", counts.parked)}
-            >
-              <TabLabel name="Parked" count={counts.parked} />
-            </Toggle>
-            <Toggle
-              variant="segmented-bordered"
-              value="artifacts"
-              aria-label={tabName("Artifacts", counts.artifacts)}
-            >
-              <TabLabel name="Artifacts" count={counts.artifacts} />
-            </Toggle>
           </ToggleGroup>
         </div>
         {tab === "questions" ? (
@@ -1959,30 +1522,17 @@ export function ThreadDecisionsPanel(props: {
             selecting={selecting}
             onSelecting={setSelecting}
           />
-        ) : tab === "decisions" ? (
+        ) : (
           <DecisionsTab
             threadRef={props.threadRef}
             snapshot={snapshot}
             actions={actions}
             reopen={reopen}
           />
-        ) : (
-          <ScrollArea className="min-h-0 flex-1">
-            <div className="px-3 pb-3">
-              {tab === "artifacts" ? (
-                <ArtifactsTab threadRef={props.threadRef} snapshot={snapshot} />
-              ) : (
-                <ParkedTab
-                  threadRef={props.threadRef}
-                  snapshot={snapshot}
-                  actions={actions}
-                  focusTab={focusParkedTab}
-                />
-              )}
-            </div>
-          </ScrollArea>
         )}
-        {draftShown ? <DraftBar snapshot={snapshot} actions={actions} /> : null}
+        {tab === "questions" && selecting ? null : (
+          <DraftBar snapshot={snapshot} actions={actions} />
+        )}
       </div>
     </FocusAfterContext>
   );

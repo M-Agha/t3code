@@ -25,8 +25,7 @@ vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
 }));
 
 import { act, render, type Screen } from "../../../test/render";
-import { useDecisionsPanelTab } from "./decisionsPanelTabStore";
-import { ThreadDecisionsPanel } from "./ThreadDecisions";
+import { ThreadParkedPanel } from "./ThreadParked";
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 const actions = {
@@ -52,6 +51,13 @@ const item = (id: number): ThreadParkedItem => ({
   resolvedAt: null,
 });
 
+const done = (id: number): ThreadParkedItem => ({
+  ...item(id),
+  state: "done",
+  updatedAt: "2026-01-01T00:01:00.000Z",
+  resolvedAt: "2026-01-01T00:01:00.000Z",
+});
+
 const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSnapshot => ({
   threadId: threadRef.threadId,
   questions: [],
@@ -63,17 +69,23 @@ const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSna
   artifactCount: 0,
 });
 
-const panel = () => <ThreadDecisionsPanel threadRef={threadRef} actions={actions} />;
+const panel = () => <ThreadParkedPanel threadRef={threadRef} actions={actions} />;
 
 function setup(ids: ReadonlyArray<number>) {
   state.snapshot = snapshotOf(ids.map(item));
   state.update.mockReset().mockResolvedValue({ _tag: "Success" });
-  useDecisionsPanelTab.setState({ tab: "parked" });
 }
 
-// The live snapshot lands without the items the server resolved.
-async function land(screen: Screen, remaining: ReadonlyArray<number>) {
-  state.snapshot = snapshotOf(remaining.map(item));
+// The live snapshot lands without the open items the server resolved, and with those it lists as resolved.
+async function land(
+  screen: Screen,
+  remaining: ReadonlyArray<number>,
+  resolved: ReadonlyArray<number> = [],
+) {
+  state.snapshot = {
+    ...snapshotOf(remaining.map(item)),
+    parked: [...remaining.map(item), ...resolved.map(done)],
+  };
   await act(() => screen.rerender(panel()));
 }
 
@@ -111,13 +123,22 @@ it("moves focus to the next card once the snapshot drops the finished one", asyn
     .toHaveFocus();
 });
 
-it("moves focus to the Parked tab when the only card is done", async () => {
+it("moves focus to the surface, not the finished card's Reopen, when the last open card is done", async () => {
   setup([1]);
   await using screen = await render(panel());
   await screen.getByRole("button", { name: "Mark done: item 1" }).click();
   await vi.waitFor(() => expect(state.update).toHaveBeenCalledOnce());
+  await land(screen, [], [1]);
+  await expect.element(screen.getByRole("region", { name: "Parked items" })).toHaveFocus();
+});
+
+it("moves focus to the surface itself when the last open card leaves and nothing is left", async () => {
+  setup([1]);
+  await using screen = await render(panel());
+  await screen.getByRole("button", { name: "Drop: item 1" }).click();
+  await vi.waitFor(() => expect(state.update).toHaveBeenCalledOnce());
   await land(screen, []);
-  await expect.element(screen.getByRole("button", { name: /^Parked/ })).toHaveFocus();
+  await expect.element(screen.getByRole("region", { name: "Parked items" })).toHaveFocus();
 });
 
 it("leaves focus where the user moved it before the snapshot lands", async () => {

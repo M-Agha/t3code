@@ -292,3 +292,27 @@ describe("device tab rename", () => {
     expect(onRenameDevice).toHaveBeenCalledExactlyOnceWith(DEVICE_SURFACE.id, "日本語");
   });
 });
+
+describe("Parked and Artifacts strip tabs", () => {
+  it("show their counts and say them in the tab's name, and show none at zero", async () => {
+    const parked: RightPanelSurface = { id: "parked", kind: "parked" };
+    const artifacts: RightPanelSurface = { id: "artifacts", kind: "artifacts" };
+    const props = panel(DEVICE_SURFACE).props as RightPanelTabsProps;
+    await using screen = await render(
+      <RightPanelTabs
+        {...props}
+        surfaces={[parked, artifacts]}
+        activeSurfaceId="parked"
+        surfaceCounts={{ parked: 3, artifacts: 0 }}
+      >
+        {null}
+      </RightPanelTabs>,
+    );
+    const parkedTab = screen.getByRole("button", { name: "Parked, 3", exact: true });
+    await expect.element(parkedTab).toBeVisible();
+    await expect.element(parkedTab).toHaveTextContent("Parked3");
+    await expect
+      .element(screen.getByRole("button", { name: "Artifacts", exact: true }))
+      .toBeVisible();
+  });
+});
