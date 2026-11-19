@@ -187,6 +187,9 @@ export const unfinishedLabels = (draft: string, open: ReadonlyArray<ThreadDecisi
   ];
 };
 
+/** `draftSummary` of a draft with no Tracker line in it. */
+export const DRAFT_PLAIN_TEXT = "text";
+
 /**
  * What the draft bar says the draft holds: the questions it answers (less unfinished ones), its veto
  * lines, the labels still waiting for an answer, and whether anything else is in it ("1 answer · 1
@@ -209,7 +212,7 @@ export const draftSummary = (
     ...(vetoes > 0 ? [plural(vetoes, "veto", "vetoes")] : []),
     ...(unfinished.length > 0 ? [`${unfinished.join(", ")} unanswered`] : []),
   ];
-  if (parts.length === 0) return "text";
+  if (parts.length === 0) return DRAFT_PLAIN_TEXT;
   return `${parts.join(" · ")}${other ? " + other text" : ""}`;
 };
 

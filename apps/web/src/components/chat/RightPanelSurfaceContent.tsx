@@ -14,7 +14,9 @@ import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { lazy, Suspense } from "react";
 import { LinkedThreadPane } from "./LinkedThreadPane";
 import SideThreadPane from "./SideThreadPane";
+import { ThreadArtifactsPanel } from "./ThreadArtifacts";
 import { type ThreadDecisionActions, ThreadDecisionsPanel } from "./ThreadDecisions";
+import { ThreadParkedPanel } from "./ThreadParked";
 import type { ComposerImageAttachment, DraftId } from "../../composerDraftStore";
 import type { ShortcutMatchContext } from "../../keybindings";
 import type { SideChatParentPanel } from "../../lib/sideChatPane";
@@ -224,6 +226,17 @@ export function RightPanelSurfaceContent(props: {
           actions={props.decisionActions}
         />
       );
+    case "parked":
+      return (
+        // Per thread, so an edit in progress never carries over to another thread.
+        <ThreadParkedPanel
+          key={scopedThreadKey(threadRef)}
+          threadRef={threadRef}
+          actions={props.decisionActions}
+        />
+      );
+    case "artifacts":
+      return <ThreadArtifactsPanel threadRef={threadRef} />;
     case "thread":
       // Not lazy: revealing a suspended tiptap editor tears down its view and crashes the composer.
       return (
