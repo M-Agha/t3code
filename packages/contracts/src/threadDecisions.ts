@@ -82,7 +82,22 @@ export type ThreadParkedItem = typeof ThreadParkedItem.Type;
 /** The snapshot carries every open parked item and at most this many resolved ones, newest first. */
 export const THREAD_PARKED_RESOLVED_LIMIT = 50;
 
-/** A claude.ai artifact the thread published (Claude's Artifact tool) or an agent's reply linked. */
+/** What an artifact is: made from an Artifact type (named when any thread learned it), or a plain page. */
+export const ThreadArtifactType = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("typed"),
+    url: Schema.String,
+    /** Null when no thread has named the type and it is not a core one. */
+    name: Schema.NullOr(Schema.String),
+  }),
+  Schema.Struct({ kind: Schema.Literal("page"), format: Schema.Literals(["html", "markdown"]) }),
+]);
+export type ThreadArtifactType = typeof ThreadArtifactType.Type;
+
+/**
+ * A claude.ai artifact the thread published (Claude's Artifact tool), an agent's reply linked, or the
+ * user linked by hand. The fields after `updatedAt` default for a server that predates them.
+ */
 export const ThreadArtifact = Schema.Struct({
   /** The id in the artifact's URL. */
   id: Schema.String,
@@ -90,9 +105,15 @@ export const ThreadArtifact = Schema.Struct({
   /** Null when the artifact is only mentioned. */
   title: Schema.NullOr(Schema.String),
   description: Schema.NullOr(Schema.String),
-  /** True when only a reply's link names it, so title and updatedAt come from no publish. */
+  /** True when no publish names it (a reply's link, or the user's), so title and updatedAt come from none. */
   mentionedOnly: Schema.Boolean,
   updatedAt: IsoDateTime,
+  /** The user linked it (threadDecisions.linkArtifact); only such a row can be unlinked. */
+  linkedByUser: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
+  /** Null until a create or publish of it is read. */
+  type: Schema.NullOr(ThreadArtifactType).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
+  /** When the last call that reached it was answered "artifact not found"; null once one finds it. */
+  notFoundAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
 });
 export type ThreadArtifact = typeof ThreadArtifact.Type;
 
@@ -143,6 +164,25 @@ export const ThreadParkedUpdateInput = Schema.Union([
   }),
 ]);
 export type ThreadParkedUpdateInput = typeof ThreadParkedUpdateInput.Type;
+
+const THREAD_ARTIFACT_TITLE_MAX_LENGTH = 200;
+
+/** A claude.ai artifact link the user adds to the thread's Artifacts; the server reads the URL. */
+export const ThreadArtifactLinkInput = Schema.Struct({
+  threadId: ThreadId,
+  url: TrimmedNonEmptyString.check(Schema.isMaxLength(2_000)),
+  title: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(THREAD_ARTIFACT_TITLE_MAX_LENGTH)),
+  ),
+});
+export type ThreadArtifactLinkInput = typeof ThreadArtifactLinkInput.Type;
+
+export const ThreadArtifactUnlinkInput = Schema.Struct({
+  threadId: ThreadId,
+  /** The row's `id`. */
+  id: TrimmedNonEmptyString,
+});
+export type ThreadArtifactUnlinkInput = typeof ThreadArtifactUnlinkInput.Type;
 
 export class ThreadDecisionsError extends Schema.TaggedError<ThreadDecisionsError>()(
   "ThreadDecisionsError",

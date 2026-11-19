@@ -126,6 +126,8 @@ const RPC_AGGREGATES = {
   [WS_METHODS.threadDecisionsReopen]: "threadDecisions",
   [WS_METHODS.threadDecisionsPark]: "threadDecisions",
   [WS_METHODS.threadDecisionsUpdateParked]: "threadDecisions",
+  [WS_METHODS.threadDecisionsLinkArtifact]: "threadDecisions",
+  [WS_METHODS.threadDecisionsUnlinkArtifact]: "threadDecisions",
   [WS_METHODS.secretsAnswerRequest]: "secrets",
   [WS_METHODS.agentFeedbackAnswerRequest]: "agentFeedback",
   [WS_METHODS.guestShareCreate]: "guest-share",
