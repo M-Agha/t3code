@@ -169,6 +169,16 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     useRightPanelStore.getState().open(activeThreadRef, "decisions");
   };
   const addDecisionsSurfaceStable = useStableCallback(addDecisionsSurface);
+  const addParkedSurface = () => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "parked");
+  };
+  const addParkedSurfaceStable = useStableCallback(addParkedSurface);
+  const addArtifactsSurface = () => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "artifacts");
+  };
+  const addArtifactsSurfaceStable = useStableCallback(addArtifactsSurface);
   const addDeviceSurface = () => {
     if (!activeThreadRef) return;
     if (!deviceState.onboardingCompleted || deviceState.hostStatus === "disabled") {
@@ -364,6 +374,8 @@ export function useRightPanelActions(input: RightPanelActionsInput) {
     addPullRequestSurfaceStable,
     addPullRequestsSurfaceStable,
     addDecisionsSurfaceStable,
+    addParkedSurfaceStable,
+    addArtifactsSurfaceStable,
     closePreviewPanelStable,
     copyRightPanelFilePathStable,
     createBrowserSurface,
