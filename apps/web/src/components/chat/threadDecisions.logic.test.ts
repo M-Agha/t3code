@@ -1,6 +1,7 @@
 import {
   MessageId,
   ThreadId,
+  type ThreadArtifact,
   type ThreadDecisionQuestion,
   type ThreadParkedItem,
 } from "@t3tools/contracts";
@@ -9,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   acceptsPick,
   answerLines,
+  artifactGroups,
   asDraftLine,
   choicesToReview,
   draftLineOf,
@@ -301,5 +303,37 @@ describe("parked items", () => {
     expect(parkedFocusAfter([1, 2, 3], 2)).toBe(3);
     expect(parkedFocusAfter([1, 2, 3], 3)).toBe(2);
     expect(parkedFocusAfter([2], 2)).toBeNull();
+  });
+});
+
+describe("artifacts", () => {
+  const artifact = (id: string, fields: Partial<ThreadArtifact> = {}): ThreadArtifact => ({
+    id,
+    url: `https://claude.ai/artifact/${id}`,
+    title: null,
+    description: null,
+    mentionedOnly: false,
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    linkedByUser: false,
+    type: null,
+    notFoundAt: null,
+    ...fields,
+  });
+
+  it("groups published, linked and not found, a missing one under Not found whatever its source", () => {
+    const published = artifact("Plan1", { type: { kind: "page", format: "html" } });
+    const mentioned = artifact("Canvas1", { mentionedOnly: true });
+    const linked = artifact("Review1", { mentionedOnly: true, linkedByUser: true });
+    const gone = artifact("Board1", { notFoundAt: "2026-01-02T00:00:00.000Z" });
+    const goneLink = artifact("Old1", {
+      mentionedOnly: true,
+      notFoundAt: "2026-01-02T00:00:00.000Z",
+    });
+    const groups = artifactGroups([published, mentioned, gone, linked, goneLink]);
+    expect(groups).toEqual({
+      published: [published],
+      linked: [mentioned, linked],
+      notFound: [gone, goneLink],
+    });
   });
 });
