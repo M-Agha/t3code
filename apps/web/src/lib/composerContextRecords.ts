@@ -7,6 +7,7 @@ import {
   COMPOSER_CONTEXT_REVIEW_DIFF_MAX_CHARS,
   COMPOSER_CONTEXT_REVIEW_TEXT_MAX_CHARS,
   COMPOSER_CONTEXT_TERMINAL_TEXT_MAX_CHARS,
+  ParkedContextRecord,
 } from "@t3tools/contracts";
 import type {
   ComposerContextId,
@@ -26,6 +27,7 @@ import type {
   ThreadContextRecord,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { decodeMsg, msg } from "gt-react";
 import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
@@ -381,6 +383,25 @@ export function environmentContextRecord(
   };
 }
 
+/** Fork (Parked): one record per item, so adding an item already in the draft reuses its chip. */
+export function parkedContextReference(record: ParkedContextRecord): ComposerContextReference {
+  return { kind: "parked", contextId: record.contextId, label: record.label };
+}
+
+/** `threadId`: the item's thread, the only one whose messages the server lets the record mark Sent. */
+export function parkedContextRecord(
+  item: { readonly id: number; readonly text: string },
+  threadId: ThreadId,
+): ParkedContextRecord {
+  return {
+    version: 1,
+    kind: "parked",
+    contextId: toKindScopedComposerContextId("parked", String(item.id)),
+    label: sanitizeComposerContextLabel(item.text, "parked"),
+    payload: { itemId: item.id, threadId, text: item.text },
+  };
+}
+
 export function terminalContextRecord(context: TerminalContextDraft): TerminalContextRecord {
   return {
     version: 1,
@@ -529,6 +550,7 @@ export function buildMessageContext(input: {
   previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
   environmentContexts?: ReadonlyArray<EnvironmentContextRecord>;
+  parkedContexts?: ReadonlyArray<ParkedContextRecord>;
   replyTo?: ResponseContextRecord | null;
   attachments?: ReadonlyArray<BoundComposerAttachment>;
 }): OrchestrationMessageContext | undefined {
@@ -542,6 +564,7 @@ export function buildMessageContext(input: {
     ...input.reviewComments.map(reviewCommentContextRecord),
     ...(input.threadContexts ?? []),
     ...(input.environmentContexts ?? []),
+    ...(input.parkedContexts ?? []),
     ...(input.replyTo ? [input.replyTo] : []),
     ...input.previewAnnotations.map((annotation) =>
       previewAnnotationContextRecord(annotation, {
@@ -553,10 +576,13 @@ export function buildMessageContext(input: {
   return records.length === 0 ? undefined : { version: 1, records };
 }
 
+const isParkedContextRecord = Schema.is(ParkedContextRecord);
+
 export function asKnownContextRecord(
   record: ComposerContextRecord | undefined,
 ): KnownComposerContextRecord | undefined {
-  if (!record || "payload" in record) return undefined;
+  // Fork (Parked): its record has the unknown-kind shape (`ParkedContextRecord`), yet is known here.
+  if (!record || ("payload" in record && !isParkedContextRecord(record))) return undefined;
   return record;
 }
 

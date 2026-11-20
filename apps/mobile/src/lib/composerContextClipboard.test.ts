@@ -149,6 +149,35 @@ beforeEach(() => {
 });
 
 describe("mobile context clipboard imports", () => {
+  // Fork (Parked): Sol round 2, S1. A record pasted on another machine kept the copied item id, which can
+  // name another item there; the chip goes, as on the web.
+  it("drops a pasted parked chip and its record, keeping the rest", async () => {
+    const parked = {
+      version: 1 as const,
+      kind: "parked" as const,
+      contextId: ComposerContextId.make("parked_7"),
+      label: "Add a doctor check",
+      payload: { itemId: 7, threadId: "thread-source", text: "Add a doctor check" },
+    };
+    const result = await importComposerContextClipboard(
+      {
+        text: `Do ${formatComposerContextReference(parked)} and ${formatComposerContextReference(terminal)}`,
+        fragment: encodeComposerContextFragment({
+          version: 1,
+          source: { environmentId: EnvironmentId.make("source") },
+          records: [parked, terminal],
+        })!,
+        html: "",
+      },
+      0,
+      new AbortController().signal,
+    );
+    expect(result?.context.records).toEqual([{ ...terminal, contextId: "import-1" }]);
+    expect(collectComposerContextReferences(result?.text ?? "").map((ref) => ref.kind)).toEqual([
+      "terminal",
+    ]);
+  });
+
   it("copies original bytes and rewrites file bindings using a signal without throwIfAborted", async () => {
     const signal = { aborted: false } as AbortSignal;
     const result = await importComposerContextClipboard(clipboard, 0, signal);

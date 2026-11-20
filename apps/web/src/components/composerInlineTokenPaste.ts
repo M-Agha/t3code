@@ -16,6 +16,7 @@ import {
   threadLinkContextReferences,
 } from "@t3tools/shared/composerContextReferences";
 
+import { withoutParkedReferences } from "@t3tools/shared/parkedReferences";
 import { readThreadShell } from "~/state/entities";
 
 const threadTitle = (ref: ScopedThreadRef) => readThreadShell(ref)?.title;
@@ -70,7 +71,9 @@ export function importPastedComposerText(
     fragment: ComposerContextClipboardFragment,
   ) => ReadonlyMap<string, string>,
 ): string {
-  const pastedText = readPastedPlainText(clipboardData);
+  // Fork (Parked): a pasted parked chip never brings its record, so it goes (one already in the draft
+  // stays single).
+  const pastedText = withoutParkedReferences(readPastedPlainText(clipboardData));
   const fragment = importContextFragment ? readPastedComposerContext(clipboardData) : null;
   const rewrittenIds =
     fragment && fragment.records.length > 0 ? importContextFragment!(fragment) : null;
