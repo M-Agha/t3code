@@ -6,12 +6,17 @@ import {
   type ElementContextDetails,
   type EnvironmentId,
   type KnownComposerContextRecord,
+  ParkedContextRecord,
   type ScopedThreadRef,
   type ThreadContextRecord,
 } from "@t3tools/contracts";
 
+import * as Schema from "effect/Schema";
+
 import { expandAssistantCitationsForProvider } from "./assistantCitations.ts";
 import { replaceThreadLinks, threadLinkCandidates } from "./threadLinks.ts";
+
+const isParkedContextRecord = Schema.is(ParkedContextRecord);
 
 const CONTEXT_PROTOCOL = "t3-context:";
 const COMPOSER_CONTEXT_HREF_PREFIX = `${CONTEXT_PROTOCOL}//v1/`;
@@ -368,6 +373,12 @@ function formatComposerContextProviderPayload(record: KnownComposerContextRecord
       );
       return lines.join("\n");
     }
+    // Fork (Parked): the item's words are the request; the chip in the text only marks where.
+    case "parked":
+      return [
+        "The user parked this for you earlier and sends it with this message:",
+        record.payload.text,
+      ].join("\n");
     case "environment":
       return [
         `label: ${record.label}`,
@@ -384,8 +395,9 @@ function formatEnvelopeEntry(
 ): string {
   const open = `<${CONTEXT_ENTRY_TAG} kind="${escapeAttribute(kind)}" id="${escapeAttribute(contextId)}"`;
   if (!record) return `${open} unavailable="true"/>`;
+  // Fork (Parked): its record has the unknown-kind shape (`ParkedContextRecord`), yet is known here.
   const body =
-    "payload" in record
+    "payload" in record && !isParkedContextRecord(record)
       ? JSON.stringify(record.payload)
       : formatComposerContextProviderPayload(record);
   return `${open}>\n${escapeComposerContextPayloadText(body)}\n</${CONTEXT_ENTRY_TAG}>`;

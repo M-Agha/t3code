@@ -1,11 +1,18 @@
 import type {
+  ParkedContextRecord,
   ThreadArtifact,
   ThreadDecidedWithoutAsking,
   ThreadDecisionQuestion,
   ThreadDecisionsSnapshot,
   ThreadParkedItem,
+  ThreadParkedKind,
 } from "@t3tools/contracts";
+import { parkKind } from "@t3tools/shared/sessionKit/parks";
 import { answerPart, closingFor, readReply } from "@t3tools/shared/sessionKit/decisions";
+
+import type { ComposerThreadDraftState } from "../../composerDraftStore";
+import { buildDocJson } from "../../composer-rich-text-doc";
+import { collectInlineContextIds } from "../../lib/composerContextReferences";
 
 /** The lines the decision buttons add to the composer; agents read them as ordinary replies. */
 export const decisionMessages = {
@@ -306,6 +313,103 @@ export type ParkedBusy = ReadonlyMap<number, string>;
 
 export const isParkedBusy = (busy: ParkedBusy, item: ThreadParkedItem) =>
   busy.get(item.id) === item.updatedAt;
+
+/** A parked item with its kind read (the snapshot carries a kind word: `ThreadParkedItem`'s `kind`). */
+export type ParkedItem = Omit<ThreadParkedItem, "kind"> & { readonly kind: ThreadParkedKind };
+
+/** The snapshot's items, each kind word read through session-kit's `parkKind`; any other, the person's. */
+export const readParked = (items: ReadonlyArray<ThreadParkedItem>): ReadonlyArray<ParkedItem> =>
+  items.map((item) => ({ ...item, kind: parkKind(item.kind) ?? "me" }));
+
+export type ParkedGroup = "open" | "resolved";
+
+export const parkedGroupOf = (item: ThreadParkedItem | ParkedItem): ParkedGroup =>
+  item.state === "open" ? "open" : "resolved";
+
+/**
+ * The Parked surface's groups, each in the snapshot's order. A row being edited stays in the group it
+ * was in (`pin`), in its place by when it was parked, so a send recorded meanwhile (it turns Sent)
+ * neither remounts nor hides its editor.
+ */
+export const parkedGroups = <Item extends ThreadParkedItem | ParkedItem>(
+  parked: ReadonlyArray<Item>,
+  pin: { readonly id: number; readonly group: ParkedGroup } | null = null,
+) => {
+  const groupOf = (item: Item) => (item.id === pin?.id ? pin.group : parkedGroupOf(item));
+  const placed = (group: ParkedGroup) => {
+    const items = parked.filter((item) => groupOf(item) === group);
+    const pinned = items.find((item) => item.id === pin?.id);
+    if (pinned === undefined || parkedGroupOf(pinned) === group) return items;
+    // Open lists oldest first: the pinned row goes back where it stood.
+    const others = items.filter((item) => item !== pinned);
+    const at = others.findIndex((item) => item.createdAt > pinned.createdAt);
+    return at === -1 ? [...others, pinned] : others.toSpliced(at, 0, pinned);
+  };
+  return { open: placed("open"), resolved: placed("resolved") };
+};
+
+/**
+ * The parked items a composer draft holds as chips (Add to draft): the records whose chips its text
+ * still references, as a send would carry them. In draft is read from here, never stored.
+ */
+export const parkedIdsInDraft = (
+  draft: Pick<ComposerThreadDraftState, "prompt" | "parkedContexts"> | null | undefined,
+): ReadonlyArray<number> => {
+  if (draft == null || draft.parkedContexts.length === 0) return [];
+  const referenced = new Set(collectInlineContextIds(draft.prompt));
+  return draft.parkedContexts
+    .filter((record) => referenced.has(record.contextId))
+    .map((record) => record.payload.itemId);
+};
+
+/**
+ * Whether an undo or redo may bring back a parked chip the draft lost (its record retained by the
+ * composer): only while its item is still open for the agent with the words the chip holds. In a
+ * queued message's edit, whose chips' items that message Sent, a Sent item with the same words counts
+ * too. Otherwise the chip stays out, since nothing rewrites a draft's chips (FORK.md, "Parked items").
+ */
+export const parkedChipRestorable = (
+  record: ParkedContextRecord,
+  items: ReadonlyArray<ParkedItem>,
+  editingQueuedRun: boolean,
+): boolean =>
+  items.some(
+    (item) =>
+      item.id === record.payload.itemId &&
+      (item.state === "open" || (editingQueuedRun && item.state === "sent")) &&
+      item.kind === "agent" &&
+      item.text === record.payload.text,
+  );
+
+/**
+ * Whether `prompt` ends on a line closing a fenced code block, as the composer's document builder reads
+ * it: a chip appended after a space there would join the fence line and reopen the block (Sol round 3,
+ * S4), so Add to draft puts it on a line of its own.
+ */
+export const endsAtClosingFence = (prompt: string): boolean => {
+  const last = buildDocJson(prompt, () => null, { styling: true }).content.at(-1);
+  const attrs = last?.type === "codeBlock" ? last.attrs : null;
+  // An unclosed block has `close: ""`: its fence line is still to come.
+  return typeof attrs === "object" && attrs !== null && "close" in attrs && attrs.close !== "";
+};
+
+/** Where an item stands; null for a plain open item. ThreadParked.tsx words it. */
+export type ParkedStatus = "draft" | "done" | "dropped" | "sent";
+
+export const parkedStatus = (item: ThreadParkedItem, inDraft: boolean): ParkedStatus | null => {
+  switch (item.state) {
+    case "open":
+      return inDraft ? "draft" : null;
+    case "done":
+    case "dropped":
+    case "sent":
+      return item.state;
+  }
+};
+
+/** The time at a row's right: when it was parked, or resolved (Sent: when its message was sent). */
+export const parkedTime = (item: ThreadParkedItem) =>
+  item.state === "open" ? item.createdAt : (item.resolvedAt ?? item.updatedAt);
 
 /** The open item to focus once `leavingId` leaves the list: the next one, else the one before. */
 export const parkedFocusAfter = (

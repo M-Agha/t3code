@@ -40,6 +40,7 @@ it("detects draft edits during upload preparation without treating upload metada
     reviewComments: [],
     threadContexts: [],
     environmentContexts: [],
+    parkedContexts: [],
     replyTo: null,
     modelSelectionByProvider: {},
     activeProvider: null,
@@ -181,7 +182,7 @@ describe("composerParkDecision", () => {
   it("parks the command's items", () => {
     expect(composerParkDecision(send)).toEqual({
       kind: "park",
-      command: { parks: [{ kind: "todo", text: "fix the flaky test" }], placeholders: 0 },
+      command: { parks: [{ kind: "me", text: "fix the flaky test" }], placeholders: 0 },
     });
   });
 

@@ -56,6 +56,11 @@ const DEFINITIONS = [
     kind: "response",
     capabilities: { details: "none", expanded: "inline-block", defaultDraftView: "compact" },
   },
+  // Fork (Parked).
+  {
+    kind: "parked",
+    capabilities: { details: "tooltip", expanded: "none", defaultDraftView: "compact" },
+  },
 ] as const satisfies ReadonlyArray<ContextPresentationDefinition>;
 
 function buildDefinitionRegistry(

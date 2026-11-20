@@ -22,6 +22,9 @@ interface NativeProps {
   readonly ref?: Ref<unknown>;
   readonly controlledDocumentJson: string;
   readonly onComposerChange: (event: { readonly nativeEvent: NativeEvent }) => void;
+  readonly onComposerPasteContext: (event: {
+    readonly nativeEvent: NativeEvent & { text: string; fragment: string; html: string };
+  }) => void;
 }
 
 // Mirrors the iOS editor's revision and reset bookkeeping (T3ComposerEditorView.setControlledDocumentJson).
@@ -149,6 +152,9 @@ import {
 } from "../state/use-composer-drafts";
 import { ComposerEditor } from "./ComposerEditor";
 import type { ComposerEditorHandle } from "../native/T3ComposerEditor.types";
+import { importComposerContextClipboard } from "../lib/composerContextClipboard";
+import { settlePromise } from "@t3tools/client-runtime/state/runtime";
+import { AsyncResult } from "effect/reactivity";
 
 const DRAFT_KEY = "environment:thread";
 
@@ -277,4 +283,32 @@ it("does not flush past a paste whose event has not reached JS", async () => {
   expect(getComposerDraftSnapshot(DRAFT_KEY).text).toBe("Before pasted");
   await act(async () => native.deliver!(caretMove));
   expect(getComposerDraftSnapshot(DRAFT_KEY).text).toBe("Before pasted");
+});
+
+// Fork (Parked): Sol round 3, S5. A pasted parked chip brings no record and is dropped; a paste of chips
+// alone then holds nothing, and must not replace the selection (nor release what it holds).
+it("ignores a paste of parked chips alone, keeping the selection it would have replaced", async () => {
+  await using _screen = await renderFlushableComposer();
+  await act(async () => emit("Keep this text"));
+  vi.mocked(settlePromise).mockImplementation(async (run: () => Promise<unknown>) => {
+    await run();
+    return AsyncResult.success(undefined);
+  });
+  vi.mocked(importComposerContextClipboard).mockResolvedValue(null);
+  native.eventCount += 1;
+  await act(async () =>
+    native.props!.onComposerPasteContext({
+      nativeEvent: {
+        value: "Keep this text",
+        selection: { start: 0, end: 4 },
+        eventCount: native.eventCount,
+        resetGeneration: native.resetGeneration,
+        text: " [Add a doctor check](t3-context://v1/parked/parked_7) ",
+        fragment: "",
+        html: "",
+      },
+    }),
+  );
+  expect(getComposerDraftSnapshot(DRAFT_KEY).text).toBe("Keep this text");
+  expect(importComposerContextClipboard).not.toHaveBeenCalled();
 });
