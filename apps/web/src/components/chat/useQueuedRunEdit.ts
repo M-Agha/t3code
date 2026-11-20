@@ -14,6 +14,7 @@ import {
   type ChatAttachment,
   type ComposerContextRecord,
   type EnvironmentContextRecord,
+  type ParkedContextRecord,
   type ResponseContextRecord,
   type EnvironmentId,
   type MessageId,
@@ -101,11 +102,12 @@ interface QueuedRunEditContent {
   readonly previewAnnotations: ReadonlyArray<PreviewAnnotationPayload>;
   readonly threadContexts: ReadonlyArray<ThreadContextRecord>;
   readonly environmentContexts: ReadonlyArray<EnvironmentContextRecord>;
+  readonly parkedContexts: ReadonlyArray<ParkedContextRecord>;
   readonly replyTo?: ResponseContextRecord | null;
 }
 
 const isDraftOwnedRecord = (record: ComposerContextRecord) =>
-  record.kind === "thread" || record.kind === "environment";
+  record.kind === "thread" || record.kind === "environment" || record.kind === "parked";
 
 async function submitQueuedRunEdit(input: {
   readonly environmentId: EnvironmentId;
@@ -149,7 +151,8 @@ async function submitQueuedRunEdit(input: {
     });
     if (input.draftChanged())
       return m(msg("Draft changed while preparing this message. Review it and save again."));
-    // The edit draft owns thread and machine mentions, so a chip removed while editing is dropped.
+    // The edit draft owns thread and machine mentions (and the fork's parked items), so a chip
+    // removed while editing is dropped.
     const keptRecords = (editing.context?.records ?? []).filter(
       (record) =>
         !isDraftOwnedRecord(record) &&
@@ -165,6 +168,7 @@ async function submitQueuedRunEdit(input: {
         previewAnnotations: content.previewAnnotations,
         threadContexts: content.threadContexts,
         environmentContexts: content.environmentContexts,
+        parkedContexts: content.parkedContexts,
         replyTo: content.replyTo ?? null,
         attachments: newAttachments.map((attachment, index) => ({
           attachment,
@@ -301,6 +305,10 @@ export function useQueuedRunEdit(input: {
     store.setEnvironmentContexts(
       target,
       records.filter((record): record is EnvironmentContextRecord => record.kind === "environment"),
+    );
+    store.setParkedContexts(
+      target,
+      records.filter((record): record is ParkedContextRecord => record.kind === "parked"),
     );
     if (reply) store.setReplyTo(target, reply);
     const threadRef = { environmentId, threadId: activeThreadId };

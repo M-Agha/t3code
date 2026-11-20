@@ -1,11 +1,13 @@
-/* oxlint-disable t3code/no-untranslated-copy -- Fork-only English copy: upstream's translation catalogs have no entries for it, so wrapping it would change nothing on screen. FORK.md, "Translation". */
+/* oxlint-disable t3code/no-untranslated-copy -- Fork-only English copy: upstream's translation catalogs have no entries for it, so wrapping it would change nothing on screen. Copy they do hold goes through gt() or <T>. FORK.md, "Translation". */
 import {
   MessageId,
+  type ParkedContextRecord,
   type ScopedThreadRef,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   type ThreadDecidedWithoutAsking,
   type ThreadDecisionQuestion,
   type ThreadDecisionsSnapshot,
+  type ThreadParkedItem,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -13,12 +15,13 @@ import {
   ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
-  type LucideIcon,
   MessageCircleQuestionIcon,
   PanelRightIcon,
   PencilLineIcon,
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
+import { T, useGT } from "gt-react";
+import { useShallow } from "zustand/react/shallow";
 import {
   createContext,
   Fragment,
@@ -33,6 +36,8 @@ import {
 
 import { collapseExpandedComposerCursor } from "~/composer-logic";
 import { assistantCitationNavigation } from "~/lib/assistantCitationNavigation";
+import { parkedContextRecord, parkedContextReference } from "~/lib/composerContextRecords";
+import { formatInlineContextReference } from "~/lib/composerContextReferences";
 import { readThreadShell } from "~/state/entities";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { useStableCallback } from "~/hooks/useStableCallback";
@@ -67,13 +72,17 @@ import {
   draftLineOf,
   DRAFT_PLAIN_TEXT,
   draftSummary,
+  endsAtClosingFence,
   groupSelection,
   latestReplyOpenQuestions,
   lineEnd,
   nextUndrafted,
   openQuestions,
   openQuestionsByReply,
+  parkedChipRestorable,
+  parkedIdsInDraft,
   plural,
+  readParked,
   resolvedQuestions,
   unfinishedLabels,
   vetoInDraft,
@@ -83,8 +92,6 @@ import {
 /** How the decision buttons reach the thread: an ordinary message, or a line added to the composer. */
 export interface ThreadDecisionActions {
   readonly canOperate: boolean;
-  /** Resolves true once the message was sent or queued; failures are reported to the user. */
-  readonly send: (text: string) => Promise<boolean>;
   /**
    * True once the composer took the text; failures are reported to the user. The composer takes
    * focus unless `focus` is false (the Tracker keeps it, so rows can be answered one after another).
@@ -106,8 +113,20 @@ export interface ThreadDecisionActions {
    * draft: the Tracker's line edits and Send draft wait.
    */
   readonly answeringPendingInput: boolean;
+  /**
+   * The composer edits a queued message, so a chip added now would change that message rather than
+   * the draft: Parked's Add to draft waits, as `/park` does.
+   */
+  readonly editingQueuedRun: boolean;
   /** The open questions the composer's draft already closes, and how. */
   readonly inDraft: Readonly<Record<string, DraftChoice>>;
+  /** Parked items as chips in the composer's draft (Add to draft): `useParkedDraft`. */
+  readonly parked: {
+    /** The items whose chips the thread's draft, or a queued message's open edit, holds: In draft. */
+    readonly inDraft: ReadonlyArray<number>;
+    /** Adds the item's chip at the draft's end without moving focus; true once the composer took it. */
+    readonly attach: (item: { readonly id: number; readonly text: string }) => boolean;
+  };
 }
 
 export function useThreadDecisions(
@@ -137,6 +156,7 @@ export function useDraftActions(input: {
   readonly draftTarget: ChatComposerProps["composerDraftTarget"];
 }): Pick<ThreadDecisionActions, "sendDraft" | "focusLine" | "removeLine"> {
   const { composerRef, promptRef, sendingRef, draftTarget } = input;
+  const gt = useGT();
   const sendDraft = useStableCallback(async () => {
     const composer = composerRef.current;
     if (composer === null) return false;
@@ -146,7 +166,7 @@ export function useDraftActions(input: {
     if (submitted === "blocked") {
       toastManager.add({
         type: "warning",
-        title: "Not sent",
+        title: gt("Not sent"),
         description: "The composer cannot send right now, so your draft is as it was.",
       });
     }
@@ -178,6 +198,69 @@ export function useDraftActions(input: {
     composerRef.current?.resetCursorState({ prompt: next, cursor: next.length });
   });
   return { sendDraft, focusLine, removeLine };
+}
+
+/**
+ * Fork (Parked): the composer's side of Parked: Add to draft, In draft, and the undo gate's item check
+ * (ChatComposer's `parkedChipRestorable`). FORK.md, "Parked items".
+ */
+export function useParkedDraft(input: {
+  readonly composerRef: RefObject<ChatComposerHandle | null>;
+  readonly threadRef: ScopedThreadRef | null;
+  /** The draft the composer shows: a queued message's edit while one is open. */
+  readonly draftTarget: ChatComposerProps["composerDraftTarget"];
+  /** The thread's own draft. */
+  readonly threadDraftTarget: ChatComposerProps["composerDraftTarget"];
+  readonly editingQueuedRun: boolean;
+  readonly parked: ReadonlyArray<ThreadParkedItem> | undefined;
+}): {
+  readonly actions: ThreadDecisionActions["parked"];
+  readonly chipRestorable: (record: ParkedContextRecord) => boolean;
+} {
+  const { composerRef, threadRef, draftTarget, threadDraftTarget } = input;
+  const gt = useGT();
+  // Add to draft puts the item's chip at the draft's end, as a dropped pull request goes in: its
+  // record, which a send carries to the agent, then the text. Focus stays put, so several items can go
+  // in one message. While the chip is there the item is locked (ThreadParked.tsx), so nothing
+  // rewrites it.
+  const attach = useStableCallback((item: { readonly id: number; readonly text: string }) => {
+    // The Parked tab lists the active thread's items, so it has one.
+    if (threadRef === null) return false;
+    const record = parkedContextRecord(item, threadRef.threadId);
+    const chip = `${formatInlineContextReference(parkedContextReference(record))} `;
+    const store = useComposerDraftStore.getState();
+    const draft = store.getComposerDraft(draftTarget);
+    const held = draft?.parkedContexts ?? [];
+    // After a closing code fence, a space would put the chip on the fence line (Sol round 3, S4).
+    const ownLine = endsAtClosingFence(draft?.prompt ?? "");
+    store.addParkedContexts(draftTarget, [record]);
+    const inserted = composerRef.current?.insertTextAtEnd(ownLine ? `\n${chip}` : chip, {
+      ensureLeadingBoundary: !ownLine,
+      focus: false,
+    });
+    if (inserted === true) return true;
+    store.setParkedContexts(draftTarget, held);
+    toastManager.add({
+      type: "error",
+      title: gt("Unable to add to chat"),
+      description: gt("The composer is busy; try again once it is ready."),
+    });
+    return false;
+  });
+  // A chip in the thread's draft or in an open queued message's edit locks its item (R3): either
+  // would send the words it holds.
+  const inDraft = useComposerDraftStore(
+    useShallow((store) => [
+      ...new Set([
+        ...parkedIdsInDraft(store.getComposerDraft(threadDraftTarget)),
+        ...parkedIdsInDraft(store.getComposerDraft(draftTarget)),
+      ]),
+    ]),
+  );
+  const chipRestorable = useStableCallback((record: ParkedContextRecord) =>
+    parkedChipRestorable(record, readParked(input.parked ?? []), input.editingQueuedRun),
+  );
+  return { actions: { inDraft, attach }, chipRestorable };
 }
 
 const OPTION_ROW =
@@ -232,6 +315,7 @@ function QuestionPanel(props: {
   readonly cwd: string | undefined;
 }) {
   const { questions, actions } = props;
+  const gt = useGT();
   // By label, never index: answered questions leave the list as the snapshot updates.
   const [currentLabel, setCurrentLabel] = useState(props.questions[0].label);
   const [collapsed, setCollapsed] = useState(false);
@@ -313,7 +397,7 @@ function QuestionPanel(props: {
               <Button
                 size="icon-xs"
                 variant="ghost"
-                aria-label="Previous question"
+                aria-label={gt("Previous question")}
                 disabled={index === 0}
                 onClick={() => goTo(index - 1)}
               >
@@ -325,7 +409,7 @@ function QuestionPanel(props: {
               <Button
                 size="icon-xs"
                 variant="ghost"
-                aria-label="Next question"
+                aria-label={gt("Next question")}
                 disabled={index === questions.length - 1}
                 onClick={() => goTo(index + 1)}
               >
@@ -439,32 +523,10 @@ export function threadDecisionsBannerItem(input: {
   };
 }
 
-export function SectionHeading(props: {
-  readonly children: React.ReactNode;
-  readonly at?: string;
-}) {
-  return (
-    <h3 className="flex items-baseline justify-between gap-2 px-1 pt-3 pb-1 text-xs font-medium text-muted-foreground">
-      <span>{props.children}</span>
-      {props.at === undefined ? null : (
-        <span className="text-2xs font-normal">
-          <RelativeTime timestamp={props.at} />
-        </span>
-      )}
-    </h3>
-  );
-}
-
-export function EmptyState(props: {
-  readonly title: string;
-  readonly description: string;
-  /** The surface's own icon, as its strip tab shows it. */
-  readonly icon?: LucideIcon;
-}) {
-  const Icon = props.icon ?? MessageCircleQuestionIcon;
+function EmptyState(props: { readonly title: string; readonly description: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-2 p-6 text-center">
-      <Icon aria-hidden className="size-6 text-muted-foreground/60" />
+      <MessageCircleQuestionIcon aria-hidden className="size-6 text-muted-foreground/60" />
       <p className="text-sm font-medium">{props.title}</p>
       <p className="max-w-64 text-xs text-muted-foreground">{props.description}</p>
     </div>
@@ -693,7 +755,8 @@ function QuestionRow(props: {
                   aria-label={`Edit ${question.label}'s line in the composer`}
                   onClick={() => actions.focusLine(line.line)}
                 >
-                  Edit
+                  {/* The catalogs hold "Edit", "Remove" and "Review" as JSX only, so <T>, not gt(). */}
+                  <T>Edit</T>
                 </Button>
                 <Button
                   size="xs"
@@ -705,7 +768,7 @@ function QuestionRow(props: {
                     focusAfter({ row: question.label, controls: ["accept", "answer"] });
                   }}
                 >
-                  Remove
+                  <T>Remove</T>
                 </Button>
               </>
             ) : (
@@ -917,6 +980,7 @@ function QuestionsTab(props: {
   readonly selecting: boolean;
   readonly onSelecting: (selecting: boolean) => void;
 }) {
+  const gt = useGT();
   const { actions, selecting } = props;
   const showReply = useShowReply(props.threadRef);
   const focusAfter = useContext(FocusAfterContext);
@@ -962,7 +1026,7 @@ function QuestionsTab(props: {
             <Dot />
             <span className="min-w-0 truncate">questions in your draft can't be selected</span>
             <Button size="xs" variant="ghost" className="ms-auto" onClick={stopSelecting}>
-              Done
+              {gt("Done")}
             </Button>
           </>
         ) : (
@@ -982,7 +1046,7 @@ function QuestionsTab(props: {
               data-tracker-control="select"
               onClick={() => props.onSelecting(true)}
             >
-              Select
+              {gt("Select")}
             </Button>
           </>
         )}
@@ -1111,6 +1175,7 @@ const REOPEN_UNDO_MS = 8_000;
  * held goes ahead, since the user asked for it.
  */
 function useReopenWithUndo() {
+  const gt = useGT();
   const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
   const held = useRef(new Map<string, { readonly toastId: string; readonly run: () => void }>());
   // Held, or sent and not yet failed. A sent reopen leaves its row once the snapshot shows the
@@ -1177,7 +1242,7 @@ function useReopenWithUndo() {
       description: "It goes back to Questions.",
       timeout: REOPEN_UNDO_MS,
       onRemove: goAhead,
-      actionProps: { children: "Undo", onClick: undo },
+      actionProps: { children: gt("Undo"), onClick: undo },
       data: { onClose: undo },
     });
     held.current.set(key, { toastId, run });
@@ -1199,6 +1264,7 @@ function ResolvedRow(props: {
   readonly onReopen: () => void;
 }) {
   const { question } = props;
+  const gt = useGT();
   const answered = question.state === "answered";
   const departed =
     answered &&
@@ -1220,7 +1286,7 @@ function ResolvedRow(props: {
           aria-label={`Reopen ${question.label}`}
           onClick={props.onReopen}
         >
-          {props.reopening ? "Reopening…" : "Reopen"}
+          {props.reopening ? "Reopening…" : gt("Reopen")}
         </Button>
       </div>
       <ChatMarkdown
@@ -1281,7 +1347,7 @@ function UnaskedRow(props: {
                 focusAfter({ row, controls: ["veto"] });
               }}
             >
-              Remove
+              <T>Remove</T>
             </Button>
           </div>
         ) : null}
@@ -1428,7 +1494,7 @@ function DraftBar(props: {
       <Dot />
       <span className="min-w-0 truncate">{summary}</span>
       <Button size="xs" variant="ghost" className="ms-auto" onClick={() => actions.focusLine(null)}>
-        Review
+        <T>Review</T>
       </Button>
       <Button
         size="xs"

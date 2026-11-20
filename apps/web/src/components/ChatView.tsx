@@ -356,10 +356,11 @@ import {
   type ThreadDecisionActions,
   threadDecisionsBannerItem,
   useDraftActions,
+  useParkedDraft,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { asDraftLine, questionsClosedByDraft } from "./chat/threadDecisions.logic";
-import type { ParkCommand } from "@t3tools/shared/sessionKit/parks";
+import { OLDER_KIND_WORD, type ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
@@ -2020,18 +2021,6 @@ export default function ChatView(props: ChatViewProps) {
     }
   };
   const sendAppMessageStable = useStableCallback(sendAppMessage);
-  const sendDecisionMessage = (text: string) =>
-    sendAppMessage(text).then(
-      () => true,
-      (error: unknown) => {
-        toastManager.add({
-          type: "error",
-          title: gt("Could not send the message"),
-          description: error instanceof Error ? error.message : String(error),
-        });
-        return false;
-      },
-    );
   const parkThreadItems = useAtomCommand(serverEnvironment.parkThreadItems, {
     reportFailure: true,
   });
@@ -2041,9 +2030,13 @@ export default function ChatView(props: ChatViewProps) {
       useRightPanelStore.getState().open(activeThreadRef, "parked");
       return true;
     }
+    // In the older words, which a server from before the rename takes too.
     const result = await parkThreadItems({
       environmentId: activeThreadRef.environmentId,
-      input: { threadId: activeThreadRef.threadId, items: parks },
+      input: {
+        threadId: activeThreadRef.threadId,
+        items: parks.map((park) => ({ kind: OLDER_KIND_WORD[park.kind], text: park.text })),
+      },
     });
     if (result._tag !== "Success") return false;
     toastManager.add({
@@ -2074,6 +2067,14 @@ export default function ChatView(props: ChatViewProps) {
   const insertDecisionTextStable = useStableCallback(insertDecisionText);
   const parkFromComposerStable = useStableCallback(parkFromComposer);
   const threadDecisions = useThreadDecisions(isServerThread ? activeThreadRef : null);
+  const parkedDraft = useParkedDraft({
+    composerRef,
+    threadRef: activeThreadRef,
+    draftTarget: composerDraftTarget,
+    threadDraftTarget: baseComposerDraftTarget,
+    editingQueuedRun: queuedRunEdit.isEditing,
+    parked: threadDecisions?.parked,
+  });
   // The strip's Parked and Artifacts tabs count what their surface lists (open items, every row).
   const trackerSurfaceCounts = {
     parked: threadDecisions?.parkedOpenCount ?? 0,
@@ -2081,7 +2082,6 @@ export default function ChatView(props: ChatViewProps) {
   };
   const decisionActions: ThreadDecisionActions = {
     canOperate: canOperateThread && isServerThread,
-    send: useStableCallback(sendDecisionMessage),
     insert: insertDecisionTextStable,
     ...useDraftActions({
       composerRef,
@@ -2093,6 +2093,7 @@ export default function ChatView(props: ChatViewProps) {
       (store) => store.getComposerDraft(composerDraftTarget)?.prompt ?? "",
     ),
     answeringPendingInput: activePendingUserInput !== null,
+    editingQueuedRun: queuedRunEdit.isEditing,
     inDraft: useComposerDraftStore(
       useShallow((store) =>
         questionsClosedByDraft(
@@ -2101,6 +2102,7 @@ export default function ChatView(props: ChatViewProps) {
         ),
       ),
     ),
+    parked: parkedDraft.actions,
   };
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
@@ -3929,6 +3931,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onMultipleModelSelectionsChange={setMultipleModelSelectionsStable}
                                 composerRef={composerRef}
                                 composerDraftTarget={composerDraftTarget}
+                                parkedChipRestorable={parkedDraft.chipRestorable}
                                 environmentId={environmentId}
                                 attachmentUploadsCapabilityKnown={attachmentUploadsCapabilityKnown}
                                 supportsAttachmentUploads={supportsAttachmentUploads}
