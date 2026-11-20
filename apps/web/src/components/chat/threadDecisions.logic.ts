@@ -411,14 +411,20 @@ export const parkedStatus = (item: ThreadParkedItem, inDraft: boolean): ParkedSt
 export const parkedTime = (item: ThreadParkedItem) =>
   item.state === "open" ? item.createdAt : (item.resolvedAt ?? item.updatedAt);
 
-/** The open item to focus once `leavingId` leaves the list: the next one, else the one before. */
-export const parkedFocusAfter = (
-  openIds: ReadonlyArray<number>,
-  leavingId: number,
-): number | null => {
-  const index = openIds.indexOf(leavingId);
+/**
+ * The row to focus once `leaving` leaves a list (Parked's open items, Artifacts' rows): in `order`, the
+ * rows as they showed when the user acted, the next one still `shown`, else the nearest before it.
+ * A neighbour another client took out meanwhile is passed over.
+ */
+export const rowFocusAfter = <Id>(
+  order: ReadonlyArray<Id>,
+  leaving: Id,
+  shown: ReadonlyArray<Id>,
+): Id | null => {
+  const index = order.indexOf(leaving);
   if (index === -1) return null;
-  return openIds[index + 1] ?? openIds[index - 1] ?? null;
+  const still = (id: Id) => shown.includes(id);
+  return order.slice(index + 1).find(still) ?? order.slice(0, index).reverse().find(still) ?? null;
 };
 
 /**

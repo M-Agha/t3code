@@ -127,6 +127,8 @@ export interface ThreadDecisionActions {
     /** Adds the item's chip at the draft's end without moving focus; true once the composer took it. */
     readonly attach: (item: { readonly id: number; readonly text: string }) => boolean;
   };
+  /** Reopen, held for its Undo by ChatView (`useReopenWithUndo`), which outlives the panel. */
+  readonly reopen: ReopenWithUndo;
 }
 
 export function useThreadDecisions(
@@ -1171,10 +1173,11 @@ const REOPEN_UNDO_MS = 8_000;
 
 /**
  * Reopen, held back while its toast offers Undo; the only Tracker action that skips the draft. Held
- * by the panel, so a tab switch keeps the toast's Undo working; when the panel goes, what is still
- * held goes ahead, since the user asked for it.
+ * by ChatView rather than the panel, so a switch to another tab or surface (Parked, Artifacts), which
+ * unmounts the panel, keeps the toast's Undo working; when the chat view goes, what is still held
+ * goes ahead, since the user asked for it.
  */
-function useReopenWithUndo() {
+export function useReopenWithUndo() {
   const gt = useGT();
   const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
   const held = useRef(new Map<string, { readonly toastId: string; readonly run: () => void }>());
@@ -1194,7 +1197,7 @@ function useReopenWithUndo() {
     toastManager.close(entry.toastId);
     return entry;
   };
-  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the reopens still held when the panel unmounts or the page goes
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- sends the reopens still held when the chat view unmounts or the page goes
   useEffect(() => {
     const entries = held.current;
     // A paused toast can wait indefinitely, so a reload or quit sends what it holds (best effort).
@@ -1255,7 +1258,7 @@ function useReopenWithUndo() {
   };
 }
 
-type ReopenWithUndo = ReturnType<typeof useReopenWithUndo>;
+export type ReopenWithUndo = ReturnType<typeof useReopenWithUndo>;
 
 function ResolvedRow(props: {
   readonly question: ThreadDecisionQuestion;
@@ -1530,7 +1533,7 @@ export function ThreadDecisionsPanel(props: {
   const snapshot = useThreadDecisions(props.threadRef);
   const { tab, setTab } = useDecisionsPanelTab();
   const [selecting, setSelecting] = useState(false);
-  const reopen = useReopenWithUndo();
+  const { reopen } = actions;
   const panelRef = useRef<HTMLDivElement>(null);
   const focusAfter = useFocusAfter(panelRef);
   const counts = {

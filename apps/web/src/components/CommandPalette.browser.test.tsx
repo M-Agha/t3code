@@ -17,6 +17,8 @@ const entities = vi.hoisted(() => ({
   threads: [] as ReadonlyArray<Thread>,
   delegatedUnderParent: new Set<string>() as ReadonlySet<string>,
   handleNewThread: vi.fn(async () => undefined),
+  // The routed thread; undefined leaves the hook's own.
+  activeThread: undefined as Thread | undefined,
 }));
 vi.mock("../state/server", async (original) => {
   const actual = await original<typeof import("../state/server")>();
@@ -36,10 +38,14 @@ vi.mock("../hooks/useHandleNewThread", async (original) => {
   const actual = await original<typeof import("../hooks/useHandleNewThread")>();
   return {
     ...actual,
-    useHandleNewThread: () => ({
-      ...actual.useHandleNewThread(),
-      handleNewThread: entities.handleNewThread,
-    }),
+    useHandleNewThread: () => {
+      const hook = actual.useHandleNewThread();
+      return {
+        ...hook,
+        activeThread: entities.activeThread ?? hook.activeThread,
+        handleNewThread: entities.handleNewThread,
+      };
+    },
   };
 });
 vi.mock("../state/entities", async (original) => ({
@@ -57,6 +63,7 @@ function setup(state: Partial<typeof entities> = {}) {
   entities.projects = state.projects ?? [];
   entities.threads = state.threads ?? [];
   entities.delegatedUnderParent = state.delegatedUnderParent ?? new Set();
+  entities.activeThread = state.activeThread;
   entities.handleNewThread.mockClear();
 }
 
@@ -246,6 +253,35 @@ describe("CommandPalette open intents", () => {
     await page.getByRole("option", { name: /Acme/ }).first().click();
 
     await vi.waitFor(() => expect(screen.router?.state.location.pathname).toBe("/local/parent"));
+  });
+
+  it.each([
+    ["the main thread", false],
+    ["a side chat", true],
+  ] as const)("offers Show parked items for %s only if it can park", async (_name, sideChat) => {
+    const parentId = ThreadId.make("palette-parent");
+    const thread = makeThreadFixture({
+      id: ThreadId.make(sideChat ? "palette-side-chat" : "palette-main"),
+      ...(sideChat
+        ? {
+            lineage: {
+              rootThreadId: parentId,
+              parentThreadId: parentId,
+              relationshipToParent: "fork" as const,
+              sideChat: true,
+            },
+          }
+        : {}),
+    });
+    setup({ threads: [thread], activeThread: thread });
+    await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
+
+    openCommandPalette({ query: "show" });
+    // The thread's other panel actions are offered either way.
+    await expect.element(page.getByRole("option", { name: /Show artifacts/ })).toBeVisible();
+    const parked = page.getByRole("option", { name: /Show parked items/ });
+    if (sideChat) await expect.element(parked).not.toBeInTheDocument();
+    else await expect.element(parked).toBeVisible();
   });
 
   it("numbers filtered New thread in... rows from 1 and jumps to them", async () => {

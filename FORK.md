@@ -51,6 +51,7 @@ reasons are the ones they accepted.
 | `(fork) parked: items are for the agent or for you, and go in the draft as chips that mark them sent` | Parked items                  |
 | `(fork) service: fork builds seed the t3 runtime that t3 service install pins`                        | Background service            |
 | `(fork) upstream-sync: a rerunnable plan, rebase and verify for moving onto a newer upstream`         | Rebasing onto upstream        |
+| `(fork) tracker: the startup sweep keeps what the user made, and artifacts are read in time order`    | Artifacts                     |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -163,11 +164,11 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   tab and in the tab's accessible name (open parked items; every artifact row): `surfaceCounts` on
   `RightPanelTabs`, filled by ChatView from the snapshot. Their add-panel letters are K (Parked) and
   A (Artifacts), their icons the palette's `ArchiveIcon` and `ShapesIcon`; a bare `/park` and the
-  palette's "Show parked items" / "Show artifacts" open them. `decisions.toggle` still toggles the
-  Tracker alone. Its user-visible name is Tracker everywhere (its tab, both add-panel menus, the command palette's "Show
-  Tracker", the keybinding's "Tracker: Toggle" in `KeybindingsSettings.logic.ts`'s
-  `LATE_COMMAND_LABELS`, the panel header's Open Tracker); the tabs keep their
-  names. Its ids stay `decisions` (the surface kind and id in `rightPanelStore.ts` and
+  palette's "Show parked items" (not in a side chat) / "Show artifacts" open them. `decisions.toggle`
+  still toggles the Tracker alone. Its user-visible name is Tracker everywhere (its tab, both
+  add-panel menus, the command palette's "Show Tracker", the keybinding's "Tracker: Toggle" in
+  `KeybindingsSettings.logic.ts`'s `LATE_COMMAND_LABELS`, the panel header's Open Tracker); the tabs
+  keep their names. Its ids stay `decisions` (the surface kind and id in `rightPanelStore.ts` and
   `closedViewStore.ts`, the `decisions.toggle` command, `decisionsPanelTabStore.ts`): persisted panel
   state, reopenable closed tabs and saved keybindings name them. (2026-11-17: the owner's Q31 renamed
   it from "Decisions".) Its look is the owner's approved final design (Q36, 2026-11-17; boards and
@@ -219,7 +220,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     that line (lines read trimmed, as the panel reads its draft; one read of the thread's messages
     with a `Veto: ` line, matched in TypeScript), and a message with a `Veto: ` line publishes a snapshot even when it closes no
     question. (A client-side check would miss messages the timeline has not loaded.) Then Answered
-    (green chip) and Not a decision (grey chip), each with "You" and the question's own part of the
+    (accent chip) and Not a decision (muted chip), each with "You" and the question's own part of the
     answer (`answerPart` in `packages/shared/src/sessionKit/decisions.ts`, derived on the server from
     the full message: from the label to the next label that opens an answer, the whole message when
     the label is not named), "Pick was: …" when that part's first line does not read as the Accept
@@ -230,8 +231,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     reaches it while it fades still counts; each toast acts on its own hold only, so a toast still
     fading after Undo cannot send a newer Reopen of the same row. Undo and the ✕ cancel; Escape and a
     swipe close the toast like its timer, so they send it (Base UI reports them as an ordinary
-    close). Closing the panel, leaving the thread, or the page going away (`pagehide`, best effort)
-    sends what is still held. It is the only Tracker action that skips the draft; the row's Reopen
+    close). ChatView holds it (`useReopenWithUndo`, passed in the Tracker's actions), not the panel,
+    so switching to Parked or Artifacts, which unmounts the panel, keeps the Undo (Astra on #7); the
+    hold names its thread, so its toast reopens that one after a thread switch too. ChatView
+    unmounting or the page going away (`pagehide`, best effort) sends what is still held. It is the only Tracker action that skips the draft; the row's Reopen
     stays disabled while held or sent, until the snapshot moves the question back. No bulk Reopen.
     (2026-11-17: a window timer that ignored hover, and a ✕ that committed, reopened a question the
     owner had undone.)
@@ -245,8 +248,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     action) role, `--tracker-pick` the update role's foreground, `--tracker-agent` the warning role's
     foreground. Primary is a button fill no theme solves against the panel, so `--tracker-draft` is
     mixed a fifth toward the foreground in both modes (5.0:1 or more on the default theme; a custom
-    theme with a pale message action can still fall short). Reopen's toast takes no `type`, since
-    the info icon is fixed blue. On the default theme
+    theme with a pale message action can still fall short). Reopen's toast and `/park`'s (Parked,
+    and Left out a placeholder) take no `type`, since the info icon is fixed blue and the success
+    icon fixed green. On the default theme
     the draft and the pick are both blue, since its update role is its primary; each colour sits
     beside a word. Parked's kind icons use the update and warning roles' foregrounds, each beside its
     words.
@@ -274,7 +278,12 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `readParks`/`isPlaceholder`, so the syntax matches session-kit's `/board`: `agent` and `me`, the
   old words still accepted, and a bare `agent` or `me` names a kind only on the first line (after it,
   `agent:`), since those words start lines of prose. It is refused while editing a queued message,
-  with attachments, on an unstarted thread, and on mobile. A bare `/park` opens the Parked surface.
+  with attachments, on an unstarted thread, on mobile, and in a side chat, in its pane or at its
+  own URL: a side chat never holds parks, as `t3_park` and the server refuse it (Astra on #7; in its
+  pane the panel is its parent's, `hostRightPanel`, so a bare `/park` would open the parent's). The
+  menu leaves `/park` out there too, and at its own URL the panel offers no Parked tab. The composer's
+  refusal only saves a round trip: `ThreadDecisions.park` refuses a side chat for every caller (the
+  Parked tab's field, `t3_park`, any client). A bare `/park` opens the Parked surface.
 - `t3_park` in the thread MCP toolkit, for every provider: its `kind` takes `agent` or `me`, and the
   old words, which `ThreadDecisions.ts` maps when it stores the row (`PARK_KIND_OF_WORD` in
   `packages/shared/src/sessionKit/parks.ts`, a total record that `parks.test.ts` holds equal to
@@ -282,9 +291,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `parkKind` too, so it stays listed. Its description was cut to keep the tool list within
   `fork/main`'s agent context budget (`agentContextBudget.json`). The "Agent context budget" CI check
   compares with the repo's `main`, an older upstream, and fails for every fork PR without its
-  `agent-context-increase` label. It refuses delegated child threads and placeholder
-  text. Its eval cases (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with `--dry-run`; a
-  real run is owed.
+  `agent-context-increase` label. It refuses delegated child threads itself, and passes on
+  `ThreadDecisions.park`'s refusals as `invalid_request`: a side chat (`SIDE_CHAT_PARK_MESSAGE`, the
+  one rule, as `/park`) and placeholder text. Its eval cases
+  (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with `--dry-run`; a real run is owed.
 - **Add to draft and Sent** (MAIN-75, the owner's Q55 design, 2026-11-20):
   - **A chip.** Add to draft (an open item for the agent) puts the item in the composer as a chip of
     the fork's composer-context kind `parked` (`ParkedContextRecord` in
@@ -447,8 +457,9 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   an Add to draft button (gone once In draft) and "…" (Add to draft, Edit, Mark done, Move to For me,
   Copy text, Drop); one for me "…" without the draft; a resolved one (Done, Dropped, Sent) Reopen and
   Copy text. Drop is not styled destructive: Reopen undoes it. Edit is inline; Escape or Save
-  returns focus to the row's "…". When an open item leaves, focus goes to the next row (else the one
-  before), else to the surface itself, never to the finished item's Reopen. When a row keeps its
+  returns focus to the row's "…". When an open item leaves, focus goes to the next row still open
+  (else the nearest before; one another client resolved meanwhile is passed over, `rowFocusAfter`),
+  else to the surface itself, never to the finished item's Reopen. When a row keeps its
   place in the list but loses the focused control (its chip goes in the draft and Add to draft goes;
   a row moves to another group and remounts: Reopen, Sent), focus goes to that row's first control,
   the "…" once In draft; only while focus fell to the page, and not once the user moved it out of
@@ -466,7 +477,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   (placeholders) show under it as an alert. A park in flight clears the field only if it still holds
   what was parked. The Send button and the old cards are gone.
 - The startup sweep deletes parked rows and their `fork_thread_parked_set_aside` only for
-  soft-deleted threads: unlike questions, they cannot be rebuilt.
+  soft-deleted threads: unlike questions, they cannot be rebuilt. Artifacts' rows and watermark
+  follow the same rule (see Artifacts).
 
 ### Artifacts
 
@@ -481,17 +493,28 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 - One row per artifact: first-seen kept, title and time from the latest publish. A publish wins
   over a mention or a manual link, and a `code/artifact/` row folds into the publish naming its
   uuid, keeping the user's title when the publish names none. A type, once a publish names it, stays
-  when a later publish names none. A reply's link to an Artifact type itself (a core type URL, or one
+  when a later publish names none, and an older call naming it still types the row (migration 006's
+  replay meets rows a later untyped publish already dated). A reply's link to an Artifact type itself (a core type URL, or one
   in `fork_artifact_type_names`) is not shown as an artifact, nor counted. Ceiling: a not-found read
   by `code/artifact/<uuid>` misses a row only ever created, since a create's output carries no uuid.
   Its own watermarks, the tool one advancing over every `dynamic_tool` row so threads are not
-  re-parsed.
+  re-parsed. Calls and reply links are read in one time order (a call first at the same time), and a
+  reply still streaming holds the calls after it too, so a catch-up sync ends as incremental ones do:
+  a not-found after the reply linking it marks that row either way (Astra on #8). A not-found never
+  marks a row first seen at or after it: the sync that first read it found no row, so 006's replay
+  leaves it unmarked too. Ceiling: a reply stuck at `streaming = 1` holds back that thread's later
+  Artifact calls for good (the live DB had no such row on 2026-11-20); the upgrade is a cutoff by age.
+- The startup sweep deletes a thread's artifact rows and watermark only once the thread is
+  soft-deleted, as Parked's: they hold what the user made (links, titles), which nothing rebuilds.
+  A thread merely absent from the projection keeps them (Astra on #8: they went with it before).
+  Ceiling: rows of a thread removed outright stay; no upstream path hard-deletes a projected thread.
 - **Type** (MAIN-62): a create or publish output's `type.url`, else the input's `type_url`, types
   the row; a publish without either is a plain page (markdown when its `path` ends `.md`). Mentions
   and manual links stay "Type unknown" until such an output names them. The name comes from
   `fork_artifact_type_names` (global: any thread's `list scope:types` output, `artifact_types[]`,
   and any read output's `type.{url,title}`), joined when a snapshot is read, so a name learned later
-  names older rows; then `CORE_ARTIFACT_TYPE_NAMES` (the 8 core types this account listed on
+  names older rows; the name seen latest wins, and the same name seen again moves its time, so an
+  older thread read later does not revert it; then `CORE_ARTIFACT_TYPE_NAMES` (the 8 core types this account listed on
   2026-11-19; the same URLs on other accounts is unverified); else the panel says "Typed artifact".
   Evidence: the dotfiles repo's `.local/.execution/t3-native-board/notes/artifact-types/`. Ceiling:
   a name one thread learns reaches another thread's open panel at that panel's next snapshot.
@@ -501,7 +524,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   failure counts. The exact error text is a fixture in `ThreadDecisions.test.ts`.
 - **Manual links** (MAIN-63): `threadDecisions.linkArtifact` (a URL and an optional title; an
   artifact already listed, by either id, keeps its row and only gains a title it lacks, except a
-  mention, which becomes the user's link with their title, so it can be unlinked) and
+  mention, which becomes the user's link with their title, dated now so it lists among the newest
+  rows however old the mention, so it can be unlinked) and
   `threadDecisions.unlinkArtifact`, for rows the user linked only: a published or mentioned row
   comes from the thread itself.
 - **Surface** (`ThreadArtifacts.tsx`, its own right-panel tab), the owner's approved boards
@@ -513,7 +537,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   not-found time on a Not found row, whose title is muted, never struck through). The row opens the
   artifact (`useOpenLink`); Open in browser, Copy link and "…" (Open, Copy link, and Unlink from
   thread on a row the user linked; right-click opens it too) show on hover and on keyboard focus,
-  and always on a touch screen.
+  and always on a touch screen. Once the snapshot drops an unlinked row, focus goes to the next row
+  (else the nearest before, `rowFocusAfter`), else to the empty state's Link artifact button. The
+  Link dialog's line says a link's type stays unknown until this thread publishes it: a read names
+  no row's type.
   The footer counts the groups beside a ghost Link button; the empty state has an outline Link
   artifact button. `LinkArtifactDialog` is built like `LinkPullRequestDialog`: inline validation, a
   line naming the artifact the link reads as, an optional title, and focus back on the Link button
@@ -791,7 +818,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/RightPanelTabs.browser.test.tsx`,
        `apps/web/src/components/chat/RightPanelSurfaceContent.tsx`,
        `apps/web/src/components/chat/useRightPanelActions.ts`, and the palette's Show Tracker,
-       parked and Artifacts actions in `apps/web/src/components/CommandPalette.tsx`.
+       parked and Artifacts actions in `apps/web/src/components/CommandPalette.tsx`, no parked one
+       in a side chat (its case and the `activeThread` mock in
+       `apps/web/src/components/CommandPalette.browser.test.tsx`).
      - The `decisions.toggle` shortcut: `packages/contracts/src/keybindings.ts`,
        `packages/shared/src/keybindings.ts`, `apps/web/src/components/settings/KeybindingsSettings.logic.ts`.
      - The composer seams below: `apps/web/src/components/chat/ComposerBannerStack.tsx`,
@@ -896,6 +925,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
      the editor lets through. `ChatView.tsx` calls `useParkedDraft` (`ThreadDecisions.tsx`) and passes
      its
      `actions` to the Tracker and its `chipRestorable` to the composer as `parkedChipRestorable`.
+     It also puts `useReopenWithUndo` in the Tracker's actions (`reopen`, so the hold outlives the
+     panel), and keys the composer menu's `parkAvailable` and the panel's `onAddParked` on the
+     thread's `lineage.sideChat` (not `embedded`, which a side chat at its own URL is not);
+     `useComposerSend.ts` passes the same flag to `composerParkDecision`, which refuses `/park` on it.
      `packages/shared/package.json` exports the fork's `./parkedReferences` beside its `sessionKit`
      entries; web (`useComposerStash.ts`, `composerInlineTokenPaste.ts`, the editor's paste) and mobile
      strip pasted chips through it. On mobile: `composerContextClipboard.ts`'s import and
@@ -905,7 +938,8 @@ it fails instead. The steps below are what the script encodes and what stays a p
      `ComposerContextSheet.test.tsx` among its React tests. `t3_park`'s `kind` in
      `thread/tools.ts` takes `ThreadParkedKindWord`. In tests: `apps/web/test/fakeEnvironment.ts` has
      `answerStreamRpc` (a subscription the test pushes snapshots into), `core.test.ts`'s `t3_park`
-     case reads the stored kind through `parkKind`, and `ChatView.logic.test.ts`,
+     case holds its own refusal (a delegated child) and the server's it passes on (a side chat, a
+     placeholder), and reads the stored kind through `parkKind`, and `ChatView.logic.test.ts`,
      `composerSend.logic.test.ts` and `useQueuedRunEdit.browser.test.tsx` carry the `parkedContexts`
      slot.
    - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
