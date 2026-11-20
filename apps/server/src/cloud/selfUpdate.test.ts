@@ -35,6 +35,8 @@ interface HarnessOptions {
   readonly requestUpdate?: ServiceLauncherClient.ServiceLauncherClient["Service"]["requestUpdate"];
   readonly desktopAppUpdate?: DesktopAppUpdate.DesktopAppUpdate["Service"];
   readonly policy?: ManagedPolicyDocument;
+  /** Completed once the SSH launch marker is renamed into place, the update's last write. */
+  readonly markerPublished?: Deferred.Deferred<void>;
 }
 
 const archiveBytes = new TextEncoder().encode("not really a tarball");
@@ -150,7 +152,25 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
   const config = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
+  const markerPublished = options.markerPublished;
+  const updateFs: FileSystem.FileSystem =
+    markerPublished === undefined
+      ? fs
+      : {
+          ...fs,
+          rename: (from, to) =>
+            fs
+              .rename(from, to)
+              .pipe(
+                Effect.tap(() =>
+                  path.basename(to) === "desktop-update-in-progress"
+                    ? Deferred.succeed(markerPublished, undefined)
+                    : Effect.void,
+                ),
+              ),
+        };
   const selfUpdate = yield* ServerSelfUpdate.make().pipe(
+    Effect.provideService(FileSystem.FileSystem, updateFs),
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
     Effect.provideService(
@@ -396,7 +416,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       const releaseDownload = yield* Deferred.make<void>();
       const sawDownloading = yield* Deferred.make<void>();
       const accepted = yield* Deferred.make<void>();
+      const markerPublished = yield* Deferred.make<void>();
       const { selfUpdate, order } = yield* makeHarness({
+        markerPublished,
         beforeDownload: Deferred.await(releaseDownload),
         requestUpdate: () =>
           Effect.sync(() => {
@@ -424,6 +446,9 @@ it.layer(NodeServices.layer)("server self update", (it) => {
 
       yield* Deferred.succeed(releaseDownload, undefined);
       yield* Deferred.await(accepted);
+      // Fork (FORK.md, "Background service", "Test seam"): the detached update writes the SSH launch
+      // marker after the launcher accepts; removing the temp folder meanwhile fails with ENOTEMPTY.
+      yield* Deferred.await(markerPublished);
       expect(order).toEqual(["download", "extract", "preflight", "accept"]);
       expect((yield* selfUpdate.update({ targetVersion: "1.1.0" }).pipe(Effect.flip)).reason).toBe(
         "A server update is already in progress.",
