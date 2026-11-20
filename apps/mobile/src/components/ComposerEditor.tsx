@@ -32,6 +32,10 @@ import {
   useComposerDraftResetGeneration,
 } from "../state/use-composer-drafts";
 import { importComposerContextClipboard } from "../lib/composerContextClipboard";
+import {
+  pastesOnlyParkedReferences,
+  withoutParkedReferences,
+} from "@t3tools/shared/parkedReferences";
 import { startComposerDraftOperation } from "../state/composerDraftOperations";
 import { appAtomRegistry } from "../state/atom-registry";
 import { enrichedModelDetails, enrichedModelReference } from "../lib/enrichedLinkPresentation";
@@ -104,7 +108,9 @@ export function ComposerEditor({
       !draftKey ||
       appAtomRegistry.get(composerContextImportsAtom)[draftKey] ||
       props.readOnly ||
-      props.editable === false
+      props.editable === false ||
+      // Fork (Parked): nothing would be pasted; the selection and its attachments stay.
+      pastesOnlyParkedReferences(clipboard.text)
     )
       return;
     const insertion = { text: clipboard.value, ...clipboard.selection };
@@ -123,7 +129,8 @@ export function ComposerEditor({
       );
       if (signal.aborted) return;
       if (!result) {
-        insertComposerDraftText(draftKey, clipboard.text, insertion);
+        // Fork (Parked): a parked chip pasted as plain text brings no record either.
+        insertComposerDraftText(draftKey, withoutParkedReferences(clipboard.text), insertion);
         return;
       }
       if (!insertComposerDraftContext(draftKey, result, insertion)) {

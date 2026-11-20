@@ -22,6 +22,8 @@ import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "../../lib/terminalContext";
 import {
   environmentContextRecord,
   environmentContextReference,
+  parkedContextRecord,
+  parkedContextReference,
   threadContextReference,
 } from "../../lib/composerContextRecords";
 import { deriveComposerSendState } from "../ChatView.logic";
@@ -213,6 +215,7 @@ const savedContent = (prompt: string) => ({
   previewAnnotations: [],
   threadContexts: [],
   environmentContexts: [],
+  parkedContexts: [],
 });
 
 const promptOf = (ref: ScopedThreadRef) =>
@@ -388,6 +391,37 @@ describe("useQueuedRunEdit", () => {
       expect.objectContaining({
         input: expect.objectContaining({
           edit: expect.objectContaining({ context: { version: 1, records: [kept] } }),
+        }),
+      }),
+    );
+  });
+
+  // Fork (Parked): the edit draft owns the message's parked chips, as it owns thread mentions.
+  it("opens an edit with its parked chip, and saves without it once the chip is removed", async () => {
+    const { hook } = setup();
+    mocks.editQueuedRun.mockResolvedValue({ _tag: "Success" });
+    const parked = parkedContextRecord({ id: 7, text: "Add a doctor check" }, THREAD_A.threadId);
+    const messageId = MessageId.make("message-1");
+    const text = `do ${formatInlineContextReference(parkedContextReference(parked))} now`;
+    const messages = [{ id: messageId, text, context: { version: 1, records: [parked] } }];
+    await using _screen = await render(view(THREAD_A, "queued", hook, messages));
+    await act(() => requireHook(hook).beginEdit({ runId: RUN, messageId, text, attachments: [] }));
+    const target = requireHook(hook).draftTarget;
+    expect(useComposerDraftStore.getState().getComposerDraft(target)?.parkedContexts).toEqual([
+      parked,
+    ]);
+
+    await act(() => useComposerDraftStore.getState().setParkedContexts(target, []));
+    const draft = useComposerDraftStore.getState().getComposerDraft(target);
+    expect(draft?.prompt).toBe("do now");
+    await requireHook(hook).saveEdit(
+      { ...savedContent(draft?.prompt ?? ""), parkedContexts: draft?.parkedContexts ?? [] },
+      () => {},
+    );
+    expect(mocks.editQueuedRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        input: expect.objectContaining({
+          edit: expect.objectContaining({ context: { version: 1, records: [] } }),
         }),
       }),
     );

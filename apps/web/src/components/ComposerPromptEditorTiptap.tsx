@@ -115,6 +115,11 @@ import {
   markAsClipboardEdit,
 } from "~/composer-undo-grouping";
 import { collectInlineContextIds } from "~/lib/composerContextReferences";
+import {
+  pastesOnlyParkedReferences,
+  withoutParkedReferences,
+} from "@t3tools/shared/parkedReferences";
+import { PARKED_CHIPS_REMOVED, removeParkedChips } from "~/composer-parked-chips";
 import { resolveDiffThemeName } from "~/lib/diffRendering";
 import { isRichTextFormattingShortcut } from "~/keybindings";
 import { cn, isMacPlatform } from "~/lib/utils";
@@ -212,6 +217,12 @@ export interface ComposerPromptEditorProps {
   onCitationDraftSave?: (replacedValue: string, savedValue: string) => void;
   onPaste: React.ClipboardEventHandler<HTMLElement>;
   editorRef: React.RefObject<ComposerPromptEditorHandle | null>;
+  /**
+   * Fork (Parked): the undo gate. Whether an undo or redo may bring back a parked chip, with this label,
+   * whose record the draft lost; one it may not is deleted again, outside undo history. The composer
+   * restores the record of every chip this keeps. Absent: none may.
+   */
+  restoresParkedChip?: ((contextId: string, label: string) => boolean) | undefined;
 }
 
 export type ComposerCitationCommentRequest = {
@@ -1001,6 +1012,11 @@ function ComposerPromptEditorTiptapInner(
   const isKnownModel = useStableCallback((instanceId: string, model: string) =>
     modelKeys.has(modelMentionKey(instanceId, model)),
   );
+  // Fork (Parked): a chip the draft holds a record for stays; another only as the undo gate allows.
+  const keepsParkedChip = useStableCallback(
+    (contextId: string, label: string) =>
+      contextRecords.has(contextId) || (props.restoresParkedChip?.(contextId, label) ?? false),
+  );
 
   const initialCursor = clampEditorCursor(value, cursor);
   const initialExpandedCursor = Math.max(0, Math.min(value.length, props.initialExpandedCursor));
@@ -1035,6 +1051,12 @@ function ComposerPromptEditorTiptapInner(
     },
     onSubmitAndSend: onCitationSubmitAndSend ?? (() => false),
   };
+
+  // Fork (Parked): the undo gate (FORK.md, "Parked items"). An undo or redo can bring back a parked
+  // chip whose item changed; it goes again before the composer hears of the change, since the composer
+  // restores the record of every returning chip it hears of. True if any went.
+  const removesRefusedParkedChips = (updated: TiptapEditor, undoing: boolean) =>
+    !literalText && undoing && removeParkedChips(updated.view, keepsParkedChip);
 
   const handleEditorChange = (updated: TiptapEditor, transaction: Transaction) => {
     const map = serializeEditorDoc(updated.state.doc);
@@ -1420,9 +1442,13 @@ function ComposerPromptEditorTiptapInner(
             (literalText || !readPastedComposerContext(clipboardData)?.records.length)
           )
             return false;
-          const pastedText = readPastedPlainText(clipboardData);
-          if (!pastedText) return false;
+          const plainText = readPastedPlainText(clipboardData);
+          // Fork (Parked): a pasted parked chip never brings its record, here and in a fence alike
+          // (`importPastedComposerText`, Sol round 2, S6), so it goes; a paste of only chips adds nothing.
+          const pastedText = withoutParkedReferences(plainText);
+          if (!plainText) return false;
           event.preventDefault();
+          if (pastesOnlyParkedReferences(plainText)) return true;
           // Paste verbatim inside fences; markdown parsing would split blocks and create unsupported chips.
           if (isInCodeBlock(view)) {
             const { from, to } = view.state.selection;
@@ -1516,8 +1542,13 @@ function ComposerPromptEditorTiptapInner(
         },
       },
       onUpdate: ({ editor: updated, transaction }) => {
+        // Fork (Parked): the undo gate's deletion comes back here as part of the undo, so the skill
+        // check below still runs.
+        const undoing =
+          isHistoryTransaction(transaction) || transaction.getMeta(PARKED_CHIPS_REMOVED) === true;
+        if (removesRefusedParkedChips(updated, undoing)) return;
         // Undo can restore a chip for a skill or model the environment no longer offers.
-        if (!literalText && isHistoryTransaction(transaction)) {
+        if (!literalText && undoing) {
           const stale = skillChipReplacements(
             updated.state.doc,
             skillLabelFor,
@@ -1531,6 +1562,8 @@ function ComposerPromptEditorTiptapInner(
         handleEditorChange(updated, transaction);
       },
       onSelectionUpdate: ({ editor: updated, transaction }) => {
+        // Fork (Parked): the undo gate runs here too, since Tiptap emits this before `onUpdate`.
+        if (removesRefusedParkedChips(updated, isHistoryTransaction(transaction))) return;
         handleEditorChange(updated, transaction);
       },
     },

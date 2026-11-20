@@ -54,9 +54,21 @@ export type ThreadDecisionsSubscribeInput = typeof ThreadDecisionsSubscribeInput
 /** The snapshot carries at most this many decided-without-asking items, newest first. */
 export const THREAD_DECIDED_WITHOUT_ASKING_LIMIT = 50;
 
-export const ThreadParkedKind = Schema.Literals(["todo", "later", "prompt"]);
+/** Who acts on a parked item: the agent (words to send it) or the person. */
+export const ThreadParkedKind = Schema.Literals(["agent", "me"]);
 export type ThreadParkedKind = typeof ThreadParkedKind.Type;
 
+/**
+ * The words a kind is said in: the kinds, and the older names for them (`prompt` the agent's, `todo`
+ * and `later` the person's). Inputs take any; a reader maps them through session-kit's `parkKind`.
+ */
+export const ThreadParkedKindWord = Schema.Literals(["agent", "me", "prompt", "todo", "later"]);
+export type ThreadParkedKindWord = typeof ThreadParkedKindWord.Type;
+
+/**
+ * `sent`: a message carrying the item's composer chip was recorded (`ParkedContextRecord`), or, on rows
+ * from before the chip, the old Send button sent it.
+ */
 export const ThreadParkedState = Schema.Literals(["open", "done", "dropped", "sent"]);
 export type ThreadParkedState = typeof ThreadParkedState.Type;
 
@@ -69,7 +81,12 @@ export const ThreadParkedText = TrimmedNonEmptyString.check(
 /** Something set aside in a thread for later, by the user (`/park`) or its agent (`t3_park`). */
 export const ThreadParkedItem = Schema.Struct({
   id: PositiveInt,
-  kind: ThreadParkedKind,
+  /**
+   * A kind word, read through `parkKind`. The server says it in the older words (`prompt`, `todo`)
+   * so a client from before the rename, whose decoder knows only those, still lists every row; a
+   * client takes any string, so a newer word drops no row either.
+   */
+  kind: Schema.String,
   text: Schema.String,
   state: ThreadParkedState,
   parkedBy: Schema.Literals(["user", "agent"]),
@@ -143,7 +160,7 @@ export type ThreadDecisionReopenInput = typeof ThreadDecisionReopenInput.Type;
 
 export const ThreadParkInput = Schema.Struct({
   threadId: ThreadId,
-  items: Schema.Array(Schema.Struct({ kind: ThreadParkedKind, text: ThreadParkedText })).check(
+  items: Schema.Array(Schema.Struct({ kind: ThreadParkedKindWord, text: ThreadParkedText })).check(
     Schema.isMinLength(1),
     Schema.isMaxLength(100),
   ),
@@ -160,7 +177,13 @@ export const ThreadParkedUpdateInput = Schema.Union([
   Schema.Struct({
     threadId: ThreadId,
     id: PositiveInt,
-    action: Schema.Literals(["done", "drop", "sent", "reopen"]),
+    action: Schema.Literal("move"),
+    kind: ThreadParkedKindWord,
+  }),
+  Schema.Struct({
+    threadId: ThreadId,
+    id: PositiveInt,
+    action: Schema.Literals(["done", "drop", "reopen"]),
   }),
 ]);
 export type ThreadParkedUpdateInput = typeof ThreadParkedUpdateInput.Type;

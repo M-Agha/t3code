@@ -48,6 +48,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: the judge reads only messages sent after it was in place`                          | Questions and decisions       |
 | `(fork) tracker: Parked and Artifacts are right-panel tabs of their own, in theme colours`            | Questions and decisions       |
 | `(fork) artifacts: rows name their type, show what claude.ai no longer finds, and take links by hand` | Artifacts                     |
+| `(fork) parked: items are for the agent or for you, and go in the draft as chips that mark them sent` | Parked items                  |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -245,7 +246,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     theme with a pale message action can still fall short). Reopen's toast takes no `type`, since
     the info icon is fixed blue. On the default theme
     the draft and the pick are both blue, since its update role is its primary; each colour sits
-    beside a word. Parked's badges use the outline, secondary and warning variants.
+    beside a word. Parked's kind icons use the update and warning roles' foregrounds, each beside its
+    words.
 - **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
   `apps/web/src/components/chat/ThreadDecisions.tsx` with its rules in `threadDecisions.logic.ts`,
@@ -256,19 +258,213 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 
 ### Parked items
 
-- Kinds `todo`, `later`, `prompt`; states `open`, `done`, `dropped`, `sent`; parked by `user` or
-  `agent`; per thread.
+- **Kinds** `agent` ("For the agent": words to send it later) and `me` ("For me"); states `open`,
+  `done`, `dropped` and `sent`; parked by `user` or `agent`; per thread. Fork migration 007 mapped
+  the stored kinds: `prompt` to `agent`, `todo` and `later` to `me` (MAIN-67, MAIN-68, 2026-11-19,
+  with session-kit's own rename, dotfiles PR #732). _Rejected:_ the three old kinds, which said when,
+  not who acts. On the wire both ends stay readable by a build from before the rename (GPT-6 Sol,
+  round 7): the server sends each row's kind in the older word and the clients park and move in it
+  (`OLDER_KIND_WORD` in `packages/shared/src/sessionKit/parks.ts`); the server takes every word, old
+  or new, and the clients read any (`ThreadParkedItem.kind` is a string, read through `parkKind`, an
+  unknown word the person's). Switch the wire to the new words once no build from before the rename
+  is in use.
 - `/park <text>` is T3-local: it never reaches the provider. It is parsed with session-kit's
-  `readParks`/`isPlaceholder`, so the syntax matches session-kit's `/board`. It is refused while
-  editing a queued message, with attachments, on an unstarted thread, and on mobile.
-- `t3_park` in the thread MCP toolkit, for every provider. It refuses delegated child threads and
-  placeholder text. Its eval cases (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with
-  `--dry-run`; a real run is owed.
-- A Parked surface (its own right-panel tab, `ThreadParked.tsx`): Send (an ordinary message, queued
-  during a run), inline Edit, Done, Drop, Reopen. When an open item leaves, focus goes to the next
-  open item (else the one before), else to the surface itself, never to the finished item's Reopen.
-- The startup sweep deletes parked rows only for soft-deleted threads: unlike questions, they
-  cannot be rebuilt.
+  `readParks`/`isPlaceholder`, so the syntax matches session-kit's `/board`: `agent` and `me`, the
+  old words still accepted, and a bare `agent` or `me` names a kind only on the first line (after it,
+  `agent:`), since those words start lines of prose. It is refused while editing a queued message,
+  with attachments, on an unstarted thread, and on mobile. A bare `/park` opens the Parked surface.
+- `t3_park` in the thread MCP toolkit, for every provider: its `kind` takes `agent` or `me`, and the
+  old words, which `ThreadDecisions.ts` maps when it stores the row (`PARK_KIND_OF_WORD` in
+  `packages/shared/src/sessionKit/parks.ts`, a total record that `parks.test.ts` holds equal to
+  session-kit's `parkKind`). A stored row an older build wrote with an old word is read through
+  `parkKind` too, so it stays listed. Its description was cut to keep the tool list within
+  `fork/main`'s agent context budget (`agentContextBudget.json`). The "Agent context budget" CI check
+  compares with the repo's `main`, an older upstream, and fails for every fork PR without its
+  `agent-context-increase` label. It refuses delegated child threads and placeholder
+  text. Its eval cases (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with `--dry-run`; a
+  real run is owed.
+- **Add to draft and Sent** (MAIN-75, the owner's Q55 design, 2026-11-20):
+  - **A chip.** Add to draft (an open item for the agent) puts the item in the composer as a chip of
+    the fork's composer-context kind `parked` (`ParkedContextRecord` in
+    `packages/contracts/src/composerContext.ts`), the way T3 attaches a thread or a machine: the
+    chip's reference goes in the text, its record in the draft's `parkedContexts`, and a send
+    carries the record in the message's `context`. The provider gets the words through upstream's
+    `projectComposerContextForProvider`, as every kind does: a `[Parked: …; ref=…]` marker where the
+    chip stood and the words in the `<t3_context>` envelope (`composerContextReferences.ts`'s
+    `parked` case). Focus stays in the panel, so several items go in one message. After a closing
+    code fence the chip goes on a line of its own (`endsAtClosingFence` in
+    `threadDecisions.logic.ts`, read with the composer's own document builder), since one joined to
+    the fence line would reopen the block and sit in it as code (Sol round 3, S4). Add to draft is
+    off while the composer edits a queued message, answers the agent's question (that send is the
+    answer), as `/park` is, or the thread cannot take a message; the button stays focusable
+    (`aria-disabled`) so its tooltip, and the menu item's second line, say which, and a screen
+    reader hears it as the button's description (`aria-describedby` to a visually hidden reason:
+    Base UI's tooltip describes nothing; Opus round 2, O1). The menu's Add to draft is blocked the
+    way the lock blocks an action (below).
+  - **Locked while drafted** (the owner's Q56, MAIN-82, 2026-11-20): while a draft this client holds
+    has an item's chip, the thread's own draft or an open queued message's edit (either would send the
+    words it holds; the lead's ruling R3), its row says In draft, and Edit, Mark done, Move and Drop
+    stay in its menu, focusable and unavailable, each with "remove the chip from your draft first" under
+    its name and as its description (`aria-describedby` to a visually hidden reason;
+    `ParkedMenuAction` in `ThreadParked.tsx`, which says why the actions need no guard of their own,
+    and which the menu's blocked Add to draft uses too). An editor opened before the chip went in
+    cannot Save either (its Save and its text field are described by the reason, since Cmd/Ctrl+Enter
+    then saves nothing). Copy text stays, and a resolved item's Reopen is never locked (the person's
+    override, R1), even while a queued message's edit holds its chip. Deleting the chip frees them.
+    Nothing rewrites a draft's chips: a chip holds the words it was added with until the user deletes
+    it or sends.
+  - **Undo** has one gate, in the editor (`removesRefusedParkedChips` in
+    `ComposerPromptEditorTiptap.tsx`, which calls the fork's `removeParkedChips` in
+    `apps/web/src/composer-parked-chips.ts`; the lead's rulings R5 and R7): a parked chip an undo or
+    redo brings back without a live record stays only if its item is still Open and for the agent, the
+    record the composer kept when the chip was deleted has the item's current words, and the chip's
+    label is that record's label, cleaned as a chip's label is (`parkedChipRestorable` in
+    `threadDecisions.logic.ts`, and `ChatComposer.tsx`'s `restoresParkedChip`, which says why it is
+    compared cleaned). The label matters because a later chip of the same item replaces the kept
+    record: without it, an older chip came back carrying the newer record's words (Opus round 4, C1).
+    A refused chip goes again with one space beside it, in a transaction kept out of undo history, so
+    the selection maps through the deletion and the agent is sent no `unavailable` marker (as upstream
+    replaces a stale skill chip after an undo); several go in one transaction, each range mapped
+    through the ones before, since two chips one space apart both claim that space (C2). The gate runs
+    before the composer hears of the change, from `onSelectionUpdate` too, which Tiptap emits before
+    `onUpdate`; the composer then restores the kept record of every returning chip it hears of. A
+    queued message's edit holds the chips that message carries (its items Sent by it): one comes back
+    while its item is still Sent, with the same words (`parkedChipRestorable`'s `editingQueuedRun`,
+    from `useParkedDraft` in `ThreadDecisions.tsx`); reopened and then edited or marked Done, it stays
+    out (Opus round 6, C1). Sent is judged without knowing which message sent it (the snapshot
+    carries no message id), so another window's send of the item lets such a chip back in: the
+    cross-window limit below (R8).
+  - _Known limit:_ another client can edit or resolve an item while it is drafted here; nothing can
+    stop it. Another client includes another window or tab of this app on the same machine: drafts do
+    not sync between windows, so the lock holds only in the window whose draft has the chip (the
+    lead's ruling R8). The row shows the new words or state, and the chip stays until the user deletes
+    it or sends; the message carries the words its sender saw. What the server then does is the Sent
+    rule's: an item still Open (edited elsewhere) is marked Sent by that message; one already Done or
+    Dropped stays as it is, since the pass reads only Open and Sent items, though the agent got its
+    words.
+  - _Known limit_ (the lead's ruling R4): a chip dragged from one composer to another arrives without
+    its record, as upstream's thread and machine chips do, and reaches the agent as `unavailable`;
+    nothing strips it. Delete it and use Add to draft.
+  - _Superseded_ (2026-11-20): the chip followed its item: every edit, resolution or move rewrote the
+    chips in the draft, kept out of undo history. Round 3 of PR #9's chip review found it raced the
+    snapshot (a delayed Save landing in another machine's draft, a stale snapshot putting old words
+    back), erased undo history between two chips, collapsed a selection, ignored IME composition and
+    shared state between composers, so the owner chose the lock (Q56) over fixing each case.
+  - **Stash, paste and recall carry no parked record.** A stash restore and a paste drop parked chips
+    from the text (`withoutParkedReferences` in `packages/shared/src/parkedReferences.ts`, which web and
+    mobile share: each chip goes with one space beside it, and nothing else is trimmed, so trailing
+    spaces the user wrote stay), as prompt-history recall already does, since the item may be another
+    thread's, resolved or edited since, and a chip without its record reaches the agent as
+    `unavailable`. A pasted chip the draft already holds stays single. Add to draft attaches
+    it again (Sol S5, Opus O1). A cut and paste of a chip within one draft drops it too; undo or Add to
+    draft brings it back. A paste into a fenced code block drops them as well, since the provider's
+    projector reads a reference inside a fence too (Sol round 2, S6). Mobile drops them on paste too
+    (Sol round 2, S1). A paste of parked chips alone does nothing on either
+    (`pastesOnlyParkedReferences`): on mobile it leaves the selection, and the attachments a selected
+    chip holds, in place (Sol round 3, S5). A plain-text paste the native editor keeps to itself never
+    reaches that code, and its chip, without a record, marks nothing. Mobile's context sheet shows a
+    parked chip's words.
+  - **In draft is shown, never stored:** a row says In draft while the thread's own draft, or an open
+    queued message's edit, holds its chip (`parkedIdsInDraft`: a record whose reference the text still
+    has; `useParkedDraft` reads both drafts, whichever the composer shows). Deleting the chip from the
+    composer takes it out (the composer prunes an unreferenced record, as it does a thread's). Nothing
+    about the draft reaches the server.
+  - **Sent** (`syncParkedSends` in `ThreadDecisions.ts`, from the records, no model, no text matched):
+    a recorded user message carrying an open item marks it Sent (resolved, `sent_message_id` that
+    message, the time it was sent), queued or not, as soon as the listener reads it. Carrying means the
+    message's `context` holds the item's `parked` record and its text still references the chip, as the
+    provider is sent it (`parkedItemsCarried`), and the record names the message's thread
+    (`payload.threadId`): item ids are per database, so a chip copied on one machine and pasted in a
+    thread on another would otherwise mark that thread's item of the same number (Sol round 2, S1).
+    Each sync works the state out again from every carrying message (`carriedPairs`), so nothing read
+    once is skipped later: a chip edited out of a queued message and put back (two clients saving the
+    same message) marks the item Sent again (Sol S2).
+  - **Back to Open:** only when the message never reached the agent: its run was cancelled before it
+    started (`status` `cancelled` with no `$.startedAt`, which the orchestrator writes as a run turns
+    `running`; a queued send cancelled, or a thread archived with it queued), or the chip was edited
+    out of the queued message. Another message carrying the item since its last Reopen keeps it Sent,
+    with that message. Nothing else changes it: steers, declined steers, provider failures and usage
+    limits leave the message to T3, which delivers or retries it.
+  - **Reopen** returns a Sent item to Open. In the same transaction it reads every message recorded
+    so far that carries the item and sets each aside (`fork_thread_parked_set_aside`, keyed by thread,
+    item and message), so none of them marks it Sent again, including one recorded just before the
+    Reopen that no sync had read yet (Sol S1: a first build set aside only what syncs had seen). A
+    cancel of a set-aside message changes nothing. Only a message that carries the item after the
+    Reopen marks it, which includes a message recorded before it: a queued message whose chip was
+    edited out before the Reopen and put back after it (a second client saving its earlier copy) will
+    deliver the words, so it marks the item Sent. There is no creation boundary, because Sent means a
+    message carrying the item has reached or will reach the agent, and a boundary would leave the item
+    Open while that message waits to deliver it (Sol round 2, S2; the lead's ruling R1, 2026-11-20).
+    Reopen is the person's override: it sets aside even a carrying message that is still queued, so
+    the item stays Open while that message waits to deliver its words (Opus round 3).
+  - The pass runs first in every sync (each user message and each ended run, as the listener already
+    syncs), in one transaction and outside the thread's lock, since it waits on no model, and what it
+    changes is published as soon as that transaction commits: the rest of the sync can wait seconds on
+    the decision judge, or fail, and must not hold back a Sent (Sol round 3, S6). It reads the
+    thread's set-aside rows by the table's key (a search, not a scan; Sol S6) and the thread's user
+    messages whose payload names a parked record, through upstream's `(thread_id, created_at,
+    message_id)` index. Ceiling: it parses every such message on each sync; a thread with thousands
+    would want a watermark over the messages already read.
+  - Rows from before (fork/main's Send button) are `sent` with no message: Sent under Resolved, Reopen
+    works, and no pass reads them back.
+  - **Official builds** (they share `~/.t3`): the record has upstream's forward-compatible unknown-kind
+    shape (`{ kind, contextId, label, payload }`), so an official build decodes `parked` as an unknown
+    kind, keeps it, and its projector sends the agent `JSON.stringify(payload)`, the item's whole text
+    (Sol S4, Opus O5). Run twice on 2026-11-20 against `upstream/main` (59651c1761) and `fork/main`
+    (a8bfd72c08), their own `composerContext.ts` and `composerContextReferences.ts` copied beside the
+    tests: both decoders kept the record and their projectors delivered the full text, the second time
+    with `threadId` in the payload (a 369-character item); the first draft's shape (fields at the top
+    level) was sent as `unavailable` both times.
+    `composerContext.test.ts` holds the shape to the slot. An official build editing a queued fork
+    message keeps the record (its edit keeps every record it does not own, which is threads and
+    machines), so if its user leaves the chip the item stays Sent, and if they delete it the agent
+    does not get the words and the fork returns the item to Open; either way the item says what the
+    agent got. A promotion to a steer keeps the same stored message (inferred from the orchestrator,
+    not run). The fork alone decodes the record typed: `"payload" in record` is how upstream code
+    tells an unknown record, so the fork's readers of known records (`asKnownContextRecord`, the
+    provider projector, and mobile's `ComposerContextSheet.tsx`) make an exception for a `parked` one.
+  - _Superseded_ (2026-11-20): MAIN-69/MAIN-70's lifecycle (the Q47 design): Add to draft pasted the
+    item's text and stored an In-draft mark; a sent message holding the text claimed and started the
+    item (In progress); a per-turn model judge read each finished reply and answered finished, ongoing or
+    untouched, with "Sent, not done" sending it back. Eight review rounds on PR #9 kept finding timing
+    cases in it: when a queued or steered message counts as delivered (steer effects, which needed the
+    outbox's pruner changed), the order of sends of one millisecond, claims across cancels and declines,
+    judge cursors and catch-up for items that started behind the judge, and a draft mark the composer
+    had to end on send. Every case came from matching text and judging turns rather than reading what
+    T3 records, so the owner dropped it (Q55, MAIN-75) for the chip above. The `EffectOutbox.ts`
+    pruning change went with it (that file is upstream's again). No database ran that 007 or its 008.
+- **Surface** (`ThreadParked.tsx`, its own right-panel tab), the owner's approved boards
+  (`NativeParked.dc.html`, `NativeParkedEmpty.dc.html` in the dotfiles repo's
+  `.local/.execution/t3-native-board/notes/tracker-design/project/`): groups Open and Resolved
+  (folds), each with its count. A row is the kind's icon (`BotIcon` in the update role's foreground,
+  `UserIcon` in the warning role's; a resolved row its state's icon, muted), decorative since the
+  words below say the same, then the full text as markdown, then "for the agent · by you", In draft
+  in `--tracker-draft` while the composer holds its chip, and the time at the right (parked, or
+  resolved: Sent at its message's time). Actions show on hover, on keyboard focus and while the menu
+  is open, always on a touch screen; right-click opens the same menu. An open item for the agent has
+  an Add to draft button (gone once In draft) and "…" (Add to draft, Edit, Mark done, Move to For me,
+  Copy text, Drop); one for me "…" without the draft; a resolved one (Done, Dropped, Sent) Reopen and
+  Copy text. Drop is not styled destructive: Reopen undoes it. Edit is inline; Escape or Save
+  returns focus to the row's "…". When an open item leaves, focus goes to the next row (else the one
+  before), else to the surface itself, never to the finished item's Reopen. When a row keeps its
+  place in the list but loses the focused control (its chip goes in the draft and Add to draft goes;
+  a row moves to another group and remounts: Reopen, Sent), focus goes to that row's first control,
+  the "…" once In draft; only while focus fell to the page, and not once the user moved it out of
+  the list. On a touch screen the always-shown actions sit in the row's flow, beside the time, not
+  over it (Sol S7). Rows carry whether they are In draft (`ParkedRowItem`), so a chip added or
+  deleted in the composer re-runs that focus fix (a first build read it beside the rows and focus
+  fell to the page).
+  A row being edited stays in the group it was in, in its place (`parkedGroups`' pin), so a send
+  marking it Sent meanwhile neither remounts its editor nor folds it into a collapsed Resolved; the
+  panel holds the editor's text until Save succeeds. The add field sits at the bottom, in the empty
+  state too (MAIN-65): "Park something for later…", a For the agent / For me choice (real radios:
+  `RadioGroup`'s fork `segmented` variant with `SegmentedRadio`s, drawn as the Tracker's
+  `segmented-bordered` toggles, so one is checked and arrow keys move it; For the agent by default),
+  Enter parks, Shift+Enter is a new line, a Park button; an empty field and the server's refusals
+  (placeholders) show under it as an alert. A park in flight clears the field only if it still holds
+  what was parked. The Send button and the old cards are gone.
+- The startup sweep deletes parked rows and their `fork_thread_parked_set_aside` only for
+  soft-deleted threads: unlike questions, they cannot be rebuilt.
 
 ### Artifacts
 
@@ -335,7 +531,10 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `packages/shared/src/types/index.d.ts` declares the board's `Question` row. If judge.ts starts
   importing more, add it to a shim, never to the copy.
 - Fork-only logic beside them (`decisions.ts`, `parks.ts`) must not re-implement anything reply.ts or
-  judge.ts exports; `decisions.ts`'s `judgeInput` and `judgedClosing` only map the server's rows to
+  judge.ts exports (`parks.ts` re-exports reply.ts's `parkKind` and `KIND_LABEL`: the server's
+  `ThreadDecisions.ts` reads stored kinds through `parkKind`, and the Parked surface uses both,
+  `parkKind` in `threadDecisions.logic.ts` and `KIND_LABEL` in `ThreadParked.tsx`); `decisions.ts`'s
+  `judgeInput` and `judgedClosing` only map the server's rows to
   session-kit's `Question`. A full core extraction (folder, subtree, package) was judged not worth it.
 
 ### A reply that finishes after its run ended
@@ -364,10 +563,19 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
   `resolve(msg())` / `m(msg())` outside React (`composerParkDecision` takes upstream's optional
   `resolve` argument, as `approvalRedirectNotice` does). `DecisionJudgeModelRow.tsx` follows
   upstream's `CleanupModelRow`.
-- `ThreadDecisions.tsx`, `ThreadParked.tsx` and `ThreadArtifacts.tsx` are English only: one
-  file-level `oxlint-disable` for the rule at the top of each. The
+- `ThreadDecisions.tsx`, `ThreadParked.tsx`, `ThreadArtifacts.tsx` and `ParkedContextChip.tsx` are
+  English only: one file-level `oxlint-disable` for the rule at the top of each. The
   translation catalogs (`apps/web/src/i18n/translations/*.json`) are generated by upstream's tooling
   and hold no fork strings, so wrapping its ~110 strings would show the same English in every locale.
+  A string the catalogs already hold (upstream uses the same words) is wrapped all the same, since it
+  then translates, and every such string in `ThreadDecisions.tsx` and `ThreadParked.tsx` is wrapped,
+  in the form the catalog holds it: `gt()` (or `msg()` in a table) for an ICU entry, `<T>` for a
+  string held in JSX form only (Edit, Remove, Review). Found by hashing each string literal and JSX
+  text with `generaltranslation`'s `hashSource` (ICU and JSX formats) against `fr.json`; a JSX text
+  that is part of a longer sentence ("Add {n} to draft") is not the catalog's string and stays bare.
+  A wrap is one call and is not tested; the one test is the path that resolves later, a status from
+  `ThreadParked.tsx`'s `msg()` table through `useMessages` (`ThreadParked.browser.test.tsx`'s last
+  case).
   Upgrade path if the fork ever needs another language: wrap them (`<T>`, `gt()`, `msg()`), drop the
   disable comment, and generate the fork's catalog entries. (2026-11-18, the 4864 rebase.)
 - Wrapped fork copy has no catalog entries either, so `vp run i18n:check` (CI runs it;
@@ -388,6 +596,12 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      watermark, so the sync reads old Artifact calls again and fills the new columns and type names
      through its own idempotent upserts, rather than parsing provider JSON in SQL. Threads replay
      as they next sync (a subscribe or a run event), not at startup.
+   - 007 (`ThreadParkedSends`) maps the old parked kinds (`prompt` to `agent`, `todo` and `later`
+     to `me`), adds `sent_message_id` and creates `fork_thread_parked_set_aside` (Parked items, "Add
+     to draft and Sent"). It was rewritten before any database ran it (the owner's live ledger was at
+     005), and the lifecycle's 008 dropped; round 1 of PR #9's chip review changed it in place again,
+     still unmerged. A database that recorded an earlier 007 would lack `sent_message_id` and the
+     set-aside table, so this holds only while none exists.
    - _Rejected:_ new orchestration event types, since official builds reject unknown events on
      server replay.
 2. **The fork refuses a database ahead of it.** On startup the fork refuses when
@@ -430,7 +644,10 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      `resetCursorState`, and its "show in the chat" upstream's `assistantCitationNavigation`. The
      handle's `insertTextAtEnd` takes a fork option, `focus: false` (passed on as
      `focusEditorAfterReplace: false`), so the Tracker can add a line without moving focus.
-     `toggle.tsx` has a fork variant, `segmented-bordered` (segmented, with a `muted-foreground`
+     `radio-group.tsx` has a fork `segmented` variant of `RadioGroup` and a fork `SegmentedRadio`, the
+     same look keyed on a radio's `data-checked` (Parked's add field; the lint forbids borrowing
+     `toggleVariants` and restyling a `RadioGroup`). `toggle.tsx` has a fork variant,
+     `segmented-bordered` (segmented, with a `muted-foreground`
      border on the selected item), which the Tracker's tabs use: the lint's `no-restyle` rule keeps
      colours out of a Toggle's className, and the approved design asks for that border. If upstream rebuilds the
      banner stack, give the panel the new stack's way to draw a custom card; if it renames the
@@ -446,6 +663,47 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      section in `SettingsPanels.tsx` (`ThreadsSettingsPanel`). If upstream reshapes the cleanup setting, reshape this one the same way.
      `server.ts` provides `DecisionJudge.layer` to `ThreadDecisions.layer`; the judge calls
      `TextGeneration.generateTranscriptionPostProcessing`, so a rename of that operation lands here.
+   - Parked's chip is a composer-context kind added the way upstream added `environment`
+     (5e9d56416f): `parked` in `COMPOSER_CONTEXT_KINDS` and `ParkedContextRecord` in
+     `KnownComposerContextRecord` (`packages/contracts/src/composerContext.ts`), shaped as
+     `UnknownContextRecord` so official builds keep it; its provider text in
+     `composerContextReferences.ts`'s `formatComposerContextProviderPayload`, which `formatEnvelopeEntry`
+     and the web's `asKnownContextRecord` reach through a `parked` exception to their `"payload" in
+     record` test (a new upstream reader of known records needs the same); and on the web a
+     `parkedContexts` slot beside `environmentContexts` everywhere that one goes
+     (`composerDraftStore.ts`, `composerContextRecords.ts`'s `buildMessageContext`,
+     `composerContextPresentation.tsx`, `contextPresentationRegistry.ts`, `UserMessageContextChips.tsx`,
+     `CollapsedComposerPromptPreview.tsx`, `ContextChip.tsx` and `contextChipAccents.ts`,
+     `ChatComposer.tsx`'s send context, pruning and copy, `useComposerSend.ts`, `ChatView.logic.ts`'s
+     send snapshot, `chatViewSend.ts`, `useQueuedRunEdit.ts`, `composerContextUndo.ts`,
+     `composerSend.logic.ts`, `useComposerStash.ts` and `composerInlineTokenPaste.ts`, which drop the
+     chip). Most hunks are a
+     `parked` line beside its `environment` twin; the rest carry a `Fork (Parked)` comment. If
+     upstream adds a kind in a new place, add `parked` there too; if upstream reshapes how kinds are
+     declared, follow it. Beyond the kind's slots: `ComposerPromptEditorTiptap.tsx` takes a fork prop,
+     `restoresParkedChip` (the undo gate), and calls `removesRefusedParkedChips` (which runs the
+     fork's `removeParkedChips` from `composer-parked-chips.ts`) at the top of `onSelectionUpdate`
+     and of `onUpdate`, before upstream's stale-skill check, whose condition also counts
+     `PARKED_CHIPS_REMOVED` as part of the undo; its `handlePaste` strips parked chips before its
+     code-block branch. If upstream rewrites any of these hooks, keep each call in the same place;
+     "Parked items" (Undo) says why.
+     `ChatComposer.tsx` builds that prop from the record it kept on delete (its label cleaned, equal
+     to the chip's) and `parkedChipRestorable`, and restores the kept record of every returning chip
+     the editor lets through. `ChatView.tsx` calls `useParkedDraft` (`ThreadDecisions.tsx`) and passes
+     its
+     `actions` to the Tracker and its `chipRestorable` to the composer as `parkedChipRestorable`.
+     `packages/shared/package.json` exports the fork's `./parkedReferences` beside its `sessionKit`
+     entries; web (`useComposerStash.ts`, `composerInlineTokenPaste.ts`, the editor's paste) and mobile
+     strip pasted chips through it. On mobile: `composerContextClipboard.ts`'s import and
+     `ComposerEditor.tsx`'s plain-text fallback strip parked chips, `ComposerEditor.tsx`'s
+     `pasteContext` ignores a paste of parked chips alone, `ComposerContextSheet.tsx` shows one's words
+     before its unknown-kind branch, and `apps/mobile/vite.config.ts` lists
+     `ComposerContextSheet.test.tsx` among its React tests. `t3_park`'s `kind` in
+     `thread/tools.ts` takes `ThreadParkedKindWord`. In tests: `apps/web/test/fakeEnvironment.ts` has
+     `answerStreamRpc` (a subscription the test pushes snapshots into), `core.test.ts`'s `t3_park`
+     case reads the stored kind through `parkKind`, and `ChatView.logic.test.ts`,
+     `composerSend.logic.test.ts` and `useQueuedRunEdit.browser.test.tsx` carry the `parkedContexts`
+     slot.
    - Most conflicts are two lists growing at once (imports, surface kinds, layers, test cases):
      keep both.
    - `apps/server/src/provider/agentContextBudget.json` must equal the measured size exactly; the fork's
@@ -471,7 +729,29 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
      `DesktopEnvironment`, `DesktopPreReadyPlatform`).
    - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts`,
-     `ThreadParked.focus.browser.test.tsx` and `ThreadDecisions.question-panel.browser.test.tsx`.
+     `ThreadParked.browser.test.tsx` (its last case: a status from a `msg()` table, in French),
+     `ThreadParked.touch.browser.test.tsx` (with the stylesheet) and
+     `ThreadDecisions.question-panel.browser.test.tsx`.
+   - Parked's chip: `packages/shared/src/composerContextReferences.test.ts` (its provider text),
+     `packages/contracts/src/composerContext.test.ts` (the unknown-kind shape),
+     `apps/web/src/composerDraftStore.test.ts` ("parked contexts"),
+     `apps/web/src/components/ChatView.parked.browser.test.tsx` (the real composer: add, delete and
+     undo, the Q56 guard that a change from elsewhere leaves the chip as it was, the undo gate's
+     wiring with the caret mapped and no unavailable marker, an older chip refused once a newer one
+     replaced its record, a long item's chip whose label was cut after a space coming back, two refused
+     chips leaving the text beside them, the send's record, a closing
+     code fence, stash and paste, a fence included), `threadDecisions.logic.test.ts`
+     (`parkedChipRestorable`'s conditions, `endsAtClosingFence`), `useParkedDraft.browser.test.tsx`
+     (In draft from the thread's draft and a queued message's edit; that edit's undo, and none once
+     its item is no longer Sent with the chip's words),
+     `ThreadParked.browser.test.tsx` (the lock: unavailable actions and their description, Save and
+     its field held, all free again once the chip goes; the blocked Add to draft in the menu),
+     `useQueuedRunEdit.browser.test.tsx` (an edit opens with the chip and saves without it),
+     `packages/shared/src/parkedReferences.test.ts` (the strip, and chips alone pasting nothing),
+     `apps/server/src/decisions/ThreadDecisions.test.ts` (Sent published while the judge still reads
+     the message), and on mobile `apps/mobile/src/lib/composerContextClipboard.test.ts` (a paste drops
+     it), `apps/mobile/src/components/ComposerEditor.ios.test.tsx` (a paste of chips alone keeps the
+     selection) and `apps/mobile/src/components/ComposerContextSheet.test.tsx` (its words).
    - The Parked and Artifacts surfaces: `apps/web/src/rightPanelStore.test.ts` (order, active tab and
      an older layout across a reload; reopening a closed one), `closedViewStore.test.ts` (closed
      ones survive a migration) and `RightPanelTabs.browser.test.tsx` (strip counts), and
@@ -522,7 +802,9 @@ of a newer build migrates `~/.t3` one way, and that copy is the only way back.
   `T3CODE_THREAD_ID` was wrong, because official builds set that too, and session-kit would go quiet
   inside an official T3 that tracks nothing natively. Dotfiles PR #596.
 - session-kit's reply.ts and judge.ts carry the logic the fork shares (reply.ts's shared parts came
-  with dotfiles PR #600, merged). The drift test reads the files from the local dotfiles checkout, so it
+  with dotfiles PR #600, merged; the parked kinds `agent` and `me` with #732, and their first-line
+  rule with #738, both merged; the copy is refreshed from dotfiles main 7b96f4bc). The drift test
+  reads the files from the local dotfiles checkout, so it
   goes red whenever that checkout is behind or ahead of a copy: compare against the copy's header
   commit before re-copying.
 

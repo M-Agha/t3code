@@ -324,6 +324,10 @@ export function restoreComposerDraft(
       (record) => record.contextId,
     ),
   );
+  store.setParkedContexts(
+    draftTarget,
+    withRestored(current?.parkedContexts, snapshot.parkedContexts, (record) => record.contextId),
+  );
   return images;
 }
 
