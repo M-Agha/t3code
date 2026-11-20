@@ -102,6 +102,7 @@ import { insertInlineContextReference } from "./lib/composerContextReferences";
 import {
   buildMessageContext,
   environmentContextRecord,
+  parkedContextRecord,
   terminalContextReference,
 } from "./lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
@@ -848,6 +849,66 @@ describe("composerDraftStore environment contexts", () => {
     const store = useComposerDraftStore.getState();
     store.addEnvironmentContexts(threadRef, [vps]);
     store.setEnvironmentContexts(threadRef, []);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
+  });
+});
+
+// Fork (Parked): Add to draft attaches the item as a chip; In draft is read from the draft.
+describe("composerDraftStore parked contexts", () => {
+  const threadId = ThreadId.make("thread-with-parked");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+  const notes = parkedContextRecord({ id: 7, text: "Write the [release]\nnotes" }, threadId);
+
+  beforeEach(resetComposerDraftStore);
+
+  it("attaches an item's record once, survives persistence, and sends its id and words", () => {
+    const store = useComposerDraftStore.getState();
+    // The chip's text, as Add to draft's editor insertion leaves it; the store takes only the record.
+    const prompt = "Also [Write the release notes](t3-context://v1/parked/parked_7) ";
+    store.setPrompt(threadRef, "Also");
+    store.addParkedContexts(threadRef, [notes]);
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.prompt).toBe("Also");
+    store.setPrompt(threadRef, prompt);
+    store.addParkedContexts(threadRef, [{ ...notes, label: "again" }]);
+
+    const draft = draftFor(threadId, TEST_ENVIRONMENT_ID);
+    expect(draft?.parkedContexts).toEqual([notes]);
+    expect(draft?.prompt).toBe(prompt);
+
+    const merge = useComposerDraftStore.persist.getOptions().merge!;
+    const hydrated = merge(
+      JSON.parse(
+        JSON.stringify(partializeComposerDraftStoreState(useComposerDraftStore.getState())),
+      ),
+      useComposerDraftStore.getInitialState(),
+    );
+    const restored = hydrated.draftsByThreadKey[scopedThreadKey(threadRef)];
+    expect(restored?.parkedContexts).toEqual([notes]);
+    expect(restored?.prompt).toBe(draft?.prompt);
+
+    expect(
+      buildMessageContext({
+        terminalContexts: [],
+        reviewComments: [],
+        previewAnnotations: [],
+        parkedContexts: restored?.parkedContexts ?? [],
+      })?.records,
+    ).toEqual([
+      {
+        version: 1,
+        kind: "parked",
+        contextId: "parked_7",
+        label: "Write the release notes",
+        payload: { itemId: 7, threadId, text: "Write the [release]\nnotes" },
+      },
+    ]);
+  });
+
+  it("takes the chip out of the text with its record, and the draft with them", () => {
+    const store = useComposerDraftStore.getState();
+    store.setPrompt(threadRef, `[x](t3-context://v1/parked/${notes.contextId}) `);
+    store.addParkedContexts(threadRef, [notes]);
+    store.setParkedContexts(threadRef, []);
     expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toBeUndefined();
   });
 });

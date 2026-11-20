@@ -32,6 +32,7 @@ import type {
   PreviewAnnotationPayload,
   ThreadContextRecord,
   EnvironmentContextRecord,
+  ParkedContextRecord,
   ResolvedKeybindingsConfig,
   RuntimeMode,
   RuntimeRequestId,
@@ -154,6 +155,7 @@ import {
 } from "../../lib/terminalContext";
 import {
   formatComposerContextReference,
+  sanitizeComposerContextLabel,
   threadContextRecord,
   toKindScopedComposerContextId,
 } from "@t3tools/shared/composerContextReferences";
@@ -345,6 +347,7 @@ export interface ChatComposerHandle {
     reviewComments: ReviewCommentContext[];
     threadContexts: ThreadContextRecord[];
     environmentContexts: EnvironmentContextRecord[];
+    parkedContexts: ParkedContextRecord[];
     selectedPromptEffort: string | null;
     selectedModelSelection: ModelSelection;
     multipleModelSelections: ReadonlyArray<ModelSelection> | null;
@@ -406,6 +409,12 @@ export interface ChatComposerProps {
   sideChatDisabledReason?: string | null;
   /** Offers `/park` in the slash menu; the send path handles the command either way. */
   parkAvailable?: boolean;
+  /**
+   * Fork (Parked): whether an undo may bring back a parked chip whose record the composer kept when it
+   * was deleted, as far as its item goes (the editor's undo gate compares the chip's label itself).
+   * Absent: none comes back.
+   */
+  parkedChipRestorable?: ((record: ParkedContextRecord) => boolean) | undefined;
   /** Arms a fresh session for the next message; absent where `/clear` is unavailable. */
   onFreshSession?: (() => void) | undefined;
   environmentUnavailable: {
@@ -717,6 +726,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerReviewComments = composerDraft.reviewComments;
   const composerThreadContexts = attachmentDraft.threadContexts;
   const composerEnvironmentContexts = composerDraft.environmentContexts;
+  const composerParkedContexts = composerDraft.parkedContexts;
   const {
     pendingSnapShotAnimations,
     pendingSnapShotIds,
@@ -775,6 +785,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     previewAnnotations: composerPreviewAnnotations,
     threadContexts: composerThreadContexts,
     environmentContexts: composerEnvironmentContexts,
+    parkedContexts: composerParkedContexts,
     images: composerImages,
     files: composerFiles,
     uploadsByImageId,
@@ -1135,7 +1146,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerPreviewAnnotations.length +
       composerReviewComments.length +
       composerThreadContexts.length +
-      composerEnvironmentContexts.length,
+      composerEnvironmentContexts.length +
+      composerParkedContexts.length,
   });
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const compactSlashCommandAvailable =
@@ -1326,6 +1338,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const setComposerDraftEnvironmentContexts = useComposerDraftStore(
     (store) => store.setEnvironmentContexts,
   );
+  const setComposerDraftParkedContexts = useComposerDraftStore((store) => store.setParkedContexts);
   const buildContextClipboardFragment = (contextIds: ReadonlyArray<string>): string | null => {
     const wanted = new Set(contextIds);
     const copiedFiles = new Map<string, File>();
@@ -1343,6 +1356,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         .map(terminalContextRecord),
       ...composerThreadContexts.filter((record) => wanted.has(record.contextId)),
       ...composerEnvironmentContexts.filter((record) => wanted.has(record.contextId)),
+      ...composerParkedContexts.filter((record) => wanted.has(record.contextId)),
       ...composerReviewComments
         .filter((c) => wanted.has(reviewCommentContextId(c.id)))
         .map(reviewCommentContextRecord),
@@ -1618,6 +1632,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   const retainedContextPayloads = useRetainedContextPayloads(composerDraftTargetKey);
+  // Fork (Parked): the editor's undo gate. A deleted chip comes back (undo, redo) only as the record
+  // kept for it, which a later chip of the same item replaces, so its label must be the chip's; and
+  // only while its item still stands (`parkedChipRestorable`). Compared as the chip's label is cleaned:
+  // a record's label is cut at 200 characters and may end in a space the chip's label drops (Opus r5).
+  const restoresParkedChip = useStableCallback((contextId: string, label: string) => {
+    const record = retainedContextPayloads.parked.get(contextId);
+    return (
+      record !== undefined &&
+      sanitizeComposerContextLabel(record.label, "parked") === label &&
+      (props.parkedChipRestorable?.(record) ?? false)
+    );
+  });
 
   const onPromptChange = (
     nextPrompt: string,
@@ -1710,6 +1736,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       restoredEnvironments.length > 0
     ) {
       setComposerDraftEnvironmentContexts(composerDraftTarget, nextEnvironments);
+    }
+
+    // Fork (Parked): deleting a parked chip takes its item out of the draft; an undo brings back its
+    // record with it, since the editor deletes every returning chip its gate refuses
+    // (`restoresParkedChip`) before this runs.
+    const liveParkedIds = new Set<string>(composerParkedContexts.map((record) => record.contextId));
+    const restoredParked = [...referenced].flatMap((contextId) => {
+      if (liveParkedIds.has(contextId)) return [];
+      const record = retained.parked.get(contextId);
+      return record ? [record] : [];
+    });
+    const nextParked = [
+      ...composerParkedContexts.filter((record) => referenced.has(record.contextId)),
+      ...restoredParked,
+    ];
+    for (const record of composerParkedContexts) {
+      if (!referenced.has(record.contextId)) retained.parked.set(record.contextId, record);
+    }
+    if (nextParked.length !== composerParkedContexts.length || restoredParked.length > 0) {
+      setComposerDraftParkedContexts(composerDraftTarget, nextParked);
     }
 
     for (const comment of composerReviewComments) {
@@ -2580,6 +2626,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerReviewComments.length === 0 &&
       composerThreadContexts.length === 0 &&
       composerEnvironmentContexts.length === 0 &&
+      composerParkedContexts.length === 0 &&
       replyTo === null,
     sideChat: props.sideChatAvailable === true || (props.sideChatDisabledReason ?? null) !== null,
     usageLimits: props.onUsageLimitsCommand !== undefined,
@@ -3310,6 +3357,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         reviewComments: composerReviewComments,
         threadContexts: composerThreadContexts,
         environmentContexts: composerEnvironmentContexts,
+        parkedContexts: composerParkedContexts,
         selectedPromptEffort,
         selectedModelSelection,
         multipleModelSelections:
@@ -3375,6 +3423,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerReviewComments,
       composerThreadContexts,
       composerEnvironmentContexts,
+      composerParkedContexts,
       focusComposer,
       environmentId,
       primaryEnvironmentId,
@@ -3758,6 +3807,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     onCitationSubmitAndSend={submitCitationAndSendStable}
                     onCitationDraftSave={saveCitationDraftToPromptStable}
                     onPaste={onComposerPasteStable}
+                    restoresParkedChip={restoresParkedChip}
                     placeholder={
                       isComposerApprovalState
                         ? activePendingApproval?.supportsFeedback
