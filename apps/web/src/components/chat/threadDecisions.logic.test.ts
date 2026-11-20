@@ -7,6 +7,10 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
+import { parkedContextRecord, parkedContextReference } from "../../lib/composerContextRecords";
+import { formatInlineContextReference } from "../../lib/composerContextReferences";
+import { buildDocJson } from "../../composer-rich-text-doc";
+
 import {
   acceptsPick,
   answerLines,
@@ -15,13 +19,19 @@ import {
   choicesToReview,
   draftLineOf,
   draftSummary,
+  endsAtClosingFence,
   groupSelection,
   isParkedBusy,
   latestReplyOpenQuestions,
   lineEnd,
   nextUndrafted,
   openQuestionsByReply,
+  parkedChipRestorable,
   parkedFocusAfter,
+  parkedGroups,
+  parkedIdsInDraft,
+  parkedStatus,
+  parkedTime,
   questionsClosedByDraft,
   unfinishedLabels,
   withoutLine,
@@ -283,7 +293,7 @@ describe("decisions", () => {
 describe("parked items", () => {
   const item: ThreadParkedItem = {
     id: 7,
-    kind: "todo",
+    kind: "agent",
     text: "x",
     state: "open",
     parkedBy: "user",
@@ -291,6 +301,99 @@ describe("parked items", () => {
     updatedAt: "2026-01-01T00:00:00.000Z",
     resolvedAt: null,
   };
+  const at = (minute: number) => `2026-01-01T00:0${minute}:00.000Z`;
+  const threadId = ThreadId.make("thread");
+
+  it("groups items as Open and Resolved", () => {
+    const items: ThreadParkedItem[] = [
+      { ...item, id: 1 },
+      { ...item, id: 3, state: "done" },
+      { ...item, id: 4, state: "sent" },
+      { ...item, id: 5, state: "dropped" },
+    ];
+    const groups = parkedGroups(items);
+    expect([groups.open, groups.resolved].map((g) => g.map((i) => i.id))).toEqual([[1], [3, 4, 5]]);
+  });
+
+  it("keeps a row being edited in the group it was in, where it stood", () => {
+    const items: ThreadParkedItem[] = [
+      { ...item, id: 1, createdAt: at(1) },
+      { ...item, id: 3, createdAt: at(3) },
+      // Sent from another client while edited: the snapshot lists it with the resolved.
+      { ...item, id: 2, state: "sent", createdAt: at(2) },
+    ];
+    const groups = parkedGroups(items, { id: 2, group: "open" });
+    expect(groups.open.map((i) => i.id)).toEqual([1, 2, 3]);
+    expect(groups.resolved).toEqual([]);
+    expect(parkedGroups(items).resolved.map((i) => i.id)).toEqual([2]);
+  });
+
+  it("reads In draft from the chips the draft's text still holds", () => {
+    const chip = (id: number) => parkedContextRecord({ id, text: `item ${id}` }, threadId);
+    const reference = (id: number) =>
+      formatInlineContextReference(parkedContextReference(chip(id)));
+    expect(
+      parkedIdsInDraft({
+        prompt: `Do ${reference(1)} and ${reference(2)} `,
+        parkedContexts: [chip(1), chip(2), chip(3)],
+      }),
+    ).toEqual([1, 2]);
+    // A chip deleted from the text leaves its record behind until the composer prunes it.
+    expect(parkedIdsInDraft({ prompt: "Do nothing", parkedContexts: [chip(1)] })).toEqual([]);
+    expect(parkedIdsInDraft(undefined)).toEqual([]);
+  });
+
+  // The lock (Q56): nothing rewrites a drafted chip, so an undo brings one back only as it was.
+  it("lets an undo bring back a chip only while its item is open for the agent, same words", () => {
+    const open = { ...item, id: 1, text: "item 1", kind: "agent" as const };
+    const record = parkedContextRecord({ id: 1, text: "item 1" }, threadId);
+    expect(parkedChipRestorable(record, [open], false)).toBe(true);
+    for (const items of [
+      [{ ...open, text: "item 1 edited" }],
+      [{ ...open, kind: "me" as const }],
+      [{ ...open, state: "done" as const }],
+      [{ ...open, state: "sent" as const }],
+      [{ ...open, id: 2 }],
+      [],
+    ]) {
+      expect(parkedChipRestorable(record, items, false)).toBe(false);
+    }
+  });
+
+  // Sol round 3, S4, read with the composer's own document builder.
+  it("puts a chip after a closing code fence on a line of its own", () => {
+    const fenced = "Look:\n```ts\nconst a = 1;\n```";
+    expect(endsAtClosingFence(fenced)).toBe(true);
+    expect(endsAtClosingFence(`${fenced}\nthen`)).toBe(false);
+    // Unclosed: the chip would sit in the block whatever joins it; nothing to close here.
+    expect(endsAtClosingFence("```ts\nconst a = 1;")).toBe(false);
+    expect(endsAtClosingFence("plain")).toBe(false);
+    const chip = formatInlineContextReference(
+      parkedContextReference(parkedContextRecord({ id: 1, text: "item 1" }, threadId)),
+    );
+    const blocks = buildDocJson(`${fenced}\n${chip} `, () => null, { styling: true }).content;
+    expect(blocks.map((block) => block.type)).toEqual(["paragraph", "codeBlock", "paragraph"]);
+    expect(JSON.stringify(blocks.at(-1))).toContain('"kind":"parked"');
+    // What a space would have done: the fence line no longer closes, and the reference is code.
+    const joined = buildDocJson(`${fenced} ${chip} `, () => null, { styling: true }).content;
+    expect(joined.map((block) => block.type)).toEqual(["paragraph", "codeBlock"]);
+  });
+
+  it.each([
+    [{}, false, null],
+    [{}, true, "draft"],
+    [{ state: "done" }, false, "done"],
+    [{ state: "dropped" }, false, "dropped"],
+    // A message carrying its chip was recorded, or (an older row) the old Send button sent it.
+    [{ state: "sent" }, false, "sent"],
+  ] as const)("says where %j stands (in draft: %j): %j", (change, inDraft, status) => {
+    expect(parkedStatus({ ...item, ...change }, inDraft)).toBe(status);
+  });
+
+  it("shows when it was parked, or resolved", () => {
+    expect(parkedTime(item)).toBe(at(0));
+    expect(parkedTime({ ...item, state: "sent", resolvedAt: at(3) })).toBe(at(3));
+  });
 
   it("keeps an item busy until the snapshot shows the action's result", () => {
     const busy = new Map([[item.id, item.updatedAt]]);

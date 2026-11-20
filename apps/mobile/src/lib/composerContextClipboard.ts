@@ -34,6 +34,7 @@ import {
   type DraftComposerAttachment,
 } from "./composerImages";
 import { referencedComposerContext, reidentifyComposerContext } from "./composerContext";
+import { withoutParkedReferences } from "@t3tools/shared/parkedReferences";
 import { uuidv4 } from "./uuid";
 import {
   findLocalComposerClipboardAttachment,
@@ -80,8 +81,9 @@ export async function importComposerContextClipboard(
   const copied =
     decodeComposerContextFragment(input.fragment) ?? decodeComposerContextClipboardHtml(input.html);
   // A thread link becomes a chip only where this agent can read its machine; others stay links.
+  // Fork (Parked): with its chip gone from the text, `referencedComposerContext` drops its record.
   const threads = threadLinkContextReferences(
-    input.text,
+    withoutParkedReferences(input.text),
     copied?.records ?? [],
     (ref) => appAtomRegistry.get(environmentThreadShells.threadShellAtom(ref))?.title,
     (record) =>

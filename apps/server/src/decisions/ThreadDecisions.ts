@@ -1,5 +1,6 @@
 import {
   MessageId,
+  ParkedContextRecord,
   type ThreadArtifact,
   type ThreadArtifactLinkInput,
   type ThreadArtifactUnlinkInput,
@@ -9,12 +10,13 @@ import {
   type ThreadDecisionsSnapshot,
   type ThreadId,
   type ThreadParkedItem,
-  type ThreadParkedKind,
+  type ThreadParkedKindWord,
   type ThreadParkedUpdateInput,
   THREAD_ARTIFACTS_LIMIT,
   THREAD_DECIDED_WITHOUT_ASKING_LIMIT,
   THREAD_PARKED_RESOLVED_LIMIT,
 } from "@t3tools/contracts";
+import { collectComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import { artifactLinksIn, parseArtifactLink } from "@t3tools/shared/sessionKit/artifacts";
@@ -27,7 +29,12 @@ import {
   readReplyDecisions,
   splitQuestion,
 } from "@t3tools/shared/sessionKit/decisions";
-import { isPlaceholder } from "@t3tools/shared/sessionKit/parks";
+import {
+  isPlaceholder,
+  OLDER_KIND_WORD,
+  PARK_KIND_OF_WORD,
+  parkKind,
+} from "@t3tools/shared/sessionKit/parks";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -190,23 +197,57 @@ const cardReplies = (
   return replies;
 };
 
+// A user message as the parked pass reads it: its text and the context records riding on it. Records are
+// provider-shaped data any build may have written, so each is decoded alone and an odd one is skipped.
+const decodeSentMessage = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      text: Schema.String,
+      context: Schema.optional(Schema.Struct({ records: Schema.Array(Schema.Unknown) })),
+    }),
+  ),
+);
+const decodeParkedRecord = Schema.decodeUnknownOption(ParkedContextRecord);
+
+/**
+ * The parked items a message of `threadId` carries: its parked chips' records that its text also
+ * references, as `projectComposerContextForProvider` sends them, and that name this thread. A record
+ * whose chip was deleted from the text before the send never reached the agent; one naming another
+ * thread (a chip pasted across threads or machines, where the same id is another item) marks nothing.
+ */
+const parkedItemsCarried = (threadId: ThreadId, payload: string): ReadonlyArray<number> => {
+  const message = Option.getOrUndefined(decodeSentMessage(payload));
+  if (message?.context === undefined) return [];
+  const referenced = new Set(
+    collectComposerContextReferences(message.text).map((reference) => reference.contextId),
+  );
+  return message.context.records.flatMap((candidate) => {
+    const record = Option.getOrUndefined(decodeParkedRecord(candidate));
+    return record !== undefined &&
+      record.payload.threadId === threadId &&
+      referenced.has(record.contextId)
+      ? [record.payload.itemId]
+      : [];
+  });
+};
+
 export interface ThreadParkRequest {
   readonly threadId: ThreadId;
-  readonly items: ReadonlyArray<{ readonly kind: ThreadParkedKind; readonly text: string }>;
+  readonly items: ReadonlyArray<{ readonly kind: ThreadParkedKindWord; readonly text: string }>;
   readonly parkedBy: ThreadParkedItem["parkedBy"];
 }
 
 export const PLACEHOLDER_PARK_MESSAGE =
   "not parked: the text is empty or a placeholder. Park only what the user asked to set aside, or a real follow-up.";
 
-const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped", sent: "sent" } as const;
+const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped" } as const;
 
 export class ThreadDecisions extends Context.Service<
   ThreadDecisions,
   {
     /**
      * Reads the thread's messages, answered question cards and Artifact tool calls after their
-     * watermarks; true when a row changed.
+     * watermarks, and which parked items its messages carried; true when a row changed.
      */
     readonly sync: (threadId: ThreadId) => Effect.Effect<boolean, ThreadDecisionsError>;
     readonly snapshot: (
@@ -250,9 +291,11 @@ export const layer = Layer.effect(
     // Parked items are user-authored and cannot be rebuilt, so only a soft-deleted thread drops them.
     yield* Effect.forEach(
       [
-        `DELETE FROM fork_thread_parked_items WHERE thread_id IN (
-          SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL
-        )`,
+        ...["fork_thread_parked_items", "fork_thread_parked_set_aside"].map(
+          (table) => `DELETE FROM ${table} WHERE thread_id IN (
+            SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL
+          )`,
+        ),
         ...[
           "fork_thread_decision_questions",
           "fork_thread_decided_without_asking",
@@ -769,7 +812,105 @@ export const layer = Layer.effect(
       return changed;
     }, sql.withTransaction);
 
+    // Every (item, message) pair of the thread's user messages carrying an item's chip, oldest message
+    // first. `reached`: the message is not one whose queued run was cancelled before it started.
+    // Ceiling: it reads every user message of the thread naming a parked record, each sync; thousands
+    // would want a watermark over the messages already read.
+    const carriedPairs = Effect.fn("ThreadDecisions.carriedPairs")(function* (threadId: ThreadId) {
+      const messages = yield* sql<{
+        readonly messageId: string;
+        readonly createdAt: string;
+        readonly payload: string;
+        readonly neverStarted: number | null;
+      }>`
+        SELECT message.message_id AS "messageId", message.created_at AS "createdAt",
+          message.payload_json AS payload,
+          run.status = 'cancelled' AND json_extract(run.payload_json, '$.startedAt') IS NULL
+            AS "neverStarted"
+        FROM orchestration_v2_projection_messages AS message
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+        WHERE message.thread_id = ${threadId} AND message.role = 'user'
+          AND instr(message.payload_json, '"parked"') > 0
+        ORDER BY message.created_at, message.message_id
+      `;
+      return messages.flatMap((message) =>
+        parkedItemsCarried(threadId, message.payload).map((itemId) => ({
+          itemId,
+          messageId: message.messageId,
+          createdAt: message.createdAt,
+          reached: message.neverStarted !== 1,
+        })),
+      );
+    });
+
+    // Sent and back to Open, from the records; FORK.md, "Parked items", has the rules (MAIN-75). An item
+    // is Sent while a message carrying it reached (or waits to reach) the agent and no Reopen set that
+    // message aside, so each sync re-reads every pair: a chip removed from a queued message and put
+    // back marks the item again.
+    const syncParkedSends = Effect.fn("ThreadDecisions.syncParkedSends")(function* (
+      threadId: ThreadId,
+    ) {
+      const pairKey = (itemId: number, messageId: string) => `${itemId}:${messageId}`;
+      const setAside = new Set(
+        (yield* sql<{ readonly itemId: number; readonly messageId: string }>`
+          SELECT item_id AS "itemId", message_id AS "messageId"
+          FROM fork_thread_parked_set_aside WHERE thread_id = ${threadId}
+        `).map((row) => pairKey(row.itemId, row.messageId)),
+      );
+      const live = (yield* carriedPairs(threadId)).filter(
+        (pair) => pair.reached && !setAside.has(pairKey(pair.itemId, pair.messageId)),
+      );
+      const items = yield* sql<{
+        readonly id: number;
+        readonly state: string;
+        readonly sentMessageId: string | null;
+      }>`
+        SELECT id, state, sent_message_id AS "sentMessageId"
+        FROM fork_thread_parked_items WHERE thread_id = ${threadId} AND state IN ('open', 'sent')
+      `;
+      const now = DateTime.formatIso(yield* DateTime.now);
+      let changed = false;
+      for (const item of items) {
+        // A null message is a row the old Send button marked: nothing reads it back.
+        if (item.state === "sent" && item.sentMessageId === null) continue;
+        const carriers = live.filter((pair) => pair.itemId === item.id);
+        if (
+          item.state === "sent" &&
+          carriers.some((pair) => pair.messageId === item.sentMessageId)
+        ) {
+          continue;
+        }
+        const carrier = carriers[0];
+        if (carrier === undefined && item.state === "open") continue;
+        yield* carrier === undefined
+          ? sql`
+              UPDATE fork_thread_parked_items
+              SET state = 'open', sent_message_id = NULL, resolved_at = NULL, updated_at = ${now}
+              WHERE id = ${item.id}
+            `
+          : sql`
+              UPDATE fork_thread_parked_items
+              SET state = 'sent', sent_message_id = ${carrier.messageId},
+                resolved_at = ${carrier.createdAt}, updated_at = ${now}
+              WHERE id = ${item.id}
+            `;
+        changed = true;
+      }
+      return changed;
+    }, sql.withTransaction);
+
     const sync = Effect.fn("ThreadDecisions.sync")(function* (threadId: ThreadId) {
+      const parkedChanged = yield* syncParkedSends(threadId).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to read the parked items a thread's messages carried", {
+            threadId,
+            cause,
+          }).pipe(Effect.as(false)),
+        ),
+      );
+      // Published as soon as its own transaction commits: the rest of the sync can wait seconds on the
+      // decision judge, or fail, and neither may hold back a Sent (Sol round 3, S6).
+      if (parkedChanged) yield* PubSub.publish(changes, threadId);
       const changed = yield* locks
         .withLock(
           threadId,
@@ -796,7 +937,7 @@ export const layer = Layer.effect(
         )
         .pipe(Effect.mapError(fail("Could not read this thread's decisions.")));
       if (changed) yield* PubSub.publish(changes, threadId);
-      return changed;
+      return changed || parkedChanged;
     });
 
     const snapshot = Effect.fn("ThreadDecisions.snapshot")(
@@ -843,7 +984,7 @@ export const layer = Layer.effect(
           createdAt: message.createdAt,
           lines: new Set(message.text.split("\n").map((line) => line.trim())),
         }));
-        const parked = yield* sql<ThreadParkedItem>`
+        const parkedRows = yield* sql<ThreadParkedItem>`
           SELECT * FROM (
             SELECT id, kind, text, state, parked_by AS "parkedBy", created_at AS "createdAt",
               updated_at AS "updatedAt", resolved_at AS "resolvedAt"
@@ -861,6 +1002,13 @@ export const layer = Layer.effect(
             LIMIT ${THREAD_PARKED_RESOLVED_LIMIT}
           )
         `;
+        const parked = parkedRows.map((row) => ({
+          ...row,
+          // Stored in the new words (an older build may still write the old ones); said in the older
+          // word, which every client reads (ThreadParkedItem's `kind`). No build writes any other; one
+          // would show as the person's rather than vanish.
+          kind: OLDER_KIND_WORD[parkKind(row.kind) ?? "me"],
+        }));
         // Type names join here, so a name learned after a row was written still names it.
         const artifacts = yield* sql<ArtifactRow>`
           SELECT artifact.link_id AS id, artifact.url, artifact.title, artifact.description,
@@ -997,7 +1145,8 @@ export const layer = Layer.effect(
             INSERT INTO fork_thread_parked_items (
               thread_id, kind, text, state, parked_by, created_at, updated_at
             ) VALUES (
-              ${input.threadId}, ${item.kind}, ${item.text.trim()}, 'open', ${input.parkedBy},
+              ${input.threadId}, ${PARK_KIND_OF_WORD[item.kind]}, ${item.text.trim()}, 'open',
+              ${input.parkedBy},
               ${now}, ${now}
             )
           `;
@@ -1016,18 +1165,41 @@ export const layer = Layer.effect(
       if (input.action === "edit") yield* refusePlaceholder(input.text);
       const now = DateTime.formatIso(yield* DateTime.now);
       const reopening = input.action === "reopen";
-      const set =
-        input.action === "edit"
-          ? sql`text = ${input.text.trim()}`
-          : reopening
-            ? sql`state = 'open', resolved_at = NULL`
-            : sql`state = ${RESOLVED_PARKED_STATE[input.action]}, resolved_at = ${now}`;
-      const updated = yield* sql`
-        UPDATE fork_thread_parked_items SET ${set}, updated_at = ${now}
-        WHERE thread_id = ${input.threadId} AND id = ${input.id}
-          AND ${reopening ? sql`state <> 'open'` : sql`state = 'open'`}
-        RETURNING id
-      `.pipe(Effect.mapError(fail("Could not update this item.")));
+      const set = (() => {
+        switch (input.action) {
+          case "edit":
+            return sql`text = ${input.text.trim()}`;
+          case "move":
+            return sql`kind = ${PARK_KIND_OF_WORD[input.kind]}`;
+          case "reopen":
+            return sql`state = 'open', resolved_at = NULL, sent_message_id = NULL`;
+          case "done":
+          case "drop":
+            return sql`state = ${RESOLVED_PARKED_STATE[input.action]}, resolved_at = ${now}`;
+        }
+      })();
+      const updated = yield* Effect.gen(function* () {
+        const rows = yield* sql`
+          UPDATE fork_thread_parked_items SET ${set}, updated_at = ${now}
+          WHERE thread_id = ${input.threadId} AND id = ${input.id}
+            AND ${reopening ? sql`state <> 'open'` : sql`state = 'open'`}
+          RETURNING id
+        `;
+        // Every message recorded carrying it so far no longer marks it Sent, read now rather than from
+        // what a sync has seen: one recorded just before this but not yet synced would undo the Reopen.
+        // Only a message recorded after this marks it again.
+        if (reopening && rows.length > 0) {
+          for (const pair of yield* carriedPairs(input.threadId)) {
+            if (pair.itemId !== input.id) continue;
+            yield* sql`
+              INSERT INTO fork_thread_parked_set_aside (thread_id, item_id, message_id)
+              VALUES (${input.threadId}, ${input.id}, ${pair.messageId})
+              ON CONFLICT DO NOTHING
+            `;
+          }
+        }
+        return rows;
+      }).pipe(sql.withTransaction, Effect.mapError(fail("Could not update this item.")));
       if (updated.length === 0) {
         return yield* new ThreadDecisionsError({
           message: reopening

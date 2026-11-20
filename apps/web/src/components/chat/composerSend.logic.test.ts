@@ -3,7 +3,7 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { describe, expect, it } from "vite-plus/test";
 import type { ComposerThreadDraftState } from "../../composerDraftStore";
 import { formatInlineContextReference } from "../../lib/composerContextReferences";
-import { threadContextReference } from "../../lib/composerContextRecords";
+import { parkedContextRecord, threadContextReference } from "../../lib/composerContextRecords";
 import { threadContextRecord } from "@t3tools/shared/composerContextReferences";
 import {
   approvalRedirectNotice,
@@ -40,6 +40,7 @@ it("detects draft edits during upload preparation without treating upload metada
     reviewComments: [],
     threadContexts: [],
     environmentContexts: [],
+    parkedContexts: [],
     replyTo: null,
     modelSelectionByProvider: {},
     activeProvider: null,
@@ -57,6 +58,9 @@ it("detects draft edits during upload preparation without treating upload metada
   expect(composerDraftContentChanged(draft, { ...draft, threadContexts: [localThread] })).toBe(
     true,
   );
+  // Fork (Parked): a chip removed while an image held the send must not go out with it.
+  const parked = parkedContextRecord({ id: 7, text: "Add a doctor check" }, ThreadId.make("a"));
+  expect(composerDraftContentChanged(draft, { ...draft, parkedContexts: [parked] })).toBe(true);
 });
 
 describe("referencedThreadContexts", () => {
@@ -181,7 +185,7 @@ describe("composerParkDecision", () => {
   it("parks the command's items", () => {
     expect(composerParkDecision(send)).toEqual({
       kind: "park",
-      command: { parks: [{ kind: "todo", text: "fix the flaky test" }], placeholders: 0 },
+      command: { parks: [{ kind: "me", text: "fix the flaky test" }], placeholders: 0 },
     });
   });
 

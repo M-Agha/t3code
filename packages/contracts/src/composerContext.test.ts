@@ -4,8 +4,10 @@ import * as Schema from "effect/Schema";
 
 import {
   COMPOSER_CONTEXT_KINDS,
+  ComposerContextKind,
   ComposerContextRecord,
   OrchestrationMessageContext,
+  UnknownContextRecord,
 } from "./composerContext.ts";
 
 const decodeRecord = Schema.decodeUnknownOption(ComposerContextRecord);
@@ -118,6 +120,13 @@ const knownRecords: Record<(typeof COMPOSER_CONTEXT_KINDS)[number], Record<strin
     label: "vps",
     environmentId: "environment-vps",
   },
+  // Fork (Parked).
+  parked: {
+    ...base,
+    kind: "parked",
+    label: "Add a doctor check",
+    payload: { itemId: 7, threadId: "thread-1", text: "Add a doctor check" },
+  },
   response: {
     ...base,
     kind: "response",
@@ -156,6 +165,21 @@ describe("ComposerContextRecord", () => {
       label: "Future",
       payload: { anything: [1, 2, 3] },
     });
+  });
+
+  // Fork (Parked): an official build shares ~/.t3 and knows no `parked` kind. Its unknown-kind slot
+  // excludes only its own kinds, so it reads the record there and keeps the item's whole text.
+  it("shapes a parked record as the unknown-kind record an official build keeps", () => {
+    const officialUnknown = Schema.decodeUnknownOption(
+      Schema.Struct({ ...UnknownContextRecord.fields, kind: ComposerContextKind }),
+    );
+    const text = "Add a doctor check\n".repeat(20);
+    const parked = { ...knownRecords.parked, payload: { itemId: 7, threadId: "thread-1", text } };
+    expect(Option.getOrThrow(decodeRecord(parked))).toEqual(parked);
+    expect(Option.getOrThrow(officialUnknown(parked))).toEqual(parked);
+    // The fields at the top level, as the first draft of the chip had them: the official build drops it.
+    const { payload: _, ...bare } = parked;
+    expect(Option.isNone(officialUnknown({ ...bare, itemId: 7, text }))).toBe(true);
   });
 
   it("does not let a malformed known kind slide through as unknown", () => {
