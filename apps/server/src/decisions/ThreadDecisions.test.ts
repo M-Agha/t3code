@@ -130,7 +130,7 @@ const nextAt = () => {
 
 const message = Effect.fn("message")(function* (
   messageId: string,
-  runId: string,
+  runId: string | null,
   role: "user" | "assistant",
   text: string,
   extra: Record<string, unknown> = {},
@@ -257,6 +257,106 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
   }).pipe(Effect.provide(withDecisions)),
 );
 
+// The Orchestrator gives a queued run a new ordinal only when it starts, so a run that started ahead of a held
+// one carries the higher ordinal; the queued answer is still unseen.
+it.effect("keeps an answer whose run is still queued behind a run that started ahead of it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const ask = "Q46, picks: Use my picks? My pick is yes: they match the boards.";
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", ask);
+    yield* run("r2", 2, "queued");
+    yield* message("u2", "r2", "user", "Q46: yes");
+    yield* run("r3", 3, "completed", "2026-01-02T00:03:00.000Z");
+    yield* message("u3", "r3", "user", "Check the colours.");
+    yield* message("a3", "r3", "assistant", `Colours checked.\n\n${ask}`);
+    yield* decisions.sync(threadId);
+    const kept = yield* question("Q46");
+    assert.deepEqual([kept?.state, kept?.answerMessageId], ["answered", "u2"]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Q46 (2026-11-19): "Q46: yes" was sent while the run was still working, so it queued as the next run, and
+// that run's reply, which had not seen it, asked Q46 again and reopened it. The reply may be read only after
+// the answer's run started (a backfill on subscribe): its later ordinal still says the reply never saw it.
+it.effect("keeps an answer of a later run that started before the reply was read", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const ask = "Q46, picks: Use my picks? My pick is yes: they match the boards.";
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", ask);
+    yield* run("r2", 2, "completed");
+    yield* message("u2", "r2", "user", "Update the design.");
+    yield* run("r3", 3, "running", "2026-01-02T00:05:00.000Z");
+    yield* message("u3", "r3", "user", "Q46: yes");
+    yield* message("a2", "r2", "assistant", `Boards updated.\n\n${ask}`);
+    yield* decisions.sync(threadId);
+    const kept = yield* question("Q46");
+    assert.deepEqual([kept?.state, kept?.answerMessageId], ["answered", "u3"]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// A queued answer counts as unseen only against a reply whose run is known.
+it.effect("reopens by time order when the answer or the re-asking reply has no run", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const ask46 = "Q46, picks: Use my picks? My pick is yes: they match the boards.";
+    const ask47 = "Q47, colours: Keep the colours? My pick is yes: they pass contrast.";
+    const ask48 = "Q48, fonts: Keep the fonts? My pick is yes: they load fast.";
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", `${ask46}\n${ask47}\n${ask48}`);
+    yield* message("u1", null, "user", "Q46: yes");
+    yield* run("r2", 2, "completed");
+    yield* message("u2", "r2", "user", "Q47: yes");
+    yield* message("a2", "r2", "assistant", `Boards updated.\n\n${ask46}`);
+    yield* run("r3", 3, "queued");
+    yield* message("u3", "r3", "user", "Q48: yes");
+    yield* message("a3", null, "assistant", `Imported.\n\n${ask47}\n${ask48}`);
+    yield* decisions.sync(threadId);
+    const [q46, q47, q48] = [
+      yield* question("Q46"),
+      yield* question("Q47"),
+      yield* question("Q48"),
+    ];
+    assert.deepEqual(yield* states(), { Q46: "open", Q47: "open", Q48: "open" });
+    assert.deepEqual(
+      [q46?.sourceMessageId, q47?.sourceMessageId, q48?.sourceMessageId],
+      ["a2", "a3", "a3"],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// A run that ended before it started (cancelled while queued, or failed to start) never delivered its message;
+// one cancelled after it started did.
+it.effect("takes no message whose run never started as an answer", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message(
+      "a1",
+      "r1",
+      "assistant",
+      [
+        "Q46, picks: Use my picks? My pick is yes: they fit.",
+        "Q47, colours: Keep the colours? My pick is yes: they pass contrast.",
+        "Q48, fonts: Keep the fonts? My pick is yes: they load fast.",
+      ].join("\n"),
+    );
+    yield* run("r2", 2, "cancelled");
+    yield* message("u2", "r2", "user", "Q46: yes");
+    yield* run("r3", 3, "cancelled", "2026-01-02T00:03:00.000Z");
+    yield* message("u3", "r3", "user", "Q47: yes");
+    yield* run("r4", 4, "failed");
+    yield* message("u4", "r4", "user", "Q48: yes");
+    yield* decisions.sync(threadId);
+    assert.deepEqual(yield* states(), { Q46: "open", Q47: "answered", Q48: "open" });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
 it.effect("serves each question its own part of the message that answered it", () =>
   Effect.gen(function* () {
     const decisions = yield* ThreadDecisions.ThreadDecisions;
@@ -301,6 +401,24 @@ it.effect("marks a choice vetoed once the user sends its Veto line, and publishe
     yield* message("u3", "r2", "user", "Also rename it.\n  Veto: Kept the old index. ");
     assert.isTrue(yield* decisions.sync(threadId));
     assert.deepEqual(yield* vetoed(), [["Kept the old index.", true]]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("takes no Veto line from a message whose run never started", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "failed");
+    yield* message("u1", "r2", "user", "Veto: Kept the old index.");
+    assert.isFalse(yield* decisions.sync(threadId));
+    const snapshot = yield* decisions.snapshot(threadId);
+    assert.deepEqual(
+      snapshot.decidedWithoutAsking.map((item) => item.vetoed),
+      [false],
+    );
   }).pipe(Effect.provide(withDecisions)),
 );
 

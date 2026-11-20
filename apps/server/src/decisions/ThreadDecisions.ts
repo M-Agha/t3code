@@ -80,6 +80,10 @@ interface MessageRow {
   readonly createdAt: string;
   readonly runId: string | null;
   readonly runStatus: string | null;
+  /** The run's place in its thread (`orchestration_v2_projection_runs.ordinal`); null without a run. */
+  readonly runOrdinal: number | null;
+  /** 1 when its run ended before it started (`neverStarted`), so the agent never received the message. */
+  readonly neverStarted: number | null;
   readonly streaming: number;
   readonly text: string | null;
   readonly userAuthored: number;
@@ -345,6 +349,13 @@ export const layer = Layer.effect(
       AND json_type(message.payload_json, '$.notification') IS NULL
     )`;
 
+    // A runs row named `run` that ended before it started: a queued run cancelled, or one that failed to start
+    // (the Orchestrator's failQueuedRunStart marks it `failed`). The agent never received its messages. NULL
+    // without a run.
+    const neverStarted = () => sql`(
+      run.status IN ('cancelled', 'failed') AND json_extract(run.payload_json, '$.startedAt') IS NULL
+    )`;
+
     // Rows in order, in one transaction: the questions a run's reply asks, the closing found for each user
     // message among them, then the watermark past the last row.
     const applyRows = Effect.fn("ThreadDecisions.applyRows")(function* (
@@ -360,6 +371,21 @@ export const layer = Layer.effect(
         if (row.text === null) continue;
         if (replies.has(row.messageId)) {
           const read = readReplyDecisions(row.text);
+          // A re-ask never reopens a question answered by a message the reply could not have seen: one of a later
+          // run (Q46, 2026-11-19), or of a run still queued (its ordinal changes only when it starts). A steer shares
+          // the reply's run. Either run unknown (imported, a card's answer): time order; the reply's case needs this
+          // branch, as `ordinal > NULL OR status = 'queued'` holds for a queued answer.
+          const unlessAnsweredLater =
+            row.runOrdinal === null
+              ? sql``
+              : sql`AND NOT EXISTS (
+                  SELECT 1
+                  FROM orchestration_v2_projection_messages AS answer
+                  JOIN orchestration_v2_projection_runs AS answer_run
+                    ON answer_run.run_id = answer.run_id
+                  WHERE answer.message_id = fork_thread_decision_questions.answer_message_id
+                    AND (answer_run.ordinal > ${row.runOrdinal} OR answer_run.status = 'queued')
+                )`;
           for (const question of read.questions) {
             // Only a shaped re-ask ("My pick is") reopens or rewords a known label. An unshaped line about it
             // ("Q4 remains open", or an agent echoing "Q7: nothing to change." after the user answered) changes
@@ -379,6 +405,7 @@ export const layer = Layer.effect(
                 answer_message_id = NULL,
                 resolved_at = NULL
               WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`0`}
+                ${unlessAnsweredLater}
               RETURNING label
             `;
             changed ||= asked.length > 0;
@@ -397,8 +424,13 @@ export const layer = Layer.effect(
           }
           continue;
         }
-        // The snapshot reads vetoes from the user's messages, so one with a veto line changes it.
-        changed ||= row.role === "user" && row.userAuthored === 1 && VETO_LINE.test(row.text);
+        // The snapshot reads vetoes from the user's messages that reached (or wait to reach) the agent, so one with a veto line
+        // changes it.
+        changed ||=
+          row.role === "user" &&
+          row.userAuthored === 1 &&
+          row.neverStarted !== 1 &&
+          VETO_LINE.test(row.text);
         const closing = closings.get(row.messageId);
         if (closing === undefined) continue;
         for (const [state, labels] of [
@@ -485,6 +517,8 @@ export const layer = Layer.effect(
           message.created_at AS "createdAt",
           message.run_id AS "runId",
           run.status AS "runStatus",
+          run.ordinal AS "runOrdinal",
+          ${neverStarted()} AS "neverStarted",
           message.streaming,
           json_extract(message.payload_json, '$.text') AS text,
           ${userAuthored()} AS "userAuthored",
@@ -517,7 +551,14 @@ export const layer = Layer.effect(
       let changed = false;
       let start = 0;
       for (const [index, row] of ready.entries()) {
-        if (row.role !== "user" || row.userAuthored !== 1 || row.text === null) continue;
+        // A message whose run never started never reached the agent, so it answers nothing.
+        if (
+          row.role !== "user" ||
+          row.userAuthored !== 1 ||
+          row.text === null ||
+          row.neverStarted === 1
+        )
+          continue;
         changed =
           (yield* applyRows(threadId, ready.slice(start, index), replies, new Map())) || changed;
         const closing = yield* closingOf(
@@ -857,7 +898,7 @@ export const layer = Layer.effect(
     }, sql.withTransaction);
 
     // Every (item, message) pair of the thread's user messages carrying an item's chip, oldest message
-    // first. `reached`: the message is not one whose queued run was cancelled before it started.
+    // first. `reached`: the message's run did not end before it started (`neverStarted`).
     // Ceiling: it reads every user message of the thread naming a parked record, each sync; thousands
     // would want a watermark over the messages already read.
     const carriedPairs = Effect.fn("ThreadDecisions.carriedPairs")(function* (threadId: ThreadId) {
@@ -869,8 +910,7 @@ export const layer = Layer.effect(
       }>`
         SELECT message.message_id AS "messageId", message.created_at AS "createdAt",
           message.payload_json AS payload,
-          run.status = 'cancelled' AND json_extract(run.payload_json, '$.startedAt') IS NULL
-            AS "neverStarted"
+          ${neverStarted()} AS "neverStarted"
         FROM orchestration_v2_projection_messages AS message
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
         WHERE message.thread_id = ${threadId} AND message.role = 'user'
@@ -1008,9 +1048,9 @@ export const layer = Layer.effect(
           ORDER BY created_at DESC, ordinal ASC
           LIMIT ${THREAD_DECIDED_WITHOUT_ASKING_LIMIT}
         `;
-        // A choice is vetoed once a message the user sent after its reply holds the panel's line
-        // `Veto: <text>`, trimmed as the panel reads its draft. One read for the thread's messages
-        // with a veto line; the lines are matched here.
+        // A choice is vetoed once a message the user sent after its reply, and that reached (or waits to reach) the agent,
+        // holds the panel's line `Veto: <text>`, trimmed as the panel reads its draft. One read for the
+        // thread's messages with a veto line; the lines are matched here.
         const oldest = decided.at(-1)?.createdAt;
         const vetoes =
           oldest === undefined
@@ -1019,9 +1059,11 @@ export const layer = Layer.effect(
                 SELECT message.created_at AS "createdAt",
                   json_extract(message.payload_json, '$.text') AS text
                 FROM orchestration_v2_projection_messages AS message
+                LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
                 WHERE message.thread_id = ${threadId} AND message.role = 'user'
                   AND message.created_at > ${oldest}
                   AND ${userAuthored()}
+                  AND ${neverStarted()} IS NOT 1
                   AND instr(json_extract(message.payload_json, '$.text'), ${VETO_PREFIX}) > 0
               `;
         const vetoLines = vetoes.map((message) => ({
