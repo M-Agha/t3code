@@ -24,7 +24,9 @@ import {
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
+import packageJson from "../../package.json" with { type: "json" };
 import * as ProcessRunner from "../processRunner.ts";
+import { forkLeaveRefusal } from "./forkLeaveGuard.ts";
 import { isExactServiceVersion, parseServiceState, SERVICE_STATE_FILE } from "./serviceProtocol.ts";
 
 const PINNED_RUNTIME_DIR = "runtime";
@@ -414,8 +416,21 @@ const installPinnedRuntime = Effect.fn("cloud.pinned_runtime.ensure_installed")(
   );
 });
 
+// Fork-only seam (FORK.md, "Background service"): refuses to leave the fork before a cached runtime
+// or a download.
+const refuseLeavingFork = Effect.fn("cloud.pinned_runtime.refuse_leaving_fork")(function* (
+  version: string,
+) {
+  const reason = forkLeaveRefusal(packageJson.version, version, yield* HostProcess.Environment);
+  if (reason !== undefined) {
+    return yield* new PinnedRuntimePreflightBlockedError({ version, reason });
+  }
+});
+
 export const ensurePinnedRuntimeInstalled = (input: PinnedRuntimeInstallInput) =>
-  pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input));
+  refuseLeavingFork(input.version).pipe(
+    Effect.andThen(pinnedRuntimeInstallLock.withPermit(installPinnedRuntime(input))),
+  );
 
 const PINNED_RUNTIME_PRUNED_PREFIX = ".pruned-";
 /**
