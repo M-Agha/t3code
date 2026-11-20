@@ -49,6 +49,7 @@ reasons are the ones they accepted.
 | `(fork) tracker: Parked and Artifacts are right-panel tabs of their own, in theme colours`            | Questions and decisions       |
 | `(fork) artifacts: rows name their type, show what claude.ai no longer finds, and take links by hand` | Artifacts                     |
 | `(fork) parked: items are for the agent or for you, and go in the draft as chips that mark them sent` | Parked items                  |
+| `(fork) service: fork builds seed the t3 runtime that t3 service install pins`                        | Background service            |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -553,6 +554,74 @@ when an assistant message finishes, so those questions are not held until the ne
 - Saved remote connections are encrypted with a keychain key named after the app, so they may need
   re-entering in the fork (inferred, unverified).
 
+### Background service
+
+`t3 service install` (the background service) must work from the fork app's launcher, `~/.t3/bin/t3`,
+and keep working after every fork rebuild.
+
+- **Decision:** a service install pins a runtime at the CLI's own version and downloads it from
+  pingdotgg/t3code's releases, where no `-fork.` version exists (404 on `SHA256SUMS`, 2026-11-20).
+  A runtime already complete in `<T3 home>/runtime/versions/<version>/` is used instead
+  (`installPinnedRuntime`, `apps/server/src/cloud/pinnedRuntime.ts`). So `scripts/fork/build.sh`
+  builds that runtime beside the app, with release-desktop.yml's steps and smoke test, and
+  `scripts/fork/install.sh` seeds it with `scripts/fork/seed-runtime.sh` at install, not at build:
+  `~/.t3` is live data, and the build writes only `release/`. _Rejected:_ the service on upstream
+  Nightly's runtime (it may refuse a database the fork migrated past); fork releases with
+  `T3CODE_RELEASE_BASE_URL` pointed at them (a release pipeline for one machine; a seeded runtime is
+  used before any URL is built, so that variable needs neither setting nor blocking); upstream's own
+  installer (it cannot take a local archive).
+- **One version per build:** T3 reuses a runtime, and judges a service current, by version alone.
+  So `build.sh` adds a build number to the tag's version (`0.1.11-fork.20261118.4864.<n>`), counted
+  in the git common dir and never below the UTC time, and `t3 service install` moves the service to
+  each new build through upstream's own path instead of reusing the last one's runtime. The format
+  passes `isExactServiceVersion`, sorts above the bare tag version, and still reads as Stable and as
+  the fork's branding (checked 2026-11-20).
+- **The T3 home is `~/.t3`:** an app opened from Finder does not see a shell's `T3CODE_HOME`, so
+  install.sh refuses any other value, and the backup is always of the database the app migrates.
+  _Rejected:_ resolving the home from the shell as the CLI does (it backs up and seeds a home the
+  app does not use). Other homes are unsupported; the upgrade path is resolving the app's own home.
+- **The fork version rule:** a version is the fork's when its prerelease starts with `fork.`
+  (`apps/server/src/cloud/forkLeaveGuard.ts`); build.sh, install.sh and seed-runtime.sh match it.
+- **Kept from prune:** each service start prunes every runtime over an hour old that nothing names
+  (`prunePinnedRuntimes`). Once the new app is in place, install.sh runs that runtime's own
+  `t3 install` with its bin dir at `~/.t3/runtime/fork-bin`: upstream records the launcher it
+  writes in `runtime/launchers`, which the prune keeps (install.sh checks the record: `t3 install`
+  only warns when it cannot write one), and the folder shadows no `t3` on PATH. It writes nothing
+  else: `forkServiceRuntime.test.ts` checks that the home then holds only `runtime/versions`,
+  `runtime/fork-bin` and `runtime/launchers`. Until then a failure or interrupt puts the previous
+  app back; the launcher then names the previous runtime unless `t3 install` already ran.
+- **The seed** never replaces or removes a runtime: a version already there is the same build. It
+  publishes by a rename that never clobbers, so of two seeds at once one fails ("something took
+  that name"). A SIGKILL skips its cleanup and can leave a `~/.t3/runtime/versions/.fork-seed.*`
+  folder (about 150 MB) that prune never removes; once no seed runs, delete it with `rm -rf`.
+- **Leaving the fork:** a `-fork.` version reads as Stable, and upstream's v0.1.11 (2026-11-20, last
+  migration 102) is newer than every 0.1.11-fork build and runs on the fork's database (the fork's
+  tables have their own ledger, so `servicePreflight.ts` finds nothing it does not know). So
+  `t3 update` and a client's server update would complete a switch to upstream, and the next fork
+  build would meet the service's downgrade guard. A fork build refuses to pin a runtime that is not
+  a fork version unless `T3CODE_LEAVE_FORK=1` is set (in the shell for `t3 update`, in `service.env`
+  for the service). The guard protects only commands run by fork code: every packaged T3 Code app
+  points `~/.t3/bin/t3` at its own CLI when it starts (`DesktopCliShim.ts`), and after an official
+  app ran, `t3 service install` or `t3 update` is upstream's code, with no guard. install.sh checks
+  that `~/.t3/bin/t3` is this build's before it says to run one.
+- **Seam:** one, `ensurePinnedRuntimeInstalled` in `pinnedRuntime.ts`, chained after
+  `refuseLeavingFork` beside it. On conflict keep upstream's body and chain the guard before it
+  again; if upstream splits the function, the guard goes where `t3 update`, the server's self-update
+  and `t3 service install` all still pass.
+- **Test seam:** upstream's `selfUpdate.test.ts` "keeps preparing after the progress stream closes"
+  ended while the detached update still wrote its SSH launch marker, and removing the temp folder
+  then failed with `ENOTEMPTY`. The seam's extra step made that race show: 5 of 40 runs failed with
+  four runs at a time (0 of 40 one at a time), 2026-11-20. The test's harness now completes a
+  `Deferred` when the marker is renamed into place (the update's last write), and the test awaits
+  it: 0 of 80 under the same load, 4 of 40 with the await taken out. On conflict keep upstream's
+  test and re-add the `markerPublished` option and await; drop them once upstream's test waits for
+  the update itself.
+- **Conflict guidance:** `apps/server/src/cloud/forkServiceRuntime.test.ts` fails when upstream
+  changes what makes a runtime reusable (the sentinel, the layout, the install call in
+  `bootService.ts` `install`, its version check), what `t3 install` writes and records, or what the
+  prune keeps. Make the seed and install.sh produce what the new code accepts; if a service install
+  now insists on a published release, stop and ask the owner.
+
 ### Translation
 
 Upstream translates the app with `gt-react` (present at 4825; the app-wide rollout and the lint rule
@@ -730,6 +799,7 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    - `apps/server/src/persistence/ForkMigrations.test.ts` and `Sqlite.test.ts`.
    - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
      `DesktopEnvironment`, `DesktopPreReadyPlatform`).
+   - `apps/server/src/cloud/forkServiceRuntime.test.ts` (the background service's runtime).
    - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts`,
      `ThreadParked.browser.test.tsx` (its last case: a status from a `msg()` table, in French),
      `ThreadParked.touch.browser.test.tsx` (with the stylesheet) and
@@ -775,9 +845,12 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
    are upstream's public production identifiers, the same ones official builds embed. Then run
    `scripts/fork/build.sh`: it moves the old build to the trash, clears any update feed, and stamps
-   the version from the upstream tag below HEAD (`v0.1.11-nightly.20261117.4825` becomes
-   `0.1.11-fork.20261117.4825`). Without the stamp the app reported package.json's older version and
+   the version from the upstream tag below HEAD and a build number
+   (`v0.1.11-nightly.20261117.4825` becomes `0.1.11-fork.20261117.4825.<n>`, see "Background
+   service"). Without the stamp the app reported package.json's older version and
    linked clients called it out of date; a `-nightly.` version would rebrand it "T3 Code (Nightly)".
+   It then builds the background service's runtime archive at the same version and smoke-tests it
+   (see "Background service").
    The build must not contain `app-update.yml`. `scripts/fork/install.sh` refuses a build without
    T3 Connect or without a `-fork.` version. Known limits of the `-fork.` version, both unused today
    (Fable 5.2 review, 2026-11-17): an SSH environment started from the fork asks for a
@@ -794,6 +867,24 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
 `~/.t3/userdata/statev2.sqlite` to `~/.claude/trash/` with SQLite's online backup, checks the copy's
 integrity, and installs `T3 Code (Fork).app` from `release/` beside the official apps. The first start
 of a newer build migrates `~/.t3` one way, and that copy is the only way back.
+
+It also seeds the build's t3 runtime into `~/.t3/runtime/versions/<version>/` ("Background
+service"). With the background service, for each install:
+
+1. Before install.sh, stop the service if it runs (install.sh refuses otherwise, and names the
+   command): `launchctl bootout gui/$(id -u)/com.t3tools.t3code.service`. If the install then does
+   not go ahead, `~/.t3/bin/t3 service restart` starts it again on the runtime it ran; install.sh
+   says so whenever it stops short.
+2. Run install.sh. If its last lines say `~/.t3/bin/t3` is not this build's CLI, open T3 Code (Fork)
+   once first.
+3. Turn Local environment off in Settings → Environments (the first time only).
+4. Run the command install.sh prints last: `~/.t3/bin/t3 service install`, which finds the seeded
+   runtime and starts the service on this build, or, when the same build was installed again,
+   `~/.t3/bin/t3 service restart` (`service install` would answer "already installed").
+5. Pair the app with `http://127.0.0.1:3773` (the first time only).
+6. In the dotfiles repo, run `./doctor.sh` and check its "T3 Code" step.
+
+If the app will not open after step 3: `~/.t3/bin/t3 service uninstall`, then reopen it.
 
 ## Outside this repo
 
