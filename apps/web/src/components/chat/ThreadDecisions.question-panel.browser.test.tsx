@@ -18,6 +18,7 @@ import { AppRoot } from "~/AppRoot";
 // The route loads ChatView lazily; importing it here keeps its first transform out of the timeout.
 import "~/components/ChatView";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { useRightPanelStore } from "~/rightPanelStore";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { getRouter } from "~/router";
 import {
@@ -612,6 +613,40 @@ it("Reopen waits for its toast's Undo; undone, it never reaches the server", asy
   // Sent and answered: the row waits for the snapshot that moves Q3 back to Questions.
   await vi.advanceTimersByTimeAsync(1_000);
   await expect.element(option("Reopen Q3")).toBeDisabled();
+});
+
+it("a reopen held while another surface opens keeps its Undo", async () => {
+  const reopened: unknown[] = [];
+  using _reopen = answerRpc(WS_METHODS.threadDecisionsReopen, (input: never) => {
+    reopened.push(input);
+    return Effect.void;
+  });
+  const thread = threadWithHistory("thread-decision-surface", 1);
+  await using _app = await openThread(thread, undefined, {
+    questions: [
+      open("Q4", "yes", "a"),
+      {
+        ...open("Q3", "yes", "b"),
+        state: "answered",
+        answerText: "Q3: yes",
+        resolvedAt: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+  await openTracker();
+  await page.getByRole("button", { name: "Decisions", exact: true }).click();
+  using _timers = fakeTimers();
+  await option("Reopen Q3").click();
+  await expect.element(page.getByText("Reopening Q3")).toBeVisible();
+  // Parked takes the panel, so the Tracker's panel unmounts with the reopen still held.
+  act(() =>
+    useRightPanelStore.getState().open(scopeThreadRef(ENVIRONMENT_ID, thread.id), "parked"),
+  );
+  await expect.element(page.getByLabelText("Tracker view")).not.toBeInTheDocument();
+  expect(reopened).toEqual([]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(reopened).toEqual([]);
 });
 
 it("a reopen still held when the page goes away is sent", async () => {
