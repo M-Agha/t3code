@@ -72,6 +72,8 @@ const reactTests = [
   "src/features/devices/device-stream.browser.test.ts",
   "src/features/keyboard/keyboardControllerState.test.tsx",
   "src/features/voice-input/useVoiceInputController.test.tsx",
+  // Fork (Parked).
+  "src/components/ComposerContextSheet.test.tsx",
 ];
 
 const sourceRoot = `${normalizePath(NodeURL.fileURLToPath(new URL("./src", import.meta.url)))}/`;

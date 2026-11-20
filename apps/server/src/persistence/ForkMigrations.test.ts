@@ -19,6 +19,7 @@ import ForkMigration0003 from "./ForkMigrations/003_ThreadArtifacts.ts";
 import ForkMigration0004 from "./ForkMigrations/004_ThreadDecisionCardSync.ts";
 import ForkMigration0005 from "./ForkMigrations/005_DecisionJudgeCutoff.ts";
 import ForkMigration0006 from "./ForkMigrations/006_ThreadArtifactTypes.ts";
+import ForkMigration0007 from "./ForkMigrations/007_ThreadParkedSends.ts";
 import { FORK_MIGRATIONS_TABLE, runForkMigrations } from "./ForkMigrations.ts";
 import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
@@ -37,6 +38,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
       [4, "ThreadDecisionCardSync"],
       [5, "DecisionJudgeCutoff"],
       [6, "ThreadArtifactTypes"],
+      [7, "ThreadParkedSends"],
     ]);
     assert.deepEqual(yield* runForkMigrations(), []);
 
@@ -45,7 +47,7 @@ it.effect("runs fork migrations from their own ledger after upstream's", () =>
     );
     assert.deepEqual(
       forkLedger.map((row) => row.migration_id),
-      [1, 2, 3, 4, 5, 6],
+      [1, 2, 3, 4, 5, 6, 7],
     );
     const upstream = yield* sql<{ readonly latest: number; readonly forkRows: number }>`
       SELECT MAX(migration_id) AS latest, SUM(name = 'ThreadDecisions') AS forkRows
@@ -94,6 +96,7 @@ it.effect("runs only the later migrations on a database that already has 001 and
       [4, "ThreadDecisionCardSync"],
       [5, "DecisionJudgeCutoff"],
       [6, "ThreadArtifactTypes"],
+      [7, "ThreadParkedSends"],
     ]);
     // A thread's message watermark stays; its card watermark starts empty, so every card is read once.
     // 004 checks for its columns first, so running it again changes nothing.
@@ -146,7 +149,10 @@ it.effect("006 keeps artifact rows and has every thread's Artifact calls read ag
         thread_id, after_message_created_at, after_message_id, after_item_updated_at, after_item_id
       ) VALUES ('t', '2026-01-02T00:00:00.000Z', 'm', '2026-01-01T00:00:00.000Z', 'item')
     `;
-    assert.deepEqual(yield* runForkMigrations(), [[6, "ThreadArtifactTypes"]]);
+    assert.deepEqual(yield* runForkMigrations(), [
+      [6, "ThreadArtifactTypes"],
+      [7, "ThreadParkedSends"],
+    ]);
     // 006 checks for its columns first, so running it again only resets the position once more.
     yield* ForkMigration0006;
     const rows = yield* sql`
@@ -167,6 +173,57 @@ it.effect("006 keeps artifact rows and has every thread's Artifact calls read ag
     ]);
     const names = yield* sql`SELECT * FROM fork_artifact_type_names`;
     assert.deepEqual(names, []);
+  }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+);
+
+it.effect("007 maps the old parked kinds to who acts on them and adds what marks one Sent", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations();
+    yield* Migrator.make({})({
+      table: FORK_MIGRATIONS_TABLE,
+      loader: Migrator.fromRecord({
+        "1_ThreadDecisions": ForkMigration0001,
+        "2_ThreadParked": ForkMigration0002,
+        "3_ThreadArtifacts": ForkMigration0003,
+        "4_ThreadDecisionCardSync": ForkMigration0004,
+        "5_DecisionJudgeCutoff": ForkMigration0005,
+        "6_ThreadArtifactTypes": ForkMigration0006,
+      }),
+    });
+    for (const [kind, state] of [
+      ["prompt", "open"],
+      ["todo", "done"],
+      ["later", "sent"],
+    ]) {
+      yield* sql`
+        INSERT INTO fork_thread_parked_items (
+          thread_id, kind, text, state, parked_by, created_at, updated_at
+        ) VALUES ('t', ${kind}, ${kind}, ${state}, 'user', 'x', 'x')
+      `;
+    }
+    assert.deepEqual(yield* runForkMigrations(), [[7, "ThreadParkedSends"]]);
+    // 007 checks for its column first, and the old kinds are gone, so a re-run changes nothing.
+    yield* ForkMigration0007;
+    const rows = yield* sql`
+      SELECT text, kind, state, sent_message_id FROM fork_thread_parked_items ORDER BY id
+    `;
+    // A `sent` row from the old Send button stays Sent, with no message to undo it.
+    assert.deepEqual(rows, [
+      { text: "prompt", kind: "agent", state: "open", sent_message_id: null },
+      { text: "todo", kind: "me", state: "done", sent_message_id: null },
+      { text: "later", kind: "me", state: "sent", sent_message_id: null },
+    ]);
+    assert.deepEqual(yield* sql`SELECT * FROM fork_thread_parked_set_aside`, []);
+    // Each sync reads one thread's set-aside rows: a search on the key, not a scan of every thread's.
+    const plan = yield* sql<{ readonly detail: string }>`
+      EXPLAIN QUERY PLAN
+      SELECT item_id, message_id FROM fork_thread_parked_set_aside WHERE thread_id = 't'
+    `;
+    assert.deepEqual(
+      plan.map((step) => step.detail.split(" ")[0]),
+      ["SEARCH"],
+    );
   }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
 );
 

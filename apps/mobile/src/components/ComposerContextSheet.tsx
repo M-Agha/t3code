@@ -5,13 +5,15 @@ import * as Dialog from "./ui/Dialog";
 import { useOpenPullRequest } from "../native/useOpenPullRequest";
 import { SourceFileSurface } from "../features/files/SourceFileSurface";
 import { filePreviewKind } from "@t3tools/shared/filePreview";
-import type {
-  ComposerContextRecord,
-  ElementContextSource,
-  EnvironmentId,
-  ProjectId,
-  ScopedThreadRef,
+import {
+  type ComposerContextRecord,
+  type ElementContextSource,
+  type EnvironmentId,
+  ParkedContextRecord,
+  type ProjectId,
+  type ScopedThreadRef,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { formatAttachmentSize } from "@t3tools/client-runtime/state/attachments";
 import { sourceControlClients } from "@t3tools/client-runtime/source-control-clients";
 import { changeRequestTermKind } from "../lib/changeRequestTerm";
@@ -32,6 +34,9 @@ import { AppText as Text } from "./ui/AppText";
 import { Sheet } from "./ui/Sheet";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 import { getMobileTerminalTheme } from "../features/terminal/terminalTheme";
+
+// Fork (Parked): its record has the unknown-kind shape (fields under `payload`), yet mobile reads it.
+const isParkedContextRecord = Schema.is(ParkedContextRecord);
 
 function ContextField(props: {
   label: string;
@@ -224,6 +229,10 @@ export function ComposerContextSheet(props: {
               Context unavailable. The reference was copied without its payload. Copy it again from
               the original message or remove it.
             </T>
+          </Text>
+        ) : isParkedContextRecord(record) ? (
+          <Text selectable className="text-base text-foreground">
+            {record.payload.text}
           </Text>
         ) : "payload" in record ? (
           <Text className="text-foreground">

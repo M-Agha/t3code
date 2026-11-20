@@ -3,11 +3,39 @@ import { RadioGroup as RadioGroupPrimitive } from "@base-ui/react/radio-group";
 
 import { cn } from "~/lib/utils";
 
-function RadioGroup({ className, ...props }: RadioGroupPrimitive.Props) {
+function RadioGroup({
+  className,
+  variant = "default",
+  ...props
+}: RadioGroupPrimitive.Props & {
+  /** Fork (Parked): `segmented` lays out `SegmentedRadio`s as T3's segmented control. */
+  readonly variant?: "default" | "segmented";
+}) {
   return (
     <RadioGroupPrimitive
-      className={cn("flex flex-col gap-3", className)}
+      className={cn(
+        variant === "segmented"
+          ? "flex w-fit gap-0.5 rounded-lg bg-input/40 p-0.5"
+          : "flex flex-col gap-3",
+        className,
+      )}
       data-slot="radio-group"
+      {...props}
+    />
+  );
+}
+
+// Fork (Parked): a radio drawn as a segment of T3's segmented control, its checked one bordered like
+// the Tracker's `segmented-bordered` toggle, so a one-of choice reads as a control and still is a
+// radio (one checked, arrow keys move it). Inside a `segmented` RadioGroup.
+function SegmentedRadio({ className, ...props }: RadioPrimitive.Root.Props) {
+  return (
+    <RadioPrimitive.Root
+      className={cn(
+        "relative inline-flex h-6 min-w-0 shrink-0 cursor-pointer select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-transparent px-2.5 font-medium text-muted-foreground text-xs outline-none transition-colors hover:bg-background/55 hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-checked:border-muted-foreground data-checked:bg-background data-checked:text-foreground data-checked:shadow-xs/10 data-disabled:pointer-events-none data-disabled:opacity-64 dark:hover:bg-input/32 dark:data-checked:bg-input/72",
+        className,
+      )}
+      data-slot="segmented-radio"
       {...props}
     />
   );
@@ -31,4 +59,4 @@ function Radio({ className, ...props }: RadioPrimitive.Root.Props) {
   );
 }
 
-export { RadioGroup, Radio, Radio as RadioGroupItem };
+export { RadioGroup, Radio, Radio as RadioGroupItem, SegmentedRadio };

@@ -1,4 +1,4 @@
-// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 02e78bb1 (blob 59f4f3d8).
+// Verbatim copy of ~/repos/dotfiles/.claude/mods/session-kit/hooks/reply.ts at dotfiles main 7b96f4bc (blob 538be30a).
 // Fork-only: refresh by copying the source again below the marker; drift.test.ts compares them.
 // Fork logic built on it lives in ./decisions.ts, never in this file.
 // ---- verbatim copy below ----
@@ -305,8 +305,8 @@ export const canvasUrl = (call: { type_url?: string; url?: string; file_path?: s
 export const isRelayCommand = (command: string): boolean => /(?:^|[\s;&|/('"`])relay\s/.test(command)
 
 // `/board task …`: the vault task this session works on (`board task`), read before readParks, which would park
-// "task lc01aa" as a todo. Alone it reports the task, `--clear` clears it, anything else sets it (the CLI
-// refuses an id with whitespace). Ceiling: a todo whose text starts with the word "task" needs `/board todo task …`.
+// "task lc01aa" as an item. Alone it reports the task, `--clear` clears it, anything else sets it (the CLI
+// refuses an id with whitespace). Ceiling: an item whose text starts with the word "task" needs `/board me task …`.
 export type TaskCommand = { verb: 'show' } | { verb: 'clear' } | { verb: 'set'; id: string } | null
 export const readTask = (args: string): TaskCommand => {
   const m = /^\s*task(?:\s+([\s\S]*))?$/i.exec(args)
@@ -316,67 +316,81 @@ export const readTask = (args: string): TaskCommand => {
 }
 
 // `/board close`: the board's panes, all at once (session-board/DOT-173), read before readParks as `task` is. The bare
-// word only, in any case as `task` is: `close the door` and `closed` are todos, as any text is, and `/board todo
+// word only, in any case as `task` is: `close the door` and `closed` are items, as any text is, and `/board me
 // close` parks the word itself.
 export const isClose = (args: string): boolean => /^\s*close\s*$/i.test(args)
 
 // `/board edit <id> <text>`: a parked item's words replaced in place (`board edit`, session-board/DOT-203), read
 // before readParks as `task` and `close` are. The word, in any case as they are, then a number: the rest is the
 // text, one item whatever its lines, since they are the item's own words and not a list to split; none is an
-// edit the CLI refuses as empty, not a park of "edit 3". Ceiling: a todo that starts with "edit" and a number
-// ("edit 3 files") needs `/board todo edit 3 files`; "edit" alone, or before a word, parks as any text does.
+// edit the CLI refuses as empty, not a park of "edit 3". Ceiling: an item that starts with "edit" and a number
+// ("edit 3 files") needs `/board me edit 3 files`; "edit" alone, or before a word, parks as any text does.
 export type EditCommand = { id: number; text: string } | null
 export const readEdit = (args: string): EditCommand => {
   const m = /^\s*edit\s+(\d+)(?:\s+([\s\S]*))?$/i.exec(args)
   return m === null ? null : { id: Number(m[1]), text: (m[2] ?? '').trim() }
 }
 
+// A parked item is for the agent (words to send it later) or for the person. The kinds before these (2026-11) stay
+// words for them, so an old habit, an old tool call and a stored row all still name one: `prompt` was the agent's,
+// `todo` and `later` the person's. The words are what /board, the park tool and a stored board's `kind` say, so
+// one table reads all three.
+export type Kind = 'agent' | 'me'
+const KIND_WORDS: ReadonlyMap<string, Kind> = new Map([['agent', 'agent'], ['me', 'me'], ['prompt', 'agent'], ['todo', 'me'], ['later', 'me']])
+/** The kind a word names, an old one included, or undefined: case as written, so `Me` is not one. */
+export const parkKind = (word: unknown): Kind | undefined => (typeof word === 'string' ? KIND_WORDS.get(word) : undefined)
+/** A kind as a chip or a row says it. */
+export const KIND_LABEL: Record<Kind, string> = { agent: 'For the agent', me: 'For me' }
+
 // `/board`'s arguments as the items they park, not one per line: the person's own two-line park was one
 // thought, and a pasted list still parks as separate items when its lines are marked. The first line
 // starts an item, and so does each line that begins with a list marker (`-`, `*`, `•`, `1.`, `1)`, taken off the
-// text) or a kind word; any other line, a blank one included, continues the item above, newline-joined, so an
-// unmarked list is one item. A kind word is lowercase, or in any case before a colon ("Later:"): a capital that
-// starts a sentence ("Todo sessions and bar", parked 2026-10-16) is the text's. A comma may follow a lowercase one,
-// and a marker may come before it ("- later fix x"). An item that names no kind takes the first line's kind word,
-// which carries to every item after it, or the kind of the last line above it that is only a kind word, else todo.
-// Such a heading line starts an item that the plain lines right under it fill, so alone it parks nothing. A
-// `prompt` keeps the rest of the text whole, its lines included. None parks nothing: `/board` and `/board later`
-// open the board. Ceilings: a line opening with a lowercase kind word in prose ("later we could…") starts an item
-// of that kind; a number ending a sentence at a line's start ("2026. was…") reads as a marker; a nested bullet is
-// an item of its own.
-const KINDS = ['todo', 'prompt', 'later'] as const
-export type Kind = typeof KINDS[number]
+// text) or a kind word (KIND_WORDS); any other line, a blank one included, continues the item above, newline-joined,
+// so an unmarked list is one item. A kind word is lowercase, or in any case before a colon ("Me:"): a capital that
+// starts a sentence ("Todo sessions and bar", parked 2026-10-16) is the text's. The two new words start lines of
+// prose far more often than the old ones ("remind\nme to call bob", "- agent sdk bump"), so a bare `agent` or `me`
+// counts only at the very start of the arguments (`/board agent <text>`); after that they need the colon. A comma may follow a lowercase one,
+// and a marker may come before it ("- me fix x"). An `agent` word takes the rest of the text whole, its lines
+// included, as one item for the agent; every item before it is for the person, `me` named or not. A line that is
+// only a kind word starts an item that the plain lines right under it fill, so alone it parks nothing. None parks
+// nothing: `/board` and `/board me` open the board. Ceilings: a line opening with a lowercase kind word in prose
+// ("later we could…", "me and Sam…") starts an item of that kind; a number ending a sentence at a line's start
+// ("2026. was…") reads as a marker; a nested bullet is an item of its own.
 export type Park = { kind: Kind; text: string }
 const MARKER = /^\s*(?:[-*•]|\d+[.)])\s+/
 const KIND_WORD = /^([a-z]+)(?:(:)|(?=[\s,]|$))[:,\s]*(.*)$/i
 
-// A line's kind word and what follows it, when the line starts with one (its marker already off).
-const kindOf = (line: string): { kind: Kind; rest: string } | undefined => {
+// A line's kind word and what follows it, when the line starts with one (its marker already off). `first`: the very
+// first line of the arguments, so a bare `agent` or `me` may name the kind; a paste that opens on a blank line has none.
+const COLON_ONLY_LATER = new Set(['agent', 'me'])
+const kindOf = (line: string, first: boolean): { kind: Kind; rest: string } | undefined => {
   const m = KIND_WORD.exec(line.trimStart())
-  const kind = KINDS.find(k => k === m?.[1]?.toLowerCase())
-  return m === null || kind === undefined || (m[1] !== kind && m[2] === undefined) ? undefined : { kind, rest: (m[3] ?? '').trim() }
+  const word = m?.[1]
+  const kind = parkKind(word?.toLowerCase())
+  if (m === null || kind === undefined || word === undefined) return undefined
+  const colon = m[2] !== undefined
+  if (!colon && (word !== word.toLowerCase() || (!first && COLON_ONLY_LATER.has(word)))) return undefined
+  return { kind, rest: (m[3] ?? '').trim() }
 }
 
 export const readParks = (args: string): Park[] => {
   const lines = args.split(/\r?\n/)
   const items: { kind: Kind; lines: string[] }[] = []
-  let fallback: Kind = 'todo'
   for (const [n, line] of lines.entries()) {
     const marker = MARKER.exec(line)?.[0] ?? ''
     const body = line.slice(marker.length)
-    const named = kindOf(body)
+    const named = kindOf(body, n === 0)
     const current = items.at(-1)
     if (current !== undefined && marker === '' && named === undefined) {
       current.lines.push(line.trimEnd())
       continue
     }
     if (current === undefined && line.trim() === '') continue
-    if (named?.kind === 'prompt') {
-      items.push({ kind: 'prompt', lines: [named.rest, ...lines.slice(n + 1)] })
+    if (named?.kind === 'agent') {
+      items.push({ kind: 'agent', lines: [named.rest, ...lines.slice(n + 1)] })
       break
     }
-    if (named !== undefined && (current === undefined || named.rest === '')) fallback = named.kind
-    items.push({ kind: named?.kind ?? fallback, lines: [named?.rest ?? body] })
+    items.push({ kind: 'me', lines: [named?.rest ?? body] })
   }
   return items.map(i => ({ kind: i.kind, text: i.lines.join('\n').trim() })).filter(p => p.text !== '')
 }

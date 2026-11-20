@@ -3,8 +3,10 @@ import {
   type ComposerContextRecord,
   EnvironmentId,
   MessageId,
+  OrchestrationMessageContext,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { serializeAssistantCitation } from "./assistantCitations.ts";
@@ -25,6 +27,7 @@ import {
 } from "./composerContextReferences.ts";
 
 const ctx = (value: string) => value as ComposerContextId;
+const decodeMessageContext = Schema.decodeSync(OrchestrationMessageContext);
 
 describe("href codec", () => {
   it("round-trips kind and id", () => {
@@ -456,6 +459,34 @@ describe("provider projection", () => {
     expect(projected).toContain("environmentId: environment-vps");
     expect(projected).toContain("t3_environment_link with this environmentId");
     expect(projected).not.toMatch(/https?:/);
+  });
+
+  // Fork (Parked): the record as a stored message carries it, decoded as the server reads it back.
+  it("projects a parked item's words, as the agent is to read them", () => {
+    const context = decodeMessageContext({
+      version: 1,
+      records: [
+        {
+          version: 1,
+          kind: "parked",
+          contextId: "parked_7",
+          label: "Add a doctor check",
+          payload: {
+            itemId: 7,
+            threadId: "thread-1",
+            text: "Add a doctor check\nfor the bar's notch height",
+          },
+        },
+      ],
+    });
+    const projected = projectComposerContextForProvider({
+      text: "Also [Add a doctor check](t3-context://v1/parked/parked_7)",
+      records: context.records,
+    });
+    expect(projected.startsWith("Also [Parked: Add a doctor check; ref=parked_7]")).toBe(true);
+    expect(projected).toContain(
+      '<context kind="parked" id="parked_7">\nThe user parked this for you earlier and sends it with this message:\nAdd a doctor check\nfor the bar\'s notch height\n</context>',
+    );
   });
 
   it("marks duplicate identities unavailable instead of choosing one payload", () => {
