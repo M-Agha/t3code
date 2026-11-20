@@ -30,6 +30,7 @@ import {
   type MouseEvent,
   type RefObject,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -58,7 +59,7 @@ import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/men
 import { ScrollArea } from "../ui/scroll-area";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { artifactGroups } from "./threadDecisions.logic";
+import { artifactGroups, rowFocusAfter } from "./threadDecisions.logic";
 import { useThreadDecisions } from "./ThreadDecisions";
 
 /** What a row calls the artifact: its type's name, a plain page, or neither until a publish says. */
@@ -163,6 +164,7 @@ function ArtifactRow(props: {
   const notFound = artifact.notFoundAt !== null;
   return (
     <li
+      data-thread-artifact={artifact.id}
       className={cn(PULL_REQUEST_ROW_CLASS, "relative pl-2 hover:bg-accent/60")}
       onContextMenu={(event) => {
         event.preventDefault();
@@ -409,7 +411,8 @@ function LinkArtifactDialog(props: {
               <div id={`${id}-url-note`}>
                 {link !== null ? (
                   <p className="truncate text-muted-foreground text-xs">
-                    claude.ai artifact <code>{link.id}</code> · type unknown until Claude reads it
+                    claude.ai artifact <code>{link.id}</code> · type unknown until this thread
+                    publishes it
                   </p>
                 ) : null}
                 {problem !== null ? <p className="text-destructive text-xs">{problem}</p> : null}
@@ -467,8 +470,31 @@ export function ThreadArtifactsPanel(props: { readonly threadRef: ScopedThreadRe
   const unlink = useAtomCommand(serverEnvironment.unlinkThreadArtifact, { reportFailure: true });
   const [linking, setLinking] = useState(false);
   const linkButtonRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const artifacts = snapshot?.artifacts ?? [];
   const groups = artifactGroups(artifacts);
+  // Rows in the order they show, and where focus goes once the snapshot drops the one unlinked.
+  const shownIds = [...groups.published, ...groups.linked, ...groups.notFound].map((row) => row.id);
+  const focusAfterRef = useRef<{
+    readonly leaving: string;
+    readonly order: ReadonlyArray<string>;
+  } | null>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus off the row the snapshot removed
+  useLayoutEffect(() => {
+    const pending = focusAfterRef.current;
+    if (pending === null || shownIds.includes(pending.leaving)) return;
+    focusAfterRef.current = null;
+    // Focus fell to the body with the removed row; anywhere else, the user moved it.
+    if (document.activeElement !== null && document.activeElement !== document.body) return;
+    const next = rowFocusAfter(pending.order, pending.leaving, shownIds);
+    // None left: the Link button the empty state shows.
+    (next === null
+      ? linkButtonRef.current
+      : listRef.current?.querySelector<HTMLElement>(
+          `[data-thread-artifact="${CSS.escape(next)}"] a`,
+        )
+    )?.focus();
+  }, [shownIds, focusAfterRef, linkButtonRef, listRef]);
 
   const report = (error: unknown) => {
     console.error(error);
@@ -494,7 +520,14 @@ export function ThreadArtifactsPanel(props: { readonly threadRef: ScopedThreadRe
         failureMessage: msg("Failed to copy link to the clipboard."),
       }),
     unlink: canUnlink
-      ? (artifact) => void unlink({ environmentId, input: { threadId, id: artifact.id } })
+      ? (artifact) => {
+          focusAfterRef.current = { leaving: artifact.id, order: shownIds };
+          void unlink({ environmentId, input: { threadId, id: artifact.id } }).then((result) => {
+            if (result._tag !== "Success" && focusAfterRef.current?.leaving === artifact.id) {
+              focusAfterRef.current = null;
+            }
+          });
+        }
       : null,
   };
   const onLink = async (input: { url: string; title?: string }) => {
@@ -523,7 +556,7 @@ export function ThreadArtifactsPanel(props: { readonly threadRef: ScopedThreadRe
   const list = (
     <div className="flex h-full min-h-0 flex-col">
       <ScrollArea className="min-h-0 flex-1">
-        <div className="p-1.5">
+        <div ref={listRef} className="p-1.5">
           <ArtifactGroup title="Published here" artifacts={groups.published} actions={actions} />
           <ArtifactGroup title="Linked" artifacts={groups.linked} actions={actions} />
           <ArtifactGroup title="Not found" artifacts={groups.notFound} actions={actions} />

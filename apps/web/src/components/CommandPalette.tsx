@@ -1563,16 +1563,19 @@ function OpenCommandPaletteDialog(props: {
         useRightPanelStore.getState().open(threadRef, "decisions");
       },
     });
-    actionItems.push({
-      kind: "action",
-      value: "action:open-thread-parked",
-      searchTerms: ["parked", "park", "later", "todo", "set aside", "follow-ups"],
-      title: gt("Show parked items"),
-      icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
-      run: async () => {
-        useRightPanelStore.getState().open(threadRef, "parked");
-      },
-    });
+    // A side chat never parks (ThreadDecisions.park), so it has no Parked tab to open.
+    if (activeThread.lineage.sideChat !== true) {
+      actionItems.push({
+        kind: "action",
+        value: "action:open-thread-parked",
+        searchTerms: ["parked", "park", "later", "todo", "set aside", "follow-ups"],
+        title: gt("Show parked items"),
+        icon: <ArchiveIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          useRightPanelStore.getState().open(threadRef, "parked");
+        },
+      });
+    }
     actionItems.push({
       kind: "action",
       value: "action:open-thread-artifacts",

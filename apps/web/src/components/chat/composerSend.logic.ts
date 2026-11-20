@@ -141,12 +141,24 @@ export function composerParkDecision(
     readonly parkInFlight: boolean;
     readonly hasNonPromptContent: boolean;
     readonly threadStarted: boolean;
+    /**
+     * A side chat, in its pane or at its own URL: it never holds parks, as t3_park and the server
+     * refuse it.
+     */
+    readonly sideChat: boolean;
   },
   resolve: MessageResolver = m,
 ): ComposerParkDecision {
   if (input.directAnnotation) return { kind: "pass" };
   const command = readParkCommand(input.prompt);
   if (command === null) return { kind: "pass" };
+  if (input.sideChat) {
+    return {
+      kind: "refuse",
+      title: resolve(msg("A side chat can't park")),
+      description: resolve(msg("Park in the main thread, whose Parked tab lists it.")),
+    };
+  }
   if (input.editingQueuedRun) {
     return {
       kind: "refuse",

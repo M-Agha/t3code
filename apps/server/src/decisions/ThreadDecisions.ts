@@ -240,6 +240,10 @@ export interface ThreadParkRequest {
 export const PLACEHOLDER_PARK_MESSAGE =
   "not parked: the text is empty or a placeholder. Park only what the user asked to set aside, or a real follow-up.";
 
+/** A side chat never holds parks; in its pane, the Parked tab shown is its parent's. */
+export const SIDE_CHAT_PARK_MESSAGE =
+  "not parked: a side chat has no Parked tab; park it in the main thread.";
+
 const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped" } as const;
 
 export class ThreadDecisions extends Context.Service<
@@ -288,10 +292,17 @@ export const layer = Layer.effect(
       new ThreadDecisionsError({ message, cause });
 
     // Rows of deleted threads; their messages are gone from every view, so nothing can resolve them.
-    // Parked items are user-authored and cannot be rebuilt, so only a soft-deleted thread drops them.
+    // Parked items and artifacts hold what the user made (items, links, titles), so only a
+    // soft-deleted thread drops them; one merely absent from the projection keeps them. Ceiling: rows
+    // of a thread removed outright stay (FORK.md, Artifacts).
     yield* Effect.forEach(
       [
-        ...["fork_thread_parked_items", "fork_thread_parked_set_aside"].map(
+        ...[
+          "fork_thread_parked_items",
+          "fork_thread_parked_set_aside",
+          "fork_thread_artifacts",
+          "fork_thread_artifact_sync",
+        ].map(
           (table) => `DELETE FROM ${table} WHERE thread_id IN (
             SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL
           )`,
@@ -300,8 +311,6 @@ export const layer = Layer.effect(
           "fork_thread_decision_questions",
           "fork_thread_decided_without_asking",
           "fork_thread_decision_sync",
-          "fork_thread_artifacts",
-          "fork_thread_artifact_sync",
         ].map(
           (table) => `DELETE FROM ${table} WHERE thread_id NOT IN (
             SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
@@ -668,19 +677,22 @@ export const layer = Layer.effect(
             (${watermark?.afterMessageCreatedAt ?? ""}, ${watermark?.afterMessageId ?? ""})
         ORDER BY created_at, message_id
       `;
+      // A message still streaming holds what came after it, calls too, so a catch-up sync reads the
+      // same order an incremental one does.
       const blocked = messages.findIndex((row) => row.streaming === 1);
       const ready = blocked === -1 ? messages : messages.slice(0, blocked);
-      const lastItem = items.at(-1);
+      const heldFrom = blocked === -1 ? undefined : messages[blocked]?.createdAt;
+      const readyItems =
+        heldFrom === undefined ? items : items.filter((item) => item.updatedAt < heldFrom);
+      const lastItem = readyItems.at(-1);
       const lastMessage = ready.at(-1);
       if (lastItem === undefined && lastMessage === undefined) return false;
 
       let changed = false;
-      // Calls first, so a reply linking an artifact this thread published keeps its title. In the
-      // items' order, so a not-found and a later read or publish of the same artifact end as the later.
-      for (const item of items) {
-        if (item.payload === null) continue;
+      const readItem = function* (item: ArtifactItemRow) {
+        if (item.payload === null) return;
         const payload = Option.getOrNull(decodeArtifactItem(item.payload));
-        if (payload === null) continue;
+        if (payload === null) return;
         const { call, typeNames } = readArtifactCall(payload);
         // Global: a name one thread learns names the type wherever it shows, read when a snapshot is.
         for (const name of typeNames) {
@@ -693,11 +705,21 @@ export const layer = Layer.effect(
             RETURNING type_url
           `;
           changed ||= learned.length > 0;
+          // The same name again is news too: an older thread read later must not revert it.
+          if (learned.length === 0) {
+            yield* sql`
+              UPDATE fork_artifact_type_names SET learned_at = ${item.updatedAt}
+              WHERE type_url = ${name.url} AND title = ${name.title}
+                AND learned_at < ${item.updatedAt}
+            `;
+          }
         }
-        if (call === null) continue;
+        if (call === null) return;
         if (call.kind !== "published") {
           // Either link form names the row: its own id, or the publish's uuid. A missing artifact
-          // never adds a row; a read only clears what an earlier not-found set.
+          // never adds a row, nor marks one first seen at or after it: an incremental sync read it
+          // before that row existed, and 006's replay must agree. A read only clears what an
+          // earlier not-found set.
           const marked =
             call.kind === "notFound"
               ? yield* sql`
@@ -705,6 +727,7 @@ export const layer = Layer.effect(
                   WHERE thread_id = ${threadId}
                     AND (link_id = ${call.link.id} OR artifact_id = ${call.link.id})
                     AND (not_found_at IS NULL OR not_found_at < ${item.updatedAt})
+                    AND first_seen_at < ${item.updatedAt}
                   RETURNING link_id
                 `
               : yield* sql`
@@ -715,7 +738,7 @@ export const layer = Layer.effect(
                   RETURNING link_id
                 `;
           changed ||= marked.length > 0;
-          continue;
+          return;
         }
         const id = call.link.id;
         const description = call.description;
@@ -765,9 +788,20 @@ export const layer = Layer.effect(
           RETURNING link_id
         `;
         changed ||= upserted.length > 0 || linked !== undefined;
-      }
-      for (const row of ready) {
-        if (row.text === null) continue;
+        // An Artifact type is for good (the upsert's COALESCE), so an older call naming it still
+        // types the row the upsert skipped: migration 006's replay meets a row a later untyped
+        // publish already wrote.
+        if (typeUrl !== null && upserted.length === 0) {
+          const typed = yield* sql`
+            UPDATE fork_thread_artifacts SET type_url = ${typeUrl}, page_format = NULL
+            WHERE thread_id = ${threadId} AND link_id = ${id} AND type_url IS NULL
+            RETURNING link_id
+          `;
+          changed ||= typed.length > 0;
+        }
+      };
+      const readMessage = function* (row: (typeof ready)[number]) {
+        if (row.text === null) return;
         for (const { id, url } of artifactLinksIn(row.text)) {
           const [published] = yield* sql<{ readonly linkId: string }>`
             SELECT link_id AS "linkId" FROM fork_thread_artifacts
@@ -791,6 +825,16 @@ export const layer = Layer.effect(
           `;
           changed ||= upserted.length > 0;
         }
+      };
+      // In time order, so a not-found and a later read or publish of the same artifact end as the
+      // later, and a not-found after a reply links it marks that row however many syncs it takes.
+      // A call before a message at the same time, so a reply linking what it published keeps the title.
+      const inOrder = [
+        ...readyItems.map((item) => ({ at: item.updatedAt, item })),
+        ...ready.map((row) => ({ at: row.createdAt, row })),
+      ].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+      for (const entry of inOrder) {
+        yield* "item" in entry ? readItem(entry.item) : readMessage(entry.row);
       }
       yield* sql`
         INSERT INTO fork_thread_artifact_sync (
@@ -1135,11 +1179,14 @@ export const layer = Layer.effect(
       });
       const now = DateTime.formatIso(yield* DateTime.now);
       const parked = yield* Effect.gen(function* () {
-        const [thread] = yield* sql`
-          SELECT 1 FROM orchestration_v2_projection_threads
+        const [thread] = yield* sql<{ readonly side_chat: number | null }>`
+          SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat
+          FROM orchestration_v2_projection_threads
           WHERE thread_id = ${input.threadId} AND deleted_at IS NULL
         `;
-        if (thread === undefined) return false;
+        if (thread === undefined) return "missing";
+        // Every park passes here (the Parked tab's field, t3_park, any client), not only `/park`'s.
+        if (thread.side_chat === 1) return "sideChat";
         for (const item of input.items) {
           yield* sql`
             INSERT INTO fork_thread_parked_items (
@@ -1151,10 +1198,13 @@ export const layer = Layer.effect(
             )
           `;
         }
-        return true;
+        return "parked";
       }).pipe(sql.withTransaction, Effect.mapError(fail("Could not park this.")));
-      if (!parked) {
+      if (parked === "missing") {
         return yield* new ThreadDecisionsError({ message: "This thread was not found." });
+      }
+      if (parked === "sideChat") {
+        return yield* new ThreadDecisionsError({ message: SIDE_CHAT_PARK_MESSAGE });
       }
       yield* PubSub.publish(changes, input.threadId);
     });
@@ -1235,13 +1285,14 @@ export const layer = Layer.effect(
                 AND (link_id = ${link.id} OR artifact_id = ${link.id})
             `;
             if (listed !== undefined) {
-              // A mention becomes the user's link (their title, and Unlink); a published row keeps
-              // its own, and a title the user gives fills one it lacks. The message watermark is not
-              // reset, so an unlinked mention stays gone.
+              // A mention becomes the user's link (their title, and Unlink), dated now so it lists
+              // among the newest rows; a published row keeps its own, and a title the user gives
+              // fills one it lacks. The message watermark is not reset, so an unlinked mention stays
+              // gone.
               yield* listed.source === "mention"
                 ? sql`
                     UPDATE fork_thread_artifacts
-                    SET source = 'manual', title = COALESCE(${title}, title)
+                    SET source = 'manual', title = COALESCE(${title}, title), updated_at = ${now}
                     WHERE thread_id = ${input.threadId} AND link_id = ${listed.linkId}
                   `
                 : sql`

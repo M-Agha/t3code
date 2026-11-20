@@ -180,6 +180,7 @@ describe("composerParkDecision", () => {
     parkInFlight: false,
     hasNonPromptContent: false,
     threadStarted: true,
+    sideChat: false,
   };
 
   it("parks the command's items", () => {
@@ -201,6 +202,7 @@ describe("composerParkDecision", () => {
     ["while a park is in flight", { parkInFlight: true }],
     ["with attachments or context", { hasNonPromptContent: true }],
     ["before the thread started", { threadStarted: false }],
+    ["in a side chat, even a bare /park", { sideChat: true, prompt: "/park" }],
     ["when every item is a placeholder", { prompt: "/park tbd" }],
     ["when an item is too long", { prompt: `/park ${"x".repeat(4_001)}` }],
   ])("refuses %s", (_name, change) => {

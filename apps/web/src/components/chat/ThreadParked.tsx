@@ -57,7 +57,6 @@ import {
   ariaItemText,
   isParkedBusy,
   type ParkedBusy,
-  parkedFocusAfter,
   type ParkedGroup,
   type ParkedItem,
   parkedGroupOf,
@@ -66,6 +65,7 @@ import {
   parkedStatus,
   parkedTime,
   readParked,
+  rowFocusAfter,
 } from "./threadDecisions.logic";
 
 // Distributes over the union, so an edit keeps its text and a move its kind.
@@ -671,10 +671,12 @@ export function ThreadParkedPanel(props: {
   const [resolvedOpen, setResolvedOpen] = useState(true);
   const panelRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  // Where focus goes once the snapshot drops the item the user just finished or dropped.
-  const focusAfterRef = useRef<{ readonly leaving: number; readonly next: number | null } | null>(
-    null,
-  );
+  // Where focus goes once the snapshot drops the item the user just finished or dropped: the open
+  // rows as they showed then, so a neighbour another client resolved meanwhile is passed over.
+  const focusAfterRef = useRef<{
+    readonly leaving: number;
+    readonly order: ReadonlyArray<number>;
+  } | null>(null);
   // The row focus was last in, kept while its control goes away (a draft lands and Add to draft
   // leaves; a row moves to another group and remounts), dropped once the user moves focus elsewhere.
   const focusedRowRef = useRef<number | null>(null);
@@ -688,7 +690,6 @@ export function ThreadParkedPanel(props: {
   const groups = parkedGroups(parked, editing);
   // Open rows in the order they show, the rows focus can move between.
   const activeIds = groups.open.map((item) => item.id);
-  const activeKey = activeIds.join(",");
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus off a control the snapshot or the draft removed
   useLayoutEffect(() => {
     const firstControl = (id: number) =>
@@ -698,18 +699,19 @@ export function ThreadParkedPanel(props: {
     // Focus fell to the body with the removed control; anywhere else, the user moved it.
     const fell = document.activeElement === null || document.activeElement === document.body;
     const pending = focusAfterRef.current;
-    if (pending !== null && !activeKey.split(",").includes(String(pending.leaving))) {
+    if (pending !== null && !activeIds.includes(pending.leaving)) {
       focusAfterRef.current = null;
       if (!fell) return;
+      const next = rowFocusAfter(pending.order, pending.leaving, activeIds);
       // No open item left: the surface itself. Its first control can be the finished item's Reopen,
       // and a second Enter there would undo what was just done.
-      (pending.next === null ? panelRef.current : firstControl(pending.next))?.focus();
+      (next === null ? panelRef.current : firstControl(next))?.focus();
       return;
     }
     // A row still listed that lost its focused control: its first control (the "…" once in the draft).
     const row = focusedRowRef.current;
     if (fell && row !== null && parked.some((item) => item.id === row)) firstControl(row)?.focus();
-  }, [activeKey, parked, focusAfterRef, focusedRowRef, listRef, panelRef]);
+  }, [activeIds, parked, focusAfterRef, focusedRowRef, listRef, panelRef]);
   const send = async (input: ParkedChange) =>
     (await update({ environmentId, input: { ...input, threadId } }))._tag === "Success";
   // A change leaves the item busy until the snapshot shows its result (isParkedBusy); a failure frees
@@ -743,7 +745,7 @@ export function ThreadParkedPanel(props: {
     addToDraft: (item) => void props.actions.parked.attach(item),
     change: (item, change) => void run(item, () => send(change)),
     leave: (item, change) => {
-      focusAfterRef.current = { leaving: item.id, next: parkedFocusAfter(activeIds, item.id) };
+      focusAfterRef.current = { leaving: item.id, order: activeIds };
       void run(item, () => send(change)).then((done) => {
         if (!done && focusAfterRef.current?.leaving === item.id) focusAfterRef.current = null;
       });
