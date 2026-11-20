@@ -34,6 +34,7 @@ import { collapseExpandedComposerCursor } from "../../composer-logic";
 import { collectComposerPromptInlineTokens } from "../../composer-editor-mentions";
 import { compressImageForStash } from "../../lib/imageCompression";
 import { formatInlineContextReference } from "~/lib/composerContextReferences";
+import { withoutParkedReferences } from "@t3tools/shared/parkedReferences";
 import { isCommandPaletteOpen } from "../../commandPaletteBus";
 import { pendingDraftWork } from "./pendingDraftWork";
 import { countPreparingComposerImages } from "./preparingComposerImages";
@@ -152,6 +153,7 @@ export function useComposerStash(input: {
   const setComposerDraftEnvironmentContexts = useComposerDraftStore(
     (store) => store.setEnvironmentContexts,
   );
+  const setComposerDraftParkedContexts = useComposerDraftStore((store) => store.setParkedContexts);
   const [isStashMenuOpen, setIsStashMenuOpen] = useState(false);
   // Each stash bumps the key; the badge replays its one-shot pulse animation per key.
   const [stashPulseKey, setStashPulseKey] = useState(0);
@@ -251,16 +253,19 @@ export function useComposerStash(input: {
     ) {
       setComposerDraftReplyTo(composerDraftTarget, stashedReply);
     }
-    const restoredPrompt = replaceComposerContextReferences(entry.prompt, (reference) => {
-      const contextId = rewrittenContextIds.get(reference.contextId);
-      return contextId
-        ? formatInlineContextReference({
-            ...reference,
-            contextId,
-            kind: reference.kind === "element" ? "preview-annotation" : reference.kind,
-          })
-        : reference.source;
-    });
+    // Fork (Parked): a stash keeps no parked record, so its chip goes on restore.
+    const restoredPrompt = withoutParkedReferences(
+      replaceComposerContextReferences(entry.prompt, (reference) => {
+        const contextId = rewrittenContextIds.get(reference.contextId);
+        return contextId
+          ? formatInlineContextReference({
+              ...reference,
+              contextId,
+              kind: reference.kind === "element" ? "preview-annotation" : reference.kind,
+            })
+          : reference.source;
+      }),
+    );
     const currentPrompt = promptRef.current;
     const nextPrompt =
       restoredPrompt.length === 0
@@ -649,6 +654,9 @@ export function useComposerStash(input: {
       clearComposerDraftTerminalContexts(stashTarget);
       setComposerDraftThreadContexts(stashTarget, []);
       setComposerDraftEnvironmentContexts(stashTarget, []);
+      // Fork (Parked): a stash keeps no parked record and its restore drops the chip, so the item
+      // leaves the draft and stays Open in the Parked tab.
+      setComposerDraftParkedContexts(stashTarget, []);
       setComposerDraftReplyTo(stashTarget, null);
       for (const comment of composerReviewComments) {
         removeComposerDraftReviewComment(stashTarget, comment.id);
