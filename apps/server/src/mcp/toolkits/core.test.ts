@@ -312,9 +312,10 @@ it.effect("a pending question read keeps option previews", () => {
 });
 
 it.effect(
-  "t3_park parks for the main thread and refuses a delegated child or a placeholder",
+  "t3_park parks for the main thread and refuses a delegated child, a side chat or a placeholder",
   () => {
     const child = ThreadId.make("mcp-core-child");
+    const sideChat = ThreadId.make("mcp-core-side-chat");
     return Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* sql`
@@ -322,7 +323,9 @@ it.effect(
         thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
         created_at, updated_at, payload_json
       ) VALUES (${threadId}, 'project', 'Thread', 'codex', 'full-access', 'default',
-        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '{}')
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '{}'),
+        (${sideChat}, 'project', 'Side chat', 'codex', 'full-access', 'default',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '{"lineage":{"sideChat":true}}')
     `;
       const server = yield* McpServer.McpServer;
       const park = (caller: ThreadId, text: string) =>
@@ -340,6 +343,11 @@ it.effect(
       expect(declaredFailure(yield* park(child, "follow up on the CI cache"))).toMatchObject({
         code: "invalid_request",
         message: CHILD_PARK_REFUSAL,
+      });
+      // ThreadDecisions.park's side chat rule, passed on: t3_park has none of its own.
+      expect(declaredFailure(yield* park(sideChat, "follow up on the CI cache"))).toMatchObject({
+        code: "invalid_request",
+        message: ThreadDecisions.SIDE_CHAT_PARK_MESSAGE,
       });
       expect(declaredFailure(yield* park(threadId, "TBD"))).toMatchObject({
         code: "invalid_request",
@@ -367,6 +375,16 @@ it.effect(
                           rootThreadId: threadId,
                           parentThreadId: threadId,
                           relationshipToParent: "subagent" as const,
+                        },
+                      }
+                    : {}),
+                  ...(id === sideChat
+                    ? {
+                        lineage: {
+                          rootThreadId: threadId,
+                          parentThreadId: threadId,
+                          relationshipToParent: "fork" as const,
+                          sideChat: true,
                         },
                       }
                     : {}),

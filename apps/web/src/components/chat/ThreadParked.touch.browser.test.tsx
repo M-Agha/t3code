@@ -38,6 +38,7 @@ const actions = {
   editingQueuedRun: false,
   inDraft: {},
   parked: { inDraft: [], attach: () => true },
+  reopen: { isPending: () => false, start: () => {} },
 };
 
 // On a touch screen the actions always show (Sol round 1, S7): beside the row's time, never over it.

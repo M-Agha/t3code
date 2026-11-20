@@ -423,6 +423,7 @@ export function useComposerSend(input: ComposerSendInput) {
       parkInFlight: parkInFlightRef.current,
       hasNonPromptContent: draftHasNonPromptContent(composerDraftTarget),
       threadStarted: isServerThread,
+      sideChat: activeThread?.lineage.sideChat === true,
     });
     if (parkDecision.kind === "refuse") {
       toastManager.add(
@@ -441,18 +442,16 @@ export function useComposerSend(input: ComposerSendInput) {
         parkInFlightRef.current = false;
       });
       if (!parked) return;
+      // No `type`: the info icon is a fixed blue no theme sets (FORK.md, Colours).
       if (placeholders > 0) {
-        toastManager.add(
-          stackedThreadToast({
-            type: "info",
-            title: m(
-              msg(
-                "{count, plural, one {Left out a placeholder item} other {Left out {count} placeholder items}}",
-                { count: placeholders },
-              ),
+        toastManager.add({
+          title: m(
+            msg(
+              "{count, plural, one {Left out a placeholder item} other {Left out {count} placeholder items}}",
+              { count: placeholders },
             ),
-          }),
-        );
+          ),
+        });
       }
       // Clear only what was parked; the user may have edited the draft or left meanwhile.
       if (
