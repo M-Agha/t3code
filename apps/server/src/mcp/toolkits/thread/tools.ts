@@ -260,7 +260,7 @@ const SubmitOutputTool = Tool.make("t3_submit_output", {
 const ParkTool = Tool.make("t3_park", {
   ...commandTool,
   description:
-    "Park one item in the user's Parked tab of this thread, for later: `agent` (words to send you later) or `me` (for the user). Only what the user asked to set aside, or a follow-up worth their attention later. Never a status update, a placeholder, filler while you wait, or your own task list. Only the main thread parks; a delegated child puts follow-ups in its report to its parent.",
+    "Park one item in the user's Parked tab of this thread, for later: `agent` (words to send you later) or `me` (for the user). Only what the user asked to set aside, or a follow-up worth their attention later. Never a status update, a placeholder, filler while you wait, or your own task list. Only the main thread parks, never a side chat; a delegated child puts follow-ups in its report to its parent.",
   parameters: Schema.Struct({
     // The older names stay accepted: `prompt` is `agent`, `todo` and `later` are `me` (parkKind).
     kind: ThreadParkedKindWord,
