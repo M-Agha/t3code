@@ -70,6 +70,7 @@ import * as EnvironmentHandlers from "./environment/handlers.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
 import { ThreadToolkit } from "./thread/tools.ts";
 import { CHILD_PARK_REFUSAL } from "./thread/handlers.ts";
+import { parkKind } from "@t3tools/shared/sessionKit/parks";
 import * as PeerForwarding from "../../peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../peer/PeerLinks.ts";
@@ -350,8 +351,9 @@ it.effect(
       });
       expect((yield* park(threadId, "Migrate CI to the new runner")).isError).not.toBe(true);
       const { parked } = yield* (yield* ThreadDecisions.ThreadDecisions).snapshot(threadId);
-      expect(parked.map((item) => [item.kind, item.text, item.parkedBy])).toEqual([
-        ["later", "Migrate CI to the new runner", "agent"],
+      expect(parked.map((item) => [parkKind(item.kind), item.text, item.parkedBy])).toEqual([
+        // `later` is an older name for `me`, still accepted.
+        ["me", "Migrate CI to the new runner", "agent"],
       ]);
     }).pipe(
       Effect.provide(

@@ -4,6 +4,7 @@ import { assistantCitationLabel } from "@t3tools/shared/assistantCitations";
 import { formatProviderSkillDisplayName } from "@t3tools/shared/inlineSkills";
 import { fileDisplayName } from "@t3tools/shared/path";
 import {
+  ArchiveIcon,
   CircleDashedIcon,
   ImageIcon,
   MessageCircleIcon,
@@ -40,6 +41,8 @@ const CONTEXT_REFERENCE_ICONS: Record<
   "review-comment": () => <MessageCircleIcon />,
   thread: () => <MessagesSquareIcon />,
   environment: () => <MonitorIcon />,
+  // Fork (Parked).
+  parked: () => <ArchiveIcon />,
 };
 
 // Mirrors the editor's chip: only a draft record of the same kind resolves a reference.

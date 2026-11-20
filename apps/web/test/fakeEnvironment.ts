@@ -717,6 +717,26 @@ export function answerRpc(method: string, handler: (input: never) => unknown): D
   };
 }
 
+/**
+ * Answers one streaming RPC method with `first` until disposed; `push` sends each live subscription
+ * the next value, as the server's later pushes.
+ */
+export function answerStreamRpc<A>(method: string, first: A) {
+  const queues = new Set<Queue.Queue<A>>();
+  const answer = answerRpc(method, () =>
+    subscribe([first], (queue) => {
+      queues.add(queue);
+      return () => queues.delete(queue);
+    }),
+  );
+  return {
+    push: async (value: A) => {
+      for (const queue of queues) await Effect.runPromise(Queue.offer(queue, value));
+    },
+    [Symbol.dispose]: () => answer[Symbol.dispose](),
+  };
+}
+
 /** Delivers one domain event, such as a run or turn-item update, to the thread's subscription. */
 export async function emitThreadEvent(
   threadId: ThreadId,

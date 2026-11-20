@@ -27,6 +27,7 @@ import {
 import { PREFERRED_HIGHLIGHTER } from "../../lib/syntaxHighlighting";
 import ChatMarkdown from "../ChatMarkdown";
 import { EnvironmentContextChip } from "../EnvironmentContextChip";
+import { ParkedContextChip } from "../ParkedContextChip";
 import { ThreadContextChip } from "../ThreadContextChip";
 import { ResponseReplyCard } from "./AssistantCitationChip";
 import { MessageCircleIcon, MousePointerClickIcon, PaintbrushIcon } from "lucide-react";
@@ -361,6 +362,17 @@ const userMessageContextPresentationRegistry = createContextPresentationRegistry
       render: (record, context) =>
         record.kind === "environment" ? (
           <EnvironmentContextChip record={record} copyMarkdown={context.copyMarkdown} />
+        ) : (
+          <UnavailableUserMessageContextChip {...context} />
+        ),
+    },
+    // Fork (Parked).
+    {
+      kind: "parked",
+      canRender: (record) => record.kind === "parked",
+      render: (record, context) =>
+        record.kind === "parked" ? (
+          <ParkedContextChip record={record} copyMarkdown={context.copyMarkdown} />
         ) : (
           <UnavailableUserMessageContextChip {...context} />
         ),

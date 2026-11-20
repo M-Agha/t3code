@@ -6,6 +6,7 @@ import type {
   ComposerContextId,
   EnvironmentContextRecord,
   EnvironmentId,
+  ParkedContextRecord,
   PreviewAnnotationPayload,
   ThreadContextRecord,
 } from "@t3tools/contracts";
@@ -46,6 +47,7 @@ import type { ReviewCommentContext } from "~/reviewCommentContext";
 import { isQueuedFileAttachment, isQueuedImageAttachment } from "./chat/queuedMessageEdit";
 import { ComposerPendingTerminalContextChip } from "./chat/ComposerPendingTerminalContexts";
 import { EnvironmentContextChip } from "./EnvironmentContextChip";
+import { ParkedContextChip } from "./ParkedContextChip";
 import { ThreadContextChip } from "./ThreadContextChip";
 import { useLinkedEnvironments } from "~/state/peerLinks";
 import {
@@ -90,7 +92,8 @@ export type ComposerDraftContextRecord =
       contextId?: ComposerContextId | undefined;
     }
   | { kind: "thread"; record: ThreadContextRecord }
-  | { kind: "environment"; record: EnvironmentContextRecord };
+  | { kind: "environment"; record: EnvironmentContextRecord }
+  | { kind: "parked"; record: ParkedContextRecord };
 
 export {
   ComposerContextActionsContext,
@@ -116,6 +119,7 @@ export function composerContextRecordsFromDraft(input: {
   previewAnnotations?: ReadonlyArray<PreviewAnnotationPayload>;
   threadContexts?: ReadonlyArray<ThreadContextRecord>;
   environmentContexts?: ReadonlyArray<EnvironmentContextRecord>;
+  parkedContexts?: ReadonlyArray<ParkedContextRecord>;
   images?: ReadonlyArray<ComposerImageAttachment>;
   files?: ReadonlyArray<ComposerFileAttachment>;
   existingAttachments?:
@@ -189,6 +193,9 @@ export function composerContextRecordsFromDraft(input: {
   }
   for (const record of input.environmentContexts ?? []) {
     records.set(record.contextId, { kind: "environment", record });
+  }
+  for (const record of input.parkedContexts ?? []) {
+    records.set(record.contextId, { kind: "parked", record });
   }
   return records;
 }
@@ -528,6 +535,7 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
     "preview-annotation",
     "thread",
     "environment",
+    "parked",
   ],
   handlers: [
     {
@@ -620,6 +628,16 @@ const composerContextPresentationRegistry = createContextPresentationRegistry<
       render: (entry, context) =>
         entry.kind === "environment" ? (
           <EnvironmentContextChip record={entry.record} />
+        ) : (
+          <UnresolvedContextChip label={context.label} />
+        ),
+    },
+    {
+      kind: "parked",
+      canRender: (entry) => entry.kind === "parked",
+      render: (entry, context) =>
+        entry.kind === "parked" ? (
+          <ParkedContextChip record={entry.record} />
         ) : (
           <UnresolvedContextChip label={context.label} />
         ),

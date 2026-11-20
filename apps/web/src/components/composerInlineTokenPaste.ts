@@ -16,6 +16,7 @@ import {
   threadLinkContextReferences,
 } from "@t3tools/shared/composerContextReferences";
 
+import { withoutParkedReferences } from "@t3tools/shared/parkedReferences";
 import { restorePastedMarkdownLinks } from "~/markdown-clipboard";
 import { readThreadShell } from "~/state/entities";
 
@@ -72,11 +73,14 @@ export function readPastedComposerClipboard(
 export type PastedComposerClipboard = ReturnType<typeof readPastedComposerClipboard>;
 
 export function importPastedComposerText(
-  { text: pastedText, context: fragment }: PastedComposerClipboard,
+  { text: copiedText, context: fragment }: PastedComposerClipboard,
   importContextFragment?: (
     fragment: ComposerContextClipboardFragment,
   ) => ReadonlyMap<string, string>,
 ): string {
+  // Fork (Parked): a pasted parked chip never brings its record, so it goes (one already in the draft
+  // stays single).
+  const pastedText = withoutParkedReferences(copiedText);
   const rewrittenIds =
     fragment && fragment.records.length > 0 ? importContextFragment?.(fragment) : null;
   if (!rewrittenIds || rewrittenIds.size === 0) return pastedText;
