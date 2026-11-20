@@ -16,6 +16,7 @@ import {
   projectComposerContextForProvider,
 } from "@t3tools/shared/composerContextReferences";
 import type * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
@@ -30,6 +31,7 @@ import { useRightPanelStore } from "~/rightPanelStore";
 import { getRouter } from "~/router";
 import {
   ENVIRONMENT_ID,
+  answerRpc,
   answerStreamRpc,
   dispatchedCommands,
   installFakeEnvironment,
@@ -160,6 +162,31 @@ it("carries an added item's record in the send, and an undo after a delete bring
       payload: { itemId: 7, threadId: view.threadRef.threadId, text: "Add a doctor check" },
     },
   ]);
+});
+
+// Astra on #7, findings 4 and 5: ChatView's own wiring, not RightPanelTabs' with counts injected.
+it("counts the strip's Parked tab from the snapshot, and /park's toast takes no fixed colour", async () => {
+  const parks: unknown[] = [];
+  using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
+    parks.push(input);
+    return Effect.void;
+  });
+  await using view = await openThread(
+    "thread-parked-count",
+    item(),
+    item({ id: 8, state: "done", resolvedAt: AT }),
+  );
+  await expect.element(page.getByRole("button", { name: "Parked, 1", exact: true })).toBeVisible();
+  view.push(item(), item({ id: 9, text: "Second" }));
+  await expect.element(page.getByRole("button", { name: "Parked, 2", exact: true })).toBeVisible();
+
+  await userEvent.click(editor());
+  await userEvent.keyboard("/park me fix the flaky test");
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() => expect(parks).toHaveLength(1));
+  await expect.element(page.getByText("In this thread's Parked tab.")).toBeVisible();
+  // Base UI marks a typed toast `data-type`, which colours its icon with the fixed success green.
+  expect(document.querySelector('[data-slot="toast-icon"]')).toBeNull();
 });
 
 // Opus r5, C1: the reason is beside `restoresParkedChip` (ChatComposer.tsx).
@@ -378,4 +405,60 @@ it("leaves no parked chip without its record after a stash restore or a paste", 
       (reference) => reference.kind === "parked",
     ),
   ).toHaveLength(1);
+});
+
+// Opus on #12 (r1 C4, r2, r3): ChatView's side chat wiring, in the parent's pane and at its own URL (not
+// embedded there). Older settled, as in upstream's side chat tab test (ChatView.browser.test.tsx), it
+// loads in any place but the file's first. Run alone (-t or .only), it is first and fails falsely.
+it.each([
+  ["in its parent's pane", "parent"],
+  ["opened at its own URL", "side"],
+] as const)("refuses /park in a side chat %s, whose menu offers no /park", async (_name, route) => {
+  const parent = threadWithHistory(`parked-side-parent-${route}`, 1);
+  const side = {
+    ...threadWithHistory(`parked-side-${route}`, 1),
+    sideChatOf: parent.id,
+    olderSettled: true as const,
+  };
+  const parks: unknown[] = [];
+  using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
+    parks.push(input);
+    return Effect.void;
+  });
+  await page.viewport(1400, 900);
+  using _environment = installFakeEnvironment([parent, side]);
+  __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt: AT });
+  if (route === "parent") {
+    useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, parent.id), side.id);
+  } else {
+    useRightPanelStore.getState().show(scopeThreadRef(ENVIRONMENT_ID, side.id));
+  }
+  const shown = route === "parent" ? parent : side;
+  const router = getRouter(
+    createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${shown.id}`] }),
+  );
+  await router.load();
+  await using _app = await render(<AppRoot router={router} />, {
+    // AppRoot brings its own router.
+    router: false,
+  });
+  const sideEditor = page.getByRole("textbox", { name: `Message ${side.title}`, exact: true });
+  await userEvent.click(sideEditor);
+  await userEvent.keyboard("/");
+  const menuItem = (id: string) => document.querySelector(`[data-composer-item-id="${id}"]`);
+  await vi.waitFor(() => expect(menuItem("slash:model")).not.toBeNull());
+  expect(menuItem("slash:park")).toBeNull();
+
+  await userEvent.keyboard("park me fix the flaky test");
+  await userEvent.keyboard("{Enter}");
+  await expect.element(page.getByText("A side chat can't park")).toBeVisible();
+  expect(parks).toEqual([]);
+  if (route === "side") {
+    // Its own panel offers Tracker (Q) but no Parked (K), which the server would refuse.
+    const launcher = page.getByLabelText("Open a surface", { exact: true });
+    await expect
+      .element(launcher)
+      .toHaveAttribute("data-surface-launcher-keys", expect.stringContaining("Q"));
+    expect(launcher.element().getAttribute("data-surface-launcher-keys")).not.toContain("K");
+  }
 });
