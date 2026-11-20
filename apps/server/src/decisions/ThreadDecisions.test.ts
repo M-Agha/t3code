@@ -20,6 +20,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
@@ -32,6 +33,11 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as DecisionJudge from "./DecisionJudge.ts";
 import ForkMigration0006 from "../persistence/ForkMigrations/006_ThreadArtifactTypes.ts";
 import * as ThreadDecisions from "./ThreadDecisions.ts";
+import {
+  formatComposerContextReference,
+  toKindScopedComposerContextId,
+} from "@t3tools/shared/composerContextReferences";
+import { parkKind } from "@t3tools/shared/sessionKit/parks";
 
 const threadId = ThreadId.make("thread-decisions");
 
@@ -91,13 +97,22 @@ const seed = Effect.fn("seed")(function* (deletedAt: string | null = null, id = 
   `;
 });
 
-const run = Effect.fn("run")(function* (runId: string, ordinal: number, status: string) {
+// `startedAt`: the run began, as the orchestrator records it when it turns running; a queued run
+// cancelled before that has none.
+const run = Effect.fn("run")(function* (
+  runId: string,
+  ordinal: number,
+  status: string,
+  startedAt: string | null = null,
+) {
   const sql = yield* SqlClient.SqlClient;
+  const payload = JSON.stringify(startedAt === null ? {} : { startedAt });
   yield* sql`
     INSERT INTO orchestration_v2_projection_runs (
       run_id, thread_id, ordinal, provider, status, requested_at, payload_json
-    ) VALUES (${runId}, ${threadId}, ${ordinal}, 'codex', ${status}, '2026-01-01T00:00:00.000Z', '{}')
-    ON CONFLICT (run_id) DO UPDATE SET status = excluded.status
+    ) VALUES (${runId}, ${threadId}, ${ordinal}, 'codex', ${status}, '2026-01-01T00:00:00.000Z',
+      ${payload})
+    ON CONFLICT (run_id) DO UPDATE SET status = excluded.status, payload_json = excluded.payload_json
   `;
 });
 
@@ -967,15 +982,21 @@ it.effect("reads every Artifact call again after fork migration 006, filling typ
   }).pipe(Effect.provide(withDecisions)),
 );
 
-it.effect("parks, edits and resolves a thread's items", () =>
+it.effect("parks, edits, moves and resolves a thread's items", () =>
   Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
     const decisions = yield* ThreadDecisions.ThreadDecisions;
     yield* seed();
     const parked = Effect.fn("parked")(function* () {
       const snapshot = yield* decisions.snapshot(threadId);
       return {
         open: snapshot.parkedOpenCount,
-        items: snapshot.parked.map((item) => [item.text, item.kind, item.state, item.parkedBy]),
+        items: snapshot.parked.map((item) => [
+          item.text,
+          parkKind(item.kind),
+          item.state,
+          item.parkedBy,
+        ]),
       };
     });
 
@@ -983,25 +1004,25 @@ it.effect("parks, edits and resolves a thread's items", () =>
       threadId,
       parkedBy: "user",
       items: [
-        { kind: "todo", text: " fix the flaky test " },
-        { kind: "later", text: "look at CI caching" },
+        { kind: "me", text: " fix the flaky test " },
+        { kind: "me", text: "look at CI caching" },
       ],
     });
     yield* decisions.park({
       threadId,
       parkedBy: "agent",
       items: [
-        { kind: "prompt", text: "Write the release notes" },
-        { kind: "todo", text: "check the deploy" },
+        { kind: "agent", text: "Write the release notes" },
+        { kind: "me", text: "check the deploy" },
       ],
     });
     assert.deepEqual(yield* parked(), {
       open: 4,
       items: [
-        ["fix the flaky test", "todo", "open", "user"],
-        ["look at CI caching", "later", "open", "user"],
-        ["Write the release notes", "prompt", "open", "agent"],
-        ["check the deploy", "todo", "open", "agent"],
+        ["fix the flaky test", "me", "open", "user"],
+        ["look at CI caching", "me", "open", "user"],
+        ["Write the release notes", "agent", "open", "agent"],
+        ["check the deploy", "me", "open", "agent"],
       ],
     });
 
@@ -1015,15 +1036,20 @@ it.effect("parks, edits and resolves a thread's items", () =>
     yield* decisions.updateParked({ threadId, id: ci, action: "edit", text: "cache CI" });
     yield* decisions.updateParked({ threadId, id: fix, action: "done" });
     yield* decisions.updateParked({ threadId, id: ci, action: "drop" });
-    yield* decisions.updateParked({ threadId, id: notes, action: "sent" });
+    yield* decisions.updateParked({ threadId, id: deploy, action: "move", kind: "agent" });
+    // A row from before the chip, when the old Send button marked an item sent: no message keeps it
+    // Sent, and a sync leaves it so.
+    yield* sql`UPDATE fork_thread_parked_items SET state = 'sent', resolved_at = updated_at
+      WHERE id = ${notes}`;
+    yield* decisions.sync(threadId);
     assert.deepEqual(yield* parked(), {
       open: 1,
       items: [
-        ["check the deploy", "todo", "open", "agent"],
+        ["check the deploy", "agent", "open", "agent"],
         // TestClock stands still, so resolved items tie and the newest id comes first.
-        ["Write the release notes", "prompt", "sent", "agent"],
-        ["cache CI", "later", "dropped", "user"],
-        ["fix the flaky test", "todo", "done", "user"],
+        ["Write the release notes", "agent", "sent", "agent"],
+        ["cache CI", "me", "dropped", "user"],
+        ["fix the flaky test", "me", "done", "user"],
       ],
     });
 
@@ -1037,11 +1063,12 @@ it.effect("parks, edits and resolves a thread's items", () =>
         decisions.updateParked({ threadId, id: deploy, action: "reopen" }),
         decisions.updateParked({ threadId: ThreadId.make("other"), id: deploy, action: "done" }),
         decisions.updateParked({ threadId, id: deploy, action: "edit", text: "TBD" }),
-        decisions.park({ threadId, parkedBy: "agent", items: [{ kind: "todo", text: "…" }] }),
+        decisions.updateParked({ threadId, id: notes, action: "move", kind: "me" }),
+        decisions.park({ threadId, parkedBy: "agent", items: [{ kind: "me", text: "…" }] }),
         decisions.park({
           threadId: ThreadId.make("thread-missing"),
           parkedBy: "user",
-          items: [{ kind: "todo", text: "real" }],
+          items: [{ kind: "me", text: "real" }],
         }),
       ],
       (refused) => Effect.flip(refused).pipe(Effect.map((error) => error.message)),
@@ -1051,6 +1078,7 @@ it.effect("parks, edits and resolves a thread's items", () =>
       "This item is not resolved.",
       "This item is no longer open in this thread.",
       ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
+      "This item is no longer open in this thread.",
       ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
       "This thread was not found.",
     ]);
@@ -1060,12 +1088,355 @@ it.effect("parks, edits and resolves a thread's items", () =>
         threadId,
         parkedBy: "user",
         items: [
-          { kind: "todo", text: "real work" },
-          { kind: "todo", text: "placeholder" },
+          { kind: "me", text: "real work" },
+          { kind: "me", text: "placeholder" },
         ],
       }),
     );
     assert.strictEqual((yield* parked()).open, 2);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("takes the older kind words from a client from before the rename", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* decisions.park({
+      threadId,
+      parkedBy: "user",
+      items: [
+        { kind: "prompt", text: "for the agent" },
+        { kind: "later", text: "for me" },
+      ],
+    });
+    const stored = sql<{ readonly kind: string }>`
+      SELECT kind FROM fork_thread_parked_items ORDER BY id
+    `;
+    assert.deepEqual(yield* stored, [{ kind: "agent" }, { kind: "me" }]);
+    const agent = (yield* decisions.snapshot(threadId)).parked.find(
+      (item) => item.text === "for the agent",
+    );
+    yield* decisions.updateParked({ threadId, id: agent!.id, action: "move", kind: "todo" });
+    assert.deepEqual(yield* stored, [{ kind: "me" }, { kind: "me" }]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("says kinds in the older words, so a client from before the rename lists every row", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    // One parked in the new words, two an older build wrote in the old ones.
+    yield* decisions.park({ threadId, parkedBy: "user", items: [{ kind: "agent", text: "new" }] });
+    for (const [kind, text] of [
+      ["prompt", "words for the agent"],
+      ["later", "for me, later"],
+    ]) {
+      yield* sql`
+        INSERT INTO fork_thread_parked_items (
+          thread_id, kind, text, state, parked_by, created_at, updated_at
+        ) VALUES (${threadId}, ${kind}, ${text}, 'open', 'user', '2026-01-01T00:00:00.000Z',
+          '2026-01-01T00:00:00.000Z')
+      `;
+    }
+    const snapshot = yield* decisions.snapshot(threadId);
+    // What an older client's decoder takes (`todo`, `later`, `prompt`), each reading back right.
+    const olderDecoder = Schema.decodeUnknownExit(Schema.Literals(["todo", "later", "prompt"]));
+    assert.deepEqual(
+      snapshot.parked.map((item) => [item.text, item.kind, olderDecoder(item.kind)._tag]),
+      [
+        ["new", "prompt", "Success"],
+        ["words for the agent", "prompt", "Success"],
+        ["for me, later", "todo", "Success"],
+      ],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Add to draft attaches an item as a composer chip (MAIN-75): its reference in the message's text and
+// its record in the message's context, as the web composer sends them.
+// `itemThread` is the thread the chip was added in.
+const parkedChip = (itemId: number, itemThread: ThreadId = threadId) => {
+  const contextId = toKindScopedComposerContextId("parked", String(itemId));
+  const text = `item ${itemId}`;
+  return {
+    reference: formatComposerContextReference({ kind: "parked", contextId, label: text }),
+    record: {
+      version: 1,
+      kind: "parked",
+      contextId,
+      label: text,
+      payload: { itemId, threadId: itemThread, text },
+    },
+  };
+};
+
+// A user message carrying these parked items' chips; `referenced` false leaves the chips out of its text.
+const sendParked = Effect.fn("sendParked")(function* (
+  messageId: string,
+  runId: string,
+  itemIds: ReadonlyArray<number>,
+  referenced = true,
+  itemThread: ThreadId = threadId,
+) {
+  const chips = itemIds.map((id) => parkedChip(id, itemThread));
+  yield* message(
+    messageId,
+    runId,
+    "user",
+    ["Please do these:", ...(referenced ? chips.map((chip) => chip.reference) : [])].join(" "),
+    { context: { version: 1, records: chips.map((chip) => chip.record) } },
+  );
+});
+
+// Parks items for the agent; returns their ids in order.
+const parkForAgent = Effect.fn("parkForAgent")(function* (...texts: ReadonlyArray<string>) {
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  const before = new Set((yield* decisions.snapshot(threadId)).parked.map((item) => item.id));
+  yield* decisions.park({
+    threadId,
+    parkedBy: "user",
+    items: texts.map((text) => ({ kind: "agent" as const, text })),
+  });
+  return (yield* decisions.snapshot(threadId)).parked
+    .map((item) => item.id)
+    .filter((id) => !before.has(id));
+});
+
+// Each item's state and the message that keeps it Sent, by text, after a sync.
+const parkedAfterSync = Effect.fn("parkedAfterSync")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  yield* decisions.sync(threadId);
+  const rows = yield* sql<{ readonly text: string; readonly state: string; readonly by: string }>`
+    SELECT text, state, COALESCE(sent_message_id, '-') AS by
+    FROM fork_thread_parked_items WHERE thread_id = ${threadId} ORDER BY id
+  `;
+  return Object.fromEntries(rows.map((row) => [row.text, `${row.state} ${row.by}`]));
+});
+
+it.effect("marks an item Sent once a message carrying its chip is recorded, queued or not", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    const [now, later, untouched] = yield* parkForAgent("now", "later", "untouched");
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [now!]);
+    // Queued behind r1: Sent already, before its run starts.
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u2", "r2", [later!]);
+    assert.deepEqual(yield* parkedAfterSync(), {
+      now: "sent u1",
+      later: "sent u2",
+      untouched: "open -",
+    });
+    const snapshot = yield* decisions.snapshot(threadId);
+    // Sent is resolved: out of the open count, under Resolved, at the time its message was sent.
+    assert.strictEqual(snapshot.parkedOpenCount, 1);
+    const sent = snapshot.parked.find((item) => item.text === "now");
+    const [u1] = yield* sql<{ readonly createdAt: string }>`
+      SELECT created_at AS "createdAt" FROM orchestration_v2_projection_messages
+      WHERE message_id = 'u1'
+    `;
+    assert.deepEqual([sent?.state, sent?.resolvedAt], ["sent", u1?.createdAt]);
+    assert.isDefined(untouched);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("puts an item back to Open when its queued message is cancelled before it starts", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const [queued, started, failed] = yield* parkForAgent("queued", "started", "failed");
+    yield* run("r1", 1, "queued");
+    yield* sendParked("u1", "r1", [queued!]);
+    yield* run("r2", 2, "running", nextAt());
+    yield* sendParked("u2", "r2", [started!]);
+    yield* run("r3", 3, "running", nextAt());
+    yield* sendParked("u3", "r3", [failed!]);
+    assert.deepEqual(yield* parkedAfterSync(), {
+      queued: "sent u1",
+      started: "sent u2",
+      failed: "sent u3",
+    });
+    // Cancelled while queued: it never reached the agent. A run stopped once begun, or one that failed,
+    // did deliver its message, so those stay Sent.
+    yield* run("r1", 1, "cancelled");
+    yield* run("r2", 2, "cancelled", "2026-01-02T00:03:00.000Z");
+    yield* run("r3", 3, "failed", "2026-01-02T00:05:00.000Z");
+    assert.deepEqual(yield* parkedAfterSync(), {
+      queued: "open -",
+      started: "sent u2",
+      failed: "sent u3",
+    });
+    // A later message carrying it marks it again.
+    yield* run("r4", 4, "queued");
+    yield* sendParked("u4", "r4", [queued!]);
+    assert.strictEqual((yield* parkedAfterSync()).queued, "sent u4");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("keeps an item Sent while another message carrying it still stands", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const [twice] = yield* parkForAgent("twice");
+    yield* run("r1", 1, "queued");
+    yield* sendParked("u1", "r1", [twice!]);
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u2", "r2", [twice!]);
+    assert.strictEqual((yield* parkedAfterSync()).twice, "sent u1");
+    yield* run("r1", 1, "cancelled");
+    assert.strictEqual((yield* parkedAfterSync()).twice, "sent u2");
+    yield* run("r2", 2, "cancelled");
+    assert.strictEqual((yield* parkedAfterSync()).twice, "open -");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("reopens a Sent item for good: the messages that carried it no longer mark it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    const [item] = yield* parkForAgent("reopened");
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [item!]);
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u2", "r2", [item!]);
+    assert.strictEqual((yield* parkedAfterSync()).reopened, "sent u1");
+    yield* decisions.updateParked({ threadId, id: item!, action: "reopen" });
+    assert.strictEqual((yield* parkedAfterSync()).reopened, "open -");
+    // Nor does a cancel of one sent before the Reopen change it.
+    yield* run("r2", 2, "cancelled");
+    assert.strictEqual((yield* parkedAfterSync()).reopened, "open -");
+    yield* run("r3", 3, "queued");
+    yield* sendParked("u3", "r3", [item!]);
+    assert.strictEqual((yield* parkedAfterSync()).reopened, "sent u3");
+    // A message sent before the Reopen does not keep it Sent once u3 is cancelled.
+    yield* run("r3", 3, "cancelled");
+    assert.strictEqual((yield* parkedAfterSync()).reopened, "open -");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Sol's round-1 P2 (S1): the Reopen reads the messages, not what a sync has already seen.
+it.effect("stays Open after Reopen when a message recorded before it is synced after it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    const [item] = yield* parkForAgent("twice sent");
+    // Two clients send it: the first message is synced, the second is recorded but not yet synced.
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [item!]);
+    assert.strictEqual((yield* parkedAfterSync())["twice sent"], "sent u1");
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u2", "r2", [item!]);
+    yield* decisions.updateParked({ threadId, id: item!, action: "reopen" });
+    assert.strictEqual((yield* parkedAfterSync())["twice sent"], "open -");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Sol's round-1 P2 (S2): a pair once read is read again on every sync.
+it.effect("marks an item Sent again when its chip is put back on the queued message", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seed();
+    const [item] = yield* parkForAgent("put back");
+    yield* run("r1", 1, "queued");
+    yield* sendParked("u1", "r1", [item!]);
+    assert.strictEqual((yield* parkedAfterSync())["put back"], "sent u1");
+    const saveText = (text: string) => sql`
+      UPDATE orchestration_v2_projection_messages
+      SET payload_json = json_set(payload_json, '$.text', ${text})
+      WHERE message_id = 'u1'
+    `;
+    // One client saves the queued message without the chip, another saves it with the chip again.
+    yield* saveText("Please do these:");
+    assert.strictEqual((yield* parkedAfterSync())["put back"], "open -");
+    yield* saveText(`Please do these: ${parkedChip(item!).reference}`);
+    assert.strictEqual((yield* parkedAfterSync())["put back"], "sent u1");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Sol's round-2 S2, ruled on in R1 (no creation boundary): Sent means a message carrying the item has
+// reached or will reach the agent. A queued message given its chip back after a Reopen (a second client
+// saving its earlier copy) will deliver it, so it marks the item Sent; only the messages carrying the
+// chip at the Reopen are set aside.
+it.effect("marks an item Sent by a queued message given its chip back after a Reopen", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    const [item] = yield* parkForAgent("stale save");
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [item!]);
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u2", "r2", [item!]);
+    const saveU2 = (text: string) => sql`
+      UPDATE orchestration_v2_projection_messages
+      SET payload_json = json_set(payload_json, '$.text', ${text})
+      WHERE message_id = 'u2'
+    `;
+    // One client edits the chip out of u2; u1 keeps the item Sent until the Reopen sets it aside.
+    yield* saveU2("Please do these:");
+    assert.strictEqual((yield* parkedAfterSync())["stale save"], "sent u1");
+    yield* decisions.updateParked({ threadId, id: item!, action: "reopen" });
+    assert.strictEqual((yield* parkedAfterSync())["stale save"], "open -");
+    // Another client saves its earlier copy of u2, chip and all: u2 will deliver the item.
+    yield* saveU2(`Please do these: ${parkedChip(item!).reference}`);
+    assert.strictEqual((yield* parkedAfterSync())["stale save"], "sent u2");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("marks only what a message's text still references, of this thread", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* seed();
+    const other = ThreadId.make("thread-other");
+    yield* seed(null, other);
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* decisions.park({
+      threadId: other,
+      parkedBy: "user",
+      items: [{ kind: "agent", text: "o" }],
+    });
+    const [deleted, edited] = yield* parkForAgent("deleted chip", "edited out");
+    const [otherItem] = (yield* decisions.snapshot(other)).parked.map((item) => item.id);
+    // Its chip was deleted from the text before the send: the record rode along, the words did not.
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [deleted!], false);
+    // A chip pasted from another thread names that thread's item, not this one's.
+    yield* sendParked("u2", "r1", [otherItem!], true, other);
+    yield* run("r2", 2, "queued");
+    yield* sendParked("u3", "r2", [edited!]);
+    assert.deepEqual(yield* parkedAfterSync(), {
+      "deleted chip": "open -",
+      "edited out": "sent u3",
+    });
+    assert.deepEqual(
+      (yield* decisions.snapshot(other)).parked.map((item) => item.state),
+      ["open"],
+    );
+    // The queued message edited to drop the chip no longer carries it: back to Open.
+    yield* sql`
+      UPDATE orchestration_v2_projection_messages
+      SET payload_json = json_set(payload_json, '$.text', 'Please do these:')
+      WHERE message_id = 'u3'
+    `;
+    assert.strictEqual((yield* parkedAfterSync())["edited out"], "open -");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// Sol's round-2 P2 (S1): item ids are per database, so a chip copied on one machine and pasted in a
+// thread on another can name an item id this thread has; the record's thread tells them apart.
+it.effect("ignores a record naming another thread, though this thread has an item of its id", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const [item] = yield* parkForAgent("same id");
+    yield* run("r1", 1, "running", nextAt());
+    yield* sendParked("u1", "r1", [item!], true, ThreadId.make("thread-on-another-machine"));
+    assert.strictEqual((yield* parkedAfterSync())["same id"], "open -");
+    yield* run("r2", 2, "running", nextAt());
+    yield* sendParked("u2", "r2", [item!]);
+    assert.strictEqual((yield* parkedAfterSync())["same id"], "sent u2");
   }).pipe(Effect.provide(withDecisions)),
 );
 
@@ -1086,6 +1457,10 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
           thread_id, kind, text, state, parked_by, created_at, updated_at
         ) VALUES (${id}, 'todo', 'x', 'open', 'user', '2026-01-01T00:00:00.000Z',
           '2026-01-01T00:00:00.000Z')
+      `;
+      yield* sql`
+        INSERT INTO fork_thread_parked_set_aside (thread_id, item_id, message_id)
+        VALUES (${id}, 1, ${`m-${id}`})
       `;
       yield* sql`
         INSERT INTO fork_thread_artifacts (
@@ -1111,6 +1486,10 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
       SELECT thread_id AS "threadId" FROM fork_thread_parked_items ORDER BY id
     `;
     assert.deepEqual(parked, [{ threadId: "thread-missing" }, { threadId }]);
+    const sends = yield* sql<{ readonly threadId: string }>`
+      SELECT thread_id AS "threadId" FROM fork_thread_parked_set_aside ORDER BY thread_id
+    `;
+    assert.deepEqual(sends, [{ threadId }, { threadId: "thread-missing" }]);
     const artifacts = yield* sql<{ readonly threadId: string }>`
       SELECT thread_id AS "threadId" FROM fork_thread_artifacts
       UNION ALL SELECT thread_id FROM fork_thread_artifact_sync
@@ -1722,6 +2101,42 @@ it.effect("shows a subscriber the current rows while its backlog is judged", () 
       assert.deepEqual(yield* Queue.take(snapshots), { Q4: "open", Q5: "open" });
       yield* Deferred.succeed(answer, verdict(["Q4", "Q5"]));
       assert.deepEqual(yield* Queue.take(snapshots), { Q4: "answered", Q5: "answered" });
+    }).pipe(
+      Effect.provide(
+        decisionsWith(() =>
+          Queue.offer(asked, undefined).pipe(Effect.andThen(Deferred.await(answer))),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+// Sol round 3, S6: the parked pass publishes on its own commit, so a Sent shows while the judge still
+// reads the message that carried it (a judge that fails or never answers cannot hold it back).
+it.effect("publishes a Sent at once, while the judge still reads the message carrying it", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<void>();
+    const answer = yield* Deferred.make<string>();
+    yield* Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      assert.isTrue(yield* decisions.sync(threadId));
+      const [shipIt] = yield* parkForAgent("ship it");
+      const shipItStates = yield* Queue.unbounded<string | undefined>();
+      yield* decisions.subscribe(threadId).pipe(
+        Stream.runForEach((snapshot) => Queue.offer(shipItStates, snapshot.parked[0]?.state)),
+        Effect.forkScoped,
+      );
+      assert.strictEqual(yield* Queue.take(shipItStates), "open");
+      // With Q4 and Q5 open, the judge reads this message; it is still thinking when Sent publishes.
+      yield* run("r2", 2, "running", nextAt());
+      yield* sendParked("u1", "r2", [shipIt!]);
+      yield* decisions.sync(threadId).pipe(Effect.forkScoped);
+      yield* Queue.take(asked);
+      assert.strictEqual(yield* Queue.take(shipItStates), "sent");
+      yield* Deferred.succeed(answer, verdict([]));
     }).pipe(
       Effect.provide(
         decisionsWith(() =>

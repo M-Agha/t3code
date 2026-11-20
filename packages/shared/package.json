@@ -15,6 +15,10 @@
       "types": "./src/sessionKit/parks.ts",
       "import": "./src/sessionKit/parks.ts"
     },
+    "./parkedReferences": {
+      "types": "./src/parkedReferences.ts",
+      "import": "./src/parkedReferences.ts"
+    },
     "./png": {
       "types": "./src/png.ts",
       "import": "./src/png.ts"

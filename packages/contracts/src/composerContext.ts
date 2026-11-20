@@ -15,6 +15,7 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import { GUEST_MESSAGE_MAX_LENGTH, GUEST_NAME_MAX_LENGTH } from "./guestShare.ts";
+import { THREAD_PARKED_TEXT_MAX_LENGTH } from "./threadDecisions.ts";
 
 /** Image and file records reference `ChatAttachment` ids, never bytes. */
 
@@ -30,6 +31,8 @@ export const COMPOSER_CONTEXT_KINDS = [
   "thread",
   "environment",
   "response",
+  // Fork (Parked): a parked item sent with the message. FORK.md, "Parked items".
+  "parked",
 ] as const;
 export type KnownComposerContextKind = (typeof COMPOSER_CONTEXT_KINDS)[number];
 
@@ -254,6 +257,23 @@ export const ResponseContextRecord = Schema.Struct({
 });
 export type ResponseContextRecord = typeof ResponseContextRecord.Type;
 
+/**
+ * Fork (Parked): a parked item sent with the message; the server marks it Sent by `itemId`, only on a
+ * message of `threadId` (item ids are per database, so a chip carried to another thread or machine
+ * names nothing there). Shaped as `UnknownContextRecord` (fields under `payload`), so an official build
+ * sharing `~/.t3` keeps it as an unknown kind and hands the agent the whole text. FORK.md, "Parked items".
+ */
+export const ParkedContextRecord = Schema.Struct({
+  ...recordBase,
+  kind: Schema.Literal("parked"),
+  payload: Schema.Struct({
+    itemId: PositiveInt,
+    threadId: ThreadId,
+    text: BoundedString(THREAD_PARKED_TEXT_MAX_LENGTH),
+  }),
+});
+export type ParkedContextRecord = typeof ParkedContextRecord.Type;
+
 const isJson = Schema.is(Schema.Json);
 
 /** Excludes known discriminators so malformed known records fail their own schema. */
@@ -286,6 +306,7 @@ export const KnownComposerContextRecord = Schema.Union([
   ThreadContextRecord,
   EnvironmentContextRecord,
   ResponseContextRecord,
+  ParkedContextRecord,
 ]);
 export type KnownComposerContextRecord = typeof KnownComposerContextRecord.Type;
 
