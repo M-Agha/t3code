@@ -50,6 +50,7 @@ reasons are the ones they accepted.
 | `(fork) artifacts: rows name their type, show what claude.ai no longer finds, and take links by hand` | Artifacts                     |
 | `(fork) parked: items are for the agent or for you, and go in the draft as chips that mark them sent` | Parked items                  |
 | `(fork) service: fork builds seed the t3 runtime that t3 service install pins`                        | Background service            |
+| `(fork) upstream-sync: a rerunnable plan, rebase and verify for moving onto a newer upstream`         | Rebasing onto upstream        |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -687,22 +688,156 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
 
 ## Rebasing onto upstream
 
+`scripts/fork/upstream-sync.ts` does the parts of this a script can; run it with node under the
+target's Node. Its `USAGE` line names the commands and flags; `targetProblem`, `rebaseRefusal`
+and `verifyRefusal` say the main refusals, and the others are in `requireNode` and `verify`.
+
+- `plan` reads only and judges nothing safe: each `[ ]` line is a file or fact to read. After the
+  rebase, before anything is pushed and while the backup branch exists, `verify` catches only what
+  its checks reach (step 5). What to do with each kind of line:
+  - **Node:** install the target's `engines.node` and run every step under it (step 2).
+  - **Migrations:** read each migration the target adds, removes or renames, and every other file
+    upstream changed under `Migrations/`: does it reshape a table the fork reads (rule 1), and does
+    the fork's code still match? A manifest line the script cannot read means reading the manifest
+    by hand.
+  - **Upstream queries on the fork's tables:** read each listed change beside the fork's queries on
+    that table. When the script finds no table in the fork's SQL, read the fork's queries by hand.
+  - **`~/.t3`'s migration ledger:** read what each listed build's `Migrations.ts` does at startup
+    with the ids listed (step 1); the script does not say.
+  - **Upstream files the fork changes:** re-apply each seam from the line of this file the item
+    names (step 3's list); for a path this file does not name, keep both sides, then add its seam;
+    for a file one side moved or deleted, or both added, follow step 4.
+  - **Upstream files fork code imports:** read upstream's change against what the listed fork files
+    use from it. File level only: packages and a barrel's forwards are left to the typecheck.
+  - **Lint:** a rule source or a lint tool's version changed upstream, or the script cannot find
+    where the target pins it; `verify`'s `check:changed` lints the fork's files against it
+    ("Translation" says how the fork answers rules it cannot follow).
+  - **Commits:** an upstream commit that may be its own version of a fork feature: read it, and ask
+    the owner before rebasing (step 4).
+  - **Release notes:** pass `--notes` to print each Nightly's notes in the range. A
+    `gh release view … failed` item means they were not read.
+- `rebase` keeps the old head as `fork/main-pre-<n>` and pushes it before rewriting anything, then
+  prints the leased push step 7 uses.
+- `verify` checks the rebased `fork/main` (step 5) and ends by printing that push command.
+- `suite` records the target's own full suite (each package's exit, each test file's tests run,
+  every failure), the baseline `verify` reads (step 5).
+
+Read the plan before every upgrade. Its test, `scripts/fork/upstream-sync.test.ts`, runs from the
+repo root (`vp test run scripts/fork/upstream-sync.test.ts`) or from `scripts/` through the
+package's own command (`vp test run --config ../vite.config.ts --dir . fork/upstream-sync.test.ts`;
+without the root config the replay outlasts Vitest's 5 s default). It holds each check to synthetic
+input and replays the 4825 → 4864 rebase, whose plan must list the two breaks that rebase had
+(`settingsSearch.ts`, which `DecisionJudgeModelRow.tsx` imports, and the new
+`no-untranslated-copy.ts` rule). Without `fork/main-pre-4864`, the tag and `upstream/main` (CI's
+checkout) the replay skips and says why; `verify` sets `UPSTREAM_SYNC_PROOF=required`, under which
+it fails instead. The steps below are what the script encodes and what stays a person's job.
+
 1. **Pick the target: the official Nightly the owner runs, not `upstream/main`.** The Nightly is their
    fallback; `upstream/main` may carry migrations the Nightly lacks, and a fork built from it would
-   migrate `~/.t3` past what the Nightly can open. Use that Nightly's tag
-   (`v<version>-nightly.<date>.<n>`, `git fetch upstream --tags`) and check its migration head: the last
-   entry in `apps/server/src/persistence/Migrations.ts` at the tag.
-2. Keep the old head first: `git branch fork/main-pre-<version> fork/main`, push it. Then
-   `git rebase --onto <tag> $(git merge-base fork/main upstream/main) fork/main`.
+   migrate `~/.t3` past what the Nightly knows. An official build does not refuse such a database:
+   4825 logs recorded ids unknown to it as a divergence warning and starts anyway
+   (`Migrations.ts` ~L338-355 at that tag), running code older than the schema. Use that Nightly's
+   tag (`v<version>-nightly.<date>.<n>`, `git fetch upstream --tags`) and check its migration head:
+   the last entry in `apps/server/src/persistence/Migrations.ts` at the tag.
+   - For each build `plan`'s ledger section lists, read that build's `Migrations.ts` at its tag for
+     what it does at startup with the ids listed: a refusal (newer builds refuse to skip some ids,
+     e.g. `skippedV2Migrations`), a warning, or a reconciliation, and decide before running it on
+     `~/.t3`. That includes the installed Nightly once the fork at the target has run the target's
+     migrations (the ids above the ledger's last, the only ones upstream's migrator runs): that is
+     the database it falls back to. `plan` also says when the target is not the installed Nightly.
+   - A ledger with ids above the target's head (an official build newer than the target already
+     migrated `~/.t3`) stops the fork itself, not upstream's warn-only code: the rebuilt fork
+     refuses to start (`assertDatabaseNotAheadOfFork`, `ForkMigrations.ts`; rule 2). Pick a
+     target at least as new as that build (rule 3).
+2. Pull in any `fork/main` commits pushed from another machine, then keep the old head:
+   `git branch fork/main-pre-<n> fork/main`, push it. Then
+   `git rebase --no-update-refs --onto <tag> <base tag> fork/main`, where the base tag is
+   `git describe --tags --abbrev=0 --match 'v*-nightly.*' fork/main`. Nightly tags sit on
+   `upstream/main`, so that is `git merge-base fork/main upstream/main` (checked for 4825 and 4864),
+   without needing a fresh `upstream/main`.
    - Node comes from the **target's** `package.json` `engines.node` and may change between releases:
      `mise install node@<v>`, run git through `mise exec node@<v> -- git …` (the pre-commit hook
      runs `vp staged`), and `vp i` once the rebase is done.
 3. `git diff --name-status <tag> fork/main` lists every upstream file the fork modifies (`M`) and every
    file it adds (`A`). The modified ones are where conflicts happen.
-   - The hot spots are `ws.ts`, `server.ts`, `Sqlite.ts`, `rpc.ts`, `ChatView.tsx`,
-     `rightPanelStore.ts`, `RightPanelTabs.tsx`, `RightPanelSurfaceContent.tsx`, the composer send
-     path, the MCP thread toolkit, and `ClaudeAdapterV2.ts` (the `T3CODE_OWNS_BOARD` line, in the
-     query `env` beside `PortScanner.AGENT_THREAD_ENV`).
+   - Every upstream file the fork modifies, by its seam. `plan` looks for these full paths: a file
+     it reports that is missing here gets "keep both sides"; add it with its seam once resolved.
+     - Thread decisions over RPC (the fork's methods beside upstream's, each list growing at once):
+       `packages/contracts/src/rpc.ts`, `packages/contracts/src/index.ts`,
+       `packages/contracts/src/clientRpcPermissions.ts`, `apps/server/src/auth/RpcAuthorization.ts`,
+       `apps/server/src/observability/RpcInstrumentation.ts`, `apps/server/src/ws.ts`,
+       `apps/server/src/server.ts`, `packages/client-runtime/src/rpc/client.ts`,
+       `packages/client-runtime/src/state/server.ts`; and in tests, each layer that mocks
+       `ThreadDecisions` or lists the methods: `apps/server/src/ws.test.ts`,
+       `apps/server/src/peer/PeerForwarding.test.ts`, `apps/server/src/mcp/linkOrigin.test.ts`,
+       `apps/server/src/mcp/toolkits/core.test.ts`,
+       `packages/client-runtime/src/state/commandPermissions.test.ts`.
+     - `t3_park`, the MCP thread toolkit: `apps/server/src/mcp/toolkits/thread/tools.ts`,
+       `apps/server/src/mcp/toolkits/thread/handlers.ts`, and the budget it grows,
+       `apps/server/src/provider/agentContextBudget.json` with
+       `apps/server/src/provider/AgentContextBudget.test.ts`.
+     - Storage: `apps/server/src/persistence/Sqlite.ts` (fork migrations after upstream's, and the
+       ahead-of-fork guard; rule 1) and `apps/server/src/persistence/Sqlite.test.ts`.
+     - `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`: the `T3CODE_OWNS_BOARD` line,
+       in the query `env` beside `PortScanner.AGENT_THREAD_ENV`.
+     - `/park` in the composer send path: `apps/web/src/composer-logic.ts`,
+       `apps/web/src/components/chat/composerSend.logic.ts`,
+       `apps/web/src/components/chat/composerSend.logic.test.ts`,
+       `apps/web/src/components/chat/composerSlashCommandSearch.ts`,
+       `apps/web/src/components/chat/useComposerMenuItems.ts`,
+       `apps/web/src/components/chat/useComposerSend.ts` (the park branch before a send reaches
+       the provider), and mobile's refusal, `apps/mobile/src/state/use-thread-composer-state.ts`.
+     - The right panel's surfaces: `apps/web/src/rightPanelStore.ts`,
+       `apps/web/src/rightPanelStore.test.ts`, `apps/web/src/closedViewStore.ts`,
+       `apps/web/src/closedViewStore.test.ts`, `apps/web/src/components/RightPanelTabs.tsx`,
+       `apps/web/src/components/RightPanelTabs.browser.test.tsx`,
+       `apps/web/src/components/chat/RightPanelSurfaceContent.tsx`,
+       `apps/web/src/components/chat/useRightPanelActions.ts`, and the palette's Show Tracker,
+       parked and Artifacts actions in `apps/web/src/components/CommandPalette.tsx`.
+     - The `decisions.toggle` shortcut: `packages/contracts/src/keybindings.ts`,
+       `packages/shared/src/keybindings.ts`, `apps/web/src/components/settings/KeybindingsSettings.logic.ts`.
+     - The composer seams below: `apps/web/src/components/chat/ComposerBannerStack.tsx`,
+       `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx`,
+       `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ChatView.tsx`,
+       `apps/web/src/components/ui/toggle.tsx`, `apps/web/src/components/ui/radio-group.tsx`, and the
+       Tracker's colours in `apps/web/src/index.css`.
+     - Parked's chip (its note below): `packages/shared/src/composerContextReferences.ts`,
+       `packages/shared/src/composerContextReferences.test.ts`,
+       `packages/contracts/src/composerContext.test.ts`, `apps/web/src/composerDraftStore.ts`,
+       `apps/web/src/composerDraftStore.test.ts`, `apps/web/src/lib/composerContextRecords.ts`,
+       `apps/web/src/lib/contextChipAccents.ts`,
+       `apps/web/src/components/composerContextPresentation.tsx`,
+       `apps/web/src/components/contextPresentationRegistry.ts`,
+       `apps/web/src/components/ContextChip.tsx`, `apps/web/src/components/composerInlineTokenPaste.ts`,
+       `apps/web/src/components/ComposerPromptEditorTiptap.tsx`,
+       `apps/web/src/components/ChatView.logic.ts`, `apps/web/src/components/ChatView.logic.test.ts`,
+       `apps/web/src/components/chat/UserMessageContextChips.tsx`,
+       `apps/web/src/components/chat/CollapsedComposerPromptPreview.tsx`,
+       `apps/web/src/components/chat/chatViewSend.ts`,
+       `apps/web/src/components/chat/composerContextUndo.ts`,
+       `apps/web/src/components/chat/useComposerStash.ts`,
+       `apps/web/src/components/chat/useQueuedRunEdit.ts`,
+       `apps/web/src/components/chat/useQueuedRunEdit.browser.test.tsx`, and on mobile
+       `apps/mobile/src/lib/composerContextClipboard.ts`,
+       `apps/mobile/src/lib/composerContextClipboard.test.ts`,
+       `apps/mobile/src/components/ComposerEditor.tsx`,
+       `apps/mobile/src/components/ComposerEditor.ios.test.tsx`,
+       `apps/mobile/src/components/ComposerContextSheet.tsx`.
+     - The background service ("Background service" above): `apps/server/src/cloud/pinnedRuntime.ts`
+       and its test seam, `apps/server/src/cloud/selfUpdate.test.ts`.
+     - The decision judge's setting (below): `packages/contracts/src/settings.ts`,
+       `packages/shared/src/serverSettings.ts`, `packages/shared/src/serverSettings.test.ts`,
+       `apps/web/src/components/settings/settingsSearch.ts`,
+       `apps/web/src/components/settings/TextGeneratorsSettings.tsx`,
+       `apps/web/src/components/settings/SettingsPanels.tsx`.
+     - `packages/shared/package.json`: the `./sessionKit/*` subpath exports.
+     - App identity ("App identity" above): `packages/contracts/src/ipc.ts` (the `Fork` stage label),
+       `apps/desktop/src/app/DesktopEnvironment.ts`, `scripts/build-desktop-artifact.ts`, and their
+       tests `apps/desktop/src/app/DesktopEnvironment.test.ts`,
+       `apps/desktop/src/app/DesktopAppIdentity.test.ts`,
+       `apps/desktop/src/app/DesktopPreReadyPlatform.test.ts`, `scripts/build-desktop-artifact.test.ts`.
+     - Tooling: `vite.config.ts` and `knip.jsonc` (rule 4's exemptions), and `AGENTS.md` (the pointer
+       to this file).
    - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a
      stack item, drawn in place of the notice row inside the same card (the decisions panel uses it
      so it keeps its place in the stack with no notice header; upstream's row is split out as
@@ -790,48 +925,44 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      offered it"). `t3_park` has it since v0.1.11.
    - Fix-ups go in as `git commit --fixup=<fork commit>`, then
      `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <tag>`, so each fork commit stays whole.
-5. **Check:** `vp run check:changed <tag>`, plus these tests, under that Node, using the repo's own
-   `node_modules/.bin/vp` (`vp run i18n:check` is expected to fail on fork keys only; see
-   "Translation"):
-   - `packages/shared/src/sessionKit`, the drift test included, and
-     `packages/shared/src/serverSettings.test.ts` (the judge's setting).
-   - `apps/server/src/decisions`.
-   - `apps/server/src/persistence/ForkMigrations.test.ts` and `Sqlite.test.ts`.
-   - The desktop identity and environment tests in `apps/desktop/src/app` (`DesktopAppIdentity`,
-     `DesktopEnvironment`, `DesktopPreReadyPlatform`).
-   - `apps/server/src/cloud/forkServiceRuntime.test.ts` (the background service's runtime).
-   - `apps/web/src/components/chat/threadDecisions.logic.test.ts`, `composerSend.logic.test.ts`,
-     `ThreadParked.browser.test.tsx` (its last case: a status from a `msg()` table, in French),
-     `ThreadParked.touch.browser.test.tsx` (with the stylesheet) and
-     `ThreadDecisions.question-panel.browser.test.tsx`.
-   - Parked's chip: `packages/shared/src/composerContextReferences.test.ts` (its provider text),
-     `packages/contracts/src/composerContext.test.ts` (the unknown-kind shape),
-     `apps/web/src/composerDraftStore.test.ts` ("parked contexts"),
-     `apps/web/src/components/ChatView.parked.browser.test.tsx` (the real composer: add, delete and
-     undo, the Q56 guard that a change from elsewhere leaves the chip as it was, the undo gate's
-     wiring with the caret mapped and no unavailable marker, an older chip refused once a newer one
-     replaced its record, a long item's chip whose label was cut after a space coming back, two refused
-     chips leaving the text beside them, the send's record, a closing
-     code fence, stash and paste, a fence included), `threadDecisions.logic.test.ts`
-     (`parkedChipRestorable`'s conditions, `endsAtClosingFence`), `useParkedDraft.browser.test.tsx`
-     (In draft from the thread's draft and a queued message's edit; that edit's undo, and none once
-     its item is no longer Sent with the chip's words),
-     `ThreadParked.browser.test.tsx` (the lock: unavailable actions and their description, Save and
-     its field held, all free again once the chip goes; the blocked Add to draft in the menu),
-     `useQueuedRunEdit.browser.test.tsx` (an edit opens with the chip and saves without it),
-     `packages/shared/src/parkedReferences.test.ts` (the strip, and chips alone pasting nothing),
-     `apps/server/src/decisions/ThreadDecisions.test.ts` (Sent published while the judge still reads
-     the message), and on mobile `apps/mobile/src/lib/composerContextClipboard.test.ts` (a paste drops
-     it), `apps/mobile/src/components/ComposerEditor.ios.test.tsx` (a paste of chips alone keeps the
-     selection) and `apps/mobile/src/components/ComposerContextSheet.test.tsx` (its words).
-   - The Parked and Artifacts surfaces: `apps/web/src/rightPanelStore.test.ts` (order, active tab and
-     an older layout across a reload; reopening a closed one), `closedViewStore.test.ts` (closed
-     ones survive a migration) and `RightPanelTabs.browser.test.tsx` (strip counts), and
-     `ThreadArtifacts.browser.test.tsx` (groups, row actions, the Link dialog).
+5. **Check:** `node scripts/fork/upstream-sync.ts verify --target <tag> --baseline <file>` runs,
+   with vp under the validated Node, `vp run check:changed <tag>` (the typecheck, lint, and the
+   test files beside the changed files), then every test file the fork adds or changes, then the
+   full test suite once (each workspace package's own `test` script, as CI runs them, every one
+   even after another fails): upstream's tests of a file the fork modifies sit anywhere, and
+   `ci.yml` never runs on a push to `fork/main`. A failed `check:changed` or fork test file fails
+   `verify`; a failure "Known noise" lists also fails upstream. The full suite never fails
+   `verify`, because many of its tests fail on this Mac without the fork (a root `vp test run`, a
+   different set of projects from the package scripts `verify` runs, failed 60 tests in 35 files
+   on 2026-11-20). `verify` lists what the full suite leaves to read under "Still owed by a
+   person", compared with a baseline recorded at the target: `suiteOwed` in the script says what
+   each line means. It compares counts, not names, so an upstream test the rebase replaced
+   one-for-one in a test file the fork changes is not listed; its commit shows in the `range-diff`
+   list below. Record the baseline first, in a worktree of the fork checkout at the
+   tag, each line under the target's Node (step 2):
+   ```
+   git worktree add --detach /tmp/t3-<n> <tag>
+   cd /tmp/t3-<n> && vp i
+   node <fork checkout>/scripts/fork/upstream-sync.ts suite --out /tmp/baseline-<n>.txt
+   cd <fork checkout> && git worktree remove /tmp/t3-<n>
+   ```
+   What `suite` refuses is `suite` in the script; what `verify` refuses in a baseline (another
+   commit, a line `suite` does not write) is `baselineAt`. A failure whose message names the
+   checkout's path reads as new. What none of these reach (a live run, the build) is steps 6 and 7.
+   When `verify` names a fork commit or test file the rebase lost, name each one the rebase meant
+   to drop, reword or rename with `--dropped-commit <subject>` or `--dropped <path>`: a
+   `git rebase --skip` while resolving a conflict leaves no failing test behind. It then lists, from `git range-diff`, each fork commit
+   whose patch the rebase changed, with the files that differ, and each commit the rebase dropped
+   or HEAD adds, with its files: read each, since a hunk dropped from a file no test reads
+   (`index.css`, `agentContextBudget.json`, `AGENTS.md`), or undone by a commit added while
+   resolving a conflict, passes every check. `vp run i18n:check` is expected to fail on fork keys
+   only; see "Translation".
 6. **Live check:** on a dev server on an isolated home, never `~/.t3`. Reseed it first, since the
    schema moved: `node apps/server/scripts/migrate-dev-db.ts --base-dir "$PWD/.t3"` (reads `~/.t3`
-   read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`, since in a main
-   checkout dev falls back to `~/.t3`.
+   read-only; its fork tables come along). Then `vp run dev --home-dir "$PWD/.t3"`: outside a
+   linked worktree dev otherwise uses `T3CODE_HOME` or `~/.t3/dev`, which every such checkout
+   shares and the reseed did not fill (since upstream 4c099280f6 a home of `~/.t3` also lands on
+   `~/.t3/dev`, never the live `~/.t3/userdata`).
    - If the startup pairing URL does not sign in, mint one from `apps/server`:
      `node src/bin.ts pair --base-dir <checkout>/.t3`.
    - Use a desktop-width window (the strip is not shown on mobile widths). Before typing `/park`,
@@ -858,8 +989,11 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    version as `archiveVersion`); and a linked server whose core version is below the fork's is offered
    an update to `t3@<fork version>`, which fails. If either is needed, map `-fork.` back to the base tag's
    `-nightly.` at those seams. A killed build can leave the stamped version in tracked `package.json`
-   files (the build rewrites and restores them); `git checkout` them. Push with `git push --force-with-lease origin fork/main` only
-   after every check passes.
+   files (the build rewrites and restores them); `git checkout` them. Only after every check passes,
+   push with the line `rebase` and `verify` print,
+   `git push --force-with-lease=refs/heads/fork/main:<sha> origin fork/main`, where `<sha>` is the
+   `origin/fork/main` commit rebase checked: a bare `--force-with-lease` compares with whatever a
+   background fetch last wrote to `origin/fork/main`, so it can overwrite a push from another machine.
 
 ## Installing
 
