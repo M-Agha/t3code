@@ -12,7 +12,10 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 const state = vi.hoisted(() => ({
   snapshot: null as ThreadDecisionsSnapshot | null,
+  // Link; Unlink has its own, so a test tells which one ran.
   command: vi.fn(),
+  unlink: vi.fn(),
+  unlinkCommand: null as unknown,
 }));
 vi.mock(import("../../state/query"), async (importOriginal) => ({
   ...(await importOriginal()),
@@ -24,11 +27,15 @@ vi.mock(import("@effect/atom-react"), async (importOriginal) => ({
 }));
 vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
   ...(await importOriginal()),
-  useAtomCommand: (() => state.command) as never,
+  useAtomCommand: ((command: unknown) =>
+    command === state.unlinkCommand ? state.unlink : state.command) as never,
 }));
 
-import { act, render } from "../../../test/render";
+import { serverEnvironment } from "~/state/server";
+import { act, render, type Screen } from "../../../test/render";
 import { ThreadArtifactsPanel } from "./ThreadArtifacts";
+
+state.unlinkCommand = serverEnvironment.unlinkThreadArtifact;
 
 const threadRef = { environmentId: EnvironmentId.make("env"), threadId: ThreadId.make("thread") };
 
@@ -57,6 +64,7 @@ const setup = (artifacts: ReadonlyArray<ThreadArtifact>) => {
     artifactCount: artifacts.length,
   };
   state.command.mockReset().mockResolvedValue({ _tag: "Success" });
+  state.unlink.mockReset().mockResolvedValue({ _tag: "Success" });
 };
 
 const panel = () => <ThreadArtifactsPanel threadRef={threadRef} />;
@@ -139,10 +147,36 @@ it("offers Unlink only on an artifact the user linked, from hover or the keyboar
   await expect.poll(() => actionsOpacity(more)).toBe("1");
   await userEvent.keyboard("{Enter}");
   await page.getByRole("menuitem", { name: "Unlink from thread" }).click();
-  expect(state.command).toHaveBeenCalledWith({
+  expect(state.unlink).toHaveBeenCalledWith({
     environmentId: threadRef.environmentId,
     input: { threadId: threadRef.threadId, id: "Q3shipReview" },
   });
+  expect(state.command).not.toHaveBeenCalled();
+});
+
+// The snapshot without the unlinked row, as the server sends it next.
+const land = async (screen: Screen, artifacts: ReadonlyArray<ThreadArtifact>) => {
+  state.snapshot = { ...state.snapshot!, artifacts, artifactCount: artifacts.length };
+  await act(() => screen.rerender(panel()));
+};
+
+it("moves focus to the next row once the snapshot drops the unlinked one, else to Link", async () => {
+  const mine = artifact("Mine1", { title: "Mine", mentionedOnly: true, linkedByUser: true });
+  setup([BOARD, REVIEW, mine, CANVAS]);
+  await using screen = await render(panel());
+  await userEvent.hover(screen.getByRole("link", { name: /Q3 shipping review/ }));
+  await screen.getByRole("button", { name: "Actions for Q3 shipping review" }).click();
+  await page.getByRole("menuitem", { name: "Unlink from thread" }).click();
+  await vi.waitFor(() => expect(state.unlink).toHaveBeenCalledOnce());
+  await land(screen, [BOARD, mine, CANVAS]);
+  await expect.element(screen.getByRole("link", { name: /^Mine/ })).toHaveFocus();
+
+  await land(screen, [mine]);
+  await userEvent.hover(screen.getByRole("link", { name: /^Mine/ }));
+  await screen.getByRole("button", { name: "Actions for Mine" }).click();
+  await page.getByRole("menuitem", { name: "Unlink from thread" }).click();
+  await land(screen, []);
+  await expect.element(screen.getByRole("button", { name: "Link artifact" })).toHaveFocus();
 });
 
 it("links an artifact from the empty state, its link read before it is sent", async () => {
@@ -161,7 +195,9 @@ it("links an artifact from the empty state, its link read before it is sent", as
   await url.fill("https://claude.ai/artifact/Q3shipReview?tab=1#top");
   await expect
     .element(
-      page.getByText(/claude\.ai artifact Q3shipReview · type unknown until Claude reads it/),
+      page.getByText(
+        /claude\.ai artifact Q3shipReview · type unknown until this thread publishes it/,
+      ),
     )
     .toBeVisible();
   await page.getByRole("textbox", { name: /Title/ }).fill("Q3 shipping review");
