@@ -68,6 +68,7 @@ const actions = {
     },
     attach: (item: { readonly id: number; readonly text: string }) => state.attach(item),
   },
+  reopen: { isPending: () => false, start: () => {} },
 };
 
 const item = (id: number, change: Partial<ThreadParkedItem> = {}): ThreadParkedItem => ({
@@ -164,6 +165,15 @@ it("moves focus to the next row once the snapshot drops the finished one", async
   await vi.waitFor(() => expect(state.update).toHaveBeenCalledOnce());
   await land(screen, [1, 3]);
   await expect.element(screen.getByRole("button", { name: "Actions for: item 3" })).toHaveFocus();
+});
+
+it("moves focus past a next row another client resolved meanwhile, to the nearest left", async () => {
+  setup([1, 2, 3, 4]);
+  await using screen = await render(panel());
+  await pick(screen, "item 2", "Mark done");
+  await vi.waitFor(() => expect(state.update).toHaveBeenCalledOnce());
+  await land(screen, [1, 4], [2, 3]);
+  await expect.element(screen.getByRole("button", { name: "Actions for: item 4" })).toHaveFocus();
 });
 
 it("moves focus to the surface, not the finished row's menu, when the last open row is done", async () => {

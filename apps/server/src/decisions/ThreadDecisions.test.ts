@@ -86,14 +86,19 @@ const REPLY = [
   "Q5, table name: Rename it? My pick is no: nothing reads it yet.",
 ].join("\n");
 
-const seed = Effect.fn("seed")(function* (deletedAt: string | null = null, id = threadId) {
+const seed = Effect.fn("seed")(function* (
+  deletedAt: string | null = null,
+  id = threadId,
+  payload: object = {},
+) {
   const sql = yield* SqlClient.SqlClient;
   yield* sql`
     INSERT INTO orchestration_v2_projection_threads (
       thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
       created_at, updated_at, deleted_at, payload_json
     ) VALUES (${id}, 'project', 'Thread', 'codex', 'full-access', 'default',
-      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ${deletedAt}, '{}')
+      '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ${deletedAt},
+      ${JSON.stringify(payload)})
   `;
 });
 
@@ -982,11 +987,170 @@ it.effect("reads every Artifact call again after fork migration 006, filling typ
   }).pipe(Effect.provide(withDecisions)),
 );
 
+it.effect("keeps a type an older call named when 006's replay meets a later untyped publish", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* artifactItem(
+      "create",
+      "2026-01-01T00:01:00.000Z",
+      { type_url: ODD_TYPE, title: "Odd" },
+      createOutput("https://claude.ai/artifact/Odd1", "Odd", ODD_TYPE),
+    );
+    yield* artifactItem(
+      "publish",
+      "2026-01-01T00:02:00.000Z",
+      {},
+      publishOutput("https://claude.ai/artifact/Odd1", "Odd", true, "odd-uuid"),
+    );
+    // As a build before 006 left it: the row dated by the later publish, the position past both.
+    yield* sql`
+      INSERT INTO fork_thread_artifacts (
+        thread_id, link_id, url, title, source, first_seen_at, updated_at
+      ) VALUES (${threadId}, 'Odd1', 'https://claude.ai/artifact/Odd1', 'Odd', 'tool',
+        '2026-01-01T00:01:00.000Z', '2026-01-01T00:02:00.000Z')
+    `;
+    yield* sql`
+      INSERT INTO fork_thread_artifact_sync (
+        thread_id, after_message_created_at, after_message_id, after_item_updated_at, after_item_id
+      ) VALUES (${threadId}, '', '', '2026-01-01T00:02:00.000Z', 'publish')
+    `;
+    yield* ForkMigration0006;
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* typeOf("Odd1"), { kind: "typed", url: ODD_TYPE, name: null });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("leaves a row first seen at a not-found's own time unmarked on 006's replay", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* artifactItem(
+      "read-Tie1",
+      "2026-01-01T00:01:00.000Z",
+      { action: "read", url: "https://claude.ai/artifact/Tie1" },
+      NOT_FOUND_OUTPUT,
+      { status: "failed" },
+    );
+    // The read found no row; the user linked the artifact afterwards, at the read's own time.
+    assert.isFalse(yield* decisions.sync(threadId));
+    yield* sql`
+      INSERT INTO fork_thread_artifacts (
+        thread_id, link_id, url, title, source, first_seen_at, updated_at
+      ) VALUES (${threadId}, 'Tie1', 'https://claude.ai/artifact/Tie1', 'Tie', 'manual',
+        '2026-01-01T00:01:00.000Z', '2026-01-01T00:01:00.000Z')
+    `;
+    yield* ForkMigration0006;
+    yield* decisions.sync(threadId);
+    assert.isNull((yield* artifactsById()).Tie1?.notFoundAt);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("marks a not-found the same whether one sync or several read the reply first", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    // One catch-up sync: the reply linking it, then a read claude.ai no longer finds.
+    // nextAt() for the calls too, so they sort among the messages in the order written.
+    yield* message("a1", "r1", "assistant", "See https://claude.ai/artifact/Caught1");
+    const caughtAt = nextAt();
+    yield* artifactItem(
+      "read-caught",
+      caughtAt,
+      { action: "read", url: "https://claude.ai/artifact/Caught1" },
+      NOT_FOUND_OUTPUT,
+      { status: "failed" },
+    );
+    // A reply still streaming holds the read after it until it is done.
+    yield* message("a2", "r1", "assistant", "See https://claude.ai/artifact/Held1", {}, true);
+    const heldAt = nextAt();
+    yield* artifactItem(
+      "read-held",
+      heldAt,
+      { action: "read", url: "https://claude.ai/artifact/Held1" },
+      NOT_FOUND_OUTPUT,
+      { status: "failed" },
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(
+      Object.fromEntries(
+        Object.entries(yield* artifactsById()).map(([id, row]) => [id, row.notFoundAt]),
+      ),
+      { Caught1: caughtAt },
+    );
+    yield* sql`UPDATE orchestration_v2_projection_messages SET streaming = 0 WHERE message_id = 'a2'`;
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.equal((yield* artifactsById()).Held1?.notFoundAt, heldAt);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("keeps a type's newest name when an older thread is read after it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const older = ThreadId.make("thread-older");
+    yield* seed();
+    yield* seed(null, older);
+    const types = (title: string) => ({ artifact_types: [{ title, type_url: ODD_TYPE }] });
+    yield* artifactItem(
+      "create",
+      "2026-01-01T00:00:00.000Z",
+      { type_url: ODD_TYPE, title: "Odd" },
+      createOutput("https://claude.ai/artifact/Odd1", "Odd", ODD_TYPE),
+    );
+    yield* artifactItem("types-1", "2026-01-01T00:01:00.000Z", { action: "list" }, types("Odd"));
+    assert.isTrue(yield* decisions.sync(threadId));
+    // The same name again, later; then a thread renamed it in between, read only now.
+    yield* artifactItem("types-3", "2026-01-03T00:00:00.000Z", { action: "list" }, types("Odd"));
+    assert.isFalse(yield* decisions.sync(threadId));
+    yield* artifactItem(
+      "types-2",
+      "2026-01-02T00:00:00.000Z",
+      { action: "list" },
+      types("Odd (old)"),
+      { thread: older },
+    );
+    yield* decisions.sync(older);
+    assert.deepEqual(yield* typeOf("Odd1"), { kind: "typed", url: ODD_TYPE, name: "Odd" });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("lists a mention the user links among the newest rows, however old", () =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* sql`
+      INSERT INTO fork_thread_artifacts (
+        thread_id, link_id, url, source, first_seen_at, updated_at
+      ) VALUES (${threadId}, 'Old1', 'https://claude.ai/artifact/Old1', 'mention',
+        '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    `;
+    for (let index = 0; index < THREAD_ARTIFACTS_LIMIT; index += 1) {
+      yield* sql`
+        INSERT INTO fork_thread_artifacts (
+          thread_id, link_id, url, source, first_seen_at, updated_at
+        ) VALUES (${threadId}, ${`New${index}`}, ${`https://claude.ai/artifact/New${index}`},
+          'tool', '2026-01-02T00:00:00.000Z', '2026-01-02T00:00:00.000Z')
+      `;
+    }
+    assert.notProperty(yield* artifactsById(), "Old1");
+    yield* TestClock.setTime(Date.UTC(2026, 1, 1));
+    yield* decisions.linkArtifact({ threadId, url: "https://claude.ai/artifact/Old1" });
+    assert.include((yield* artifactsById()).Old1, { linkedByUser: true });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
 it.effect("parks, edits, moves and resolves a thread's items", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const decisions = yield* ThreadDecisions.ThreadDecisions;
     yield* seed();
+    const sideChat = ThreadId.make("thread-side-chat");
+    yield* seed(null, sideChat, { lineage: { sideChat: true } });
     const parked = Effect.fn("parked")(function* () {
       const snapshot = yield* decisions.snapshot(threadId);
       return {
@@ -1070,6 +1234,11 @@ it.effect("parks, edits, moves and resolves a thread's items", () =>
           parkedBy: "user",
           items: [{ kind: "me", text: "real" }],
         }),
+        decisions.park({
+          threadId: sideChat,
+          parkedBy: "user",
+          items: [{ kind: "me", text: "real" }],
+        }),
       ],
       (refused) => Effect.flip(refused).pipe(Effect.map((error) => error.message)),
     );
@@ -1081,6 +1250,7 @@ it.effect("parks, edits, moves and resolves a thread's items", () =>
       "This item is no longer open in this thread.",
       ThreadDecisions.PLACEHOLDER_PARK_MESSAGE,
       "This thread was not found.",
+      ThreadDecisions.SIDE_CHAT_PARK_MESSAGE,
     ]);
     // A refused batch parks none of its items.
     yield* Effect.flip(
@@ -1440,7 +1610,7 @@ it.effect("ignores a record naming another thread, though this thread has an ite
   }).pipe(Effect.provide(withDecisions)),
 );
 
-it.effect("sweeps deleted threads' rows when it starts, keeping parked items of missing ones", () =>
+it.effect("sweeps deleted threads' rows at start, keeping user-made rows of missing ones", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const deleted = ThreadId.make("thread-deleted");
@@ -1462,10 +1632,14 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
         INSERT INTO fork_thread_parked_set_aside (thread_id, item_id, message_id)
         VALUES (${id}, 1, ${`m-${id}`})
       `;
+      // A mention, a link the user added with their title, and a published row the user titled.
       yield* sql`
         INSERT INTO fork_thread_artifacts (
-          thread_id, link_id, url, source, first_seen_at, updated_at
-        ) VALUES (${id}, 'a', 'https://claude.ai/artifact/a', 'mention', 'x', 'x')
+          thread_id, link_id, url, title, source, first_seen_at, updated_at
+        ) VALUES
+          (${id}, 'a', 'https://claude.ai/artifact/a', NULL, 'mention', 'x', 'x'),
+          (${id}, 'b', 'https://claude.ai/artifact/b', 'Mine', 'manual', 'x', 'x'),
+          (${id}, 'c', 'https://claude.ai/artifact/c', 'Named', 'tool', 'x', 'x')
       `;
       yield* sql`
         INSERT INTO fork_thread_artifact_sync (
@@ -1490,11 +1664,25 @@ it.effect("sweeps deleted threads' rows when it starts, keeping parked items of 
       SELECT thread_id AS "threadId" FROM fork_thread_parked_set_aside ORDER BY thread_id
     `;
     assert.deepEqual(sends, [{ threadId }, { threadId: "thread-missing" }]);
-    const artifacts = yield* sql<{ readonly threadId: string }>`
-      SELECT thread_id AS "threadId" FROM fork_thread_artifacts
-      UNION ALL SELECT thread_id FROM fork_thread_artifact_sync
+    const artifacts = yield* sql<{ readonly row: string }>`
+      SELECT thread_id || ' ' || link_id || ' ' || source || ' ' || COALESCE(title, '-') AS row
+      FROM fork_thread_artifacts ORDER BY thread_id, link_id
     `;
-    assert.deepEqual(artifacts, [{ threadId }, { threadId }]);
+    assert.deepEqual(
+      artifacts.map(({ row }) => row),
+      [
+        "thread-decisions a mention -",
+        "thread-decisions b manual Mine",
+        "thread-decisions c tool Named",
+        "thread-missing a mention -",
+        "thread-missing b manual Mine",
+        "thread-missing c tool Named",
+      ],
+    );
+    const artifactSync = yield* sql<{ readonly threadId: string }>`
+      SELECT thread_id AS "threadId" FROM fork_thread_artifact_sync ORDER BY thread_id
+    `;
+    assert.deepEqual(artifactSync, [{ threadId }, { threadId: "thread-missing" }]);
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
 

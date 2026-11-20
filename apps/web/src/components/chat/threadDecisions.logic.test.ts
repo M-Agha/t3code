@@ -27,12 +27,12 @@ import {
   nextUndrafted,
   openQuestionsByReply,
   parkedChipRestorable,
-  parkedFocusAfter,
   parkedGroups,
   parkedIdsInDraft,
   parkedStatus,
   parkedTime,
   questionsClosedByDraft,
+  rowFocusAfter,
   unfinishedLabels,
   withoutLine,
 } from "./threadDecisions.logic";
@@ -402,10 +402,14 @@ describe("parked items", () => {
     expect(isParkedBusy(new Map(), item)).toBe(false);
   });
 
-  it("moves focus to the next open item, else the one before, else nowhere", () => {
-    expect(parkedFocusAfter([1, 2, 3], 2)).toBe(3);
-    expect(parkedFocusAfter([1, 2, 3], 3)).toBe(2);
-    expect(parkedFocusAfter([2], 2)).toBeNull();
+  it("moves focus to the next row still shown, else the nearest before, else nowhere", () => {
+    expect(rowFocusAfter([1, 2, 3], 2, [1, 3])).toBe(3);
+    expect(rowFocusAfter([1, 2, 3], 3, [1, 2])).toBe(2);
+    expect(rowFocusAfter([2], 2, [])).toBeNull();
+    // Another client resolved the neighbours meanwhile.
+    expect(rowFocusAfter([1, 2, 3, 4], 2, [1, 4])).toBe(4);
+    expect(rowFocusAfter([1, 2, 3, 4], 3, [1])).toBe(1);
+    expect(rowFocusAfter(["a", "b"], "a", [])).toBeNull();
   });
 });
 

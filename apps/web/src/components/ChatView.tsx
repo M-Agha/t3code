@@ -354,6 +354,7 @@ import {
   threadDecisionsBannerItem,
   useDraftActions,
   useParkedDraft,
+  useReopenWithUndo,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
 import { asDraftLine, questionsClosedByDraft } from "./chat/threadDecisions.logic";
@@ -1999,8 +2000,8 @@ export default function ChatView(props: ChatViewProps) {
       },
     });
     if (result._tag !== "Success") return false;
+    // No `type`: the success icon is a fixed green no theme sets (FORK.md, Colours).
     toastManager.add({
-      type: "success",
       title: gt("{count, plural, one {Parked} other {Parked {count} items}}", {
         count: parks.length,
       }),
@@ -2063,6 +2064,7 @@ export default function ChatView(props: ChatViewProps) {
       ),
     ),
     parked: parkedDraft.actions,
+    reopen: useReopenWithUndo(),
   };
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
@@ -3027,6 +3029,8 @@ export default function ChatView(props: ChatViewProps) {
     activeThread?.lineage.sideChat !== true &&
     !isSubagentThread &&
     serverConfig?.environment.capabilities.sideChats === true;
+  // A side chat never parks (ThreadDecisions.park refuses it).
+  const parkOffered = isServerThread && activeThread?.lineage.sideChat !== true;
   const sideChat = useSideChat({
     threadRef: sideChatsOffered && isServerThread ? activeThreadRef : null,
     readSettings: () => ({
@@ -3927,7 +3931,7 @@ export default function ChatView(props: ChatViewProps) {
                                 onToggleKeepFullHistory={toggleKeepFullHistoryStable}
                                 sideChatAvailable={sideChat.available}
                                 sideChatDisabledReason={sideChatDisabledReason}
-                                parkAvailable={isServerThread}
+                                parkAvailable={parkOffered}
                                 onFreshSession={
                                   freshSessionCommandAvailable ? armFreshSessionStable : undefined
                                 }
@@ -4279,7 +4283,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddDevice={addDeviceSurfaceStable}
           onAddSideChat={sideChatsOffered ? openSideChatStable : undefined}
           onAddDecisions={isServerThread ? addDecisionsSurfaceStable : undefined}
-          onAddParked={isServerThread ? addParkedSurfaceStable : undefined}
+          onAddParked={parkOffered ? addParkedSurfaceStable : undefined}
           onAddArtifacts={isServerThread ? addArtifactsSurfaceStable : undefined}
           surfaceCounts={trackerSurfaceCounts}
           browserAvailable={canOperatePreview && browserAvailable}
