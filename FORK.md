@@ -52,6 +52,7 @@ reasons are the ones they accepted.
 | `(fork) service: fork builds seed the t3 runtime that t3 service install pins`                        | Background service            |
 | `(fork) upstream-sync: a rerunnable plan, rebase and verify for moving onto a newer upstream`         | Rebasing onto upstream        |
 | `(fork) tracker: the startup sweep keeps what the user made, and artifacts are read in time order`    | Artifacts                     |
+| `(fork) decisions: an answer sent mid-run stays answered when that run's reply asks again`            | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -132,7 +133,29 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
 - **Reopening:** only a shaped re-ask of a known label (one with "My pick is") reopens or rewords
   it. An unshaped line naming a known label ("Q7: nothing to change." right after the user's
   "Q7: yes") changes nothing; a label never seen before is still recorded. (2026-11-17: agent
-  echoes reopened answered questions under the earlier rule, which let any line reopen one.)
+  echoes reopened answered questions under the earlier rule, which let any line reopen one.) A
+  re-ask also leaves closed a question answered by a message the reply could not have seen: one of
+  a later run than the reply's (the `orchestration_v2_projection_runs.ordinal` of each message's
+  `run_id`), or one whose run is still `queued`. A message sent while the agent works queues behind
+  that run (possibly behind others) or is delivered into it as a steer. A queued run's ordinal is
+  final only once it starts: when a newer run started while it waited, the Orchestrator's
+  queued-run start renumbers it past the runs that started meanwhile, so until then a run that
+  started ahead of it carries a higher ordinal than it. A steer carries the running run's own id,
+  so a re-ask after one still reopens; when either message has no run (an imported message, a
+  card's answer), time order decides, as before. A user message whose run never started
+  (`neverStarted` in ThreadDecisions.ts) never reached the agent: it answers nothing, its
+  `Veto:` lines veto nothing, and a parked chip it carries is not Sent. (2026-11-19: "Q46: yes",
+  sent mid-run, was reopened by that run's reply.) _Known limits, not reproduced:_ (a) a queued
+  answer read at turn end and then cancelled before its run starts stays answered, since the
+  watermark never reads it again; (b) a steer the provider declines is re-sent as a follow-up run
+  under the same message id, and until the resend moves that message's `run_id` to the new run, a
+  re-ask in the running run's reply read in that window reopens it (and it stays open); (c) a
+  `Veto:` line in a queued message whose run is then cancelled before it starts stays shown until
+  the next snapshot is read; (d) an answer skipped because its run failed to start is not read again
+  if T3 retries that run under the same id (only a run created with deferred start, a new thread's
+  first message, can be retried that way).
+  _Rejected:_ the run's start time (`$.startedAt`): a run queued before the answer can start after
+  it without seeing it, and a steer arrives after the start yet is seen.
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
@@ -217,7 +240,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   - **Decisions:** "Decided without asking" first, a group per reply. Veto adds `Veto: <text>`; the
     row then shows "In draft", the line and Remove; once sent it reads "Vetoed". Vetoed comes from the
     server: the snapshot marks an item `vetoed` when a person-typed message after its reply holds
-    that line (lines read trimmed, as the panel reads its draft; one read of the thread's messages
+    that line (lines read trimmed; a message whose run never started, `neverStarted`, is ignored; as the panel reads its draft; one read of the thread's messages
     with a `Veto: ` line, matched in TypeScript), and a message with a `Veto: ` line publishes a snapshot even when it closes no
     question. (A client-side check would miss messages the timeline has not loaded.) Then Answered
     (accent chip) and Not a decision (muted chip), each with "You" and the question's own part of the
@@ -393,12 +416,12 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     Each sync works the state out again from every carrying message (`carriedPairs`), so nothing read
     once is skipped later: a chip edited out of a queued message and put back (two clients saving the
     same message) marks the item Sent again (Sol S2).
-  - **Back to Open:** only when the message never reached the agent: its run was cancelled before it
-    started (`status` `cancelled` with no `$.startedAt`, which the orchestrator writes as a run turns
-    `running`; a queued send cancelled, or a thread archived with it queued), or the chip was edited
+  - **Back to Open:** only when the message never reached the agent: its run never started
+    (`neverStarted`: a queued send cancelled, a thread archived with it queued, or a run that could
+    not start), or the chip was edited
     out of the queued message. Another message carrying the item since its last Reopen keeps it Sent,
-    with that message. Nothing else changes it: steers, declined steers, provider failures and usage
-    limits leave the message to T3, which delivers or retries it.
+    with that message. Nothing else changes it: steers, declined steers, provider failures after the
+    start and usage limits leave the message to T3, which delivers or retries it.
   - **Reopen** returns a Sent item to Open. In the same transaction it reads every message recorded
     so far that carries the item and sets each aside (`fork_thread_parked_set_aside`, keyed by thread,
     item and message), so none of them marks it Sent again, including one recorded just before the
