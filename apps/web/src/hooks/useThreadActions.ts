@@ -64,6 +64,7 @@ import { showThreadUndoNotice } from "./showThreadUndoNotice";
 import { useAtomCommand } from "../state/use-atom-command";
 import { threadTriagePermitted, useOrchestrationCommand } from "../state/use-orchestration-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
+import { earlierTime } from "../components/chat/unreadFromHere.logic";
 
 export class ThreadArchiveBlockedError extends Schema.TaggedError<ThreadArchiveBlockedError>()(
   "ThreadArchiveBlockedError",
@@ -226,21 +227,26 @@ export async function navigateAfterThreadDeletion(navigate: () => Promise<void>)
   }
 }
 
-function useMarkThreadUnread() {
+// Fork (Mark unread from here): exported, and `from` (an agent message's createdAt) marks unread
+// from that message; the server path's result is returned for the caller to report.
+export function useMarkThreadUnread() {
   const markThreadUnreadMutation = useAtomCommand(threadEnvironment.markUnread, {
     reportFailure: false,
   });
   const markThreadUnreadLocal = useUiStateStore((state) => state.markThreadUnread);
-  return (target: ScopedThreadRef) => {
+  return (target: ScopedThreadRef, from?: string) => {
     if (readEnvironmentServerConfigLoaded(target.environmentId)) {
-      void markThreadUnreadMutation({
+      return markThreadUnreadMutation({
         environmentId: target.environmentId,
-        input: { threadId: target.threadId },
+        input: { threadId: target.threadId, ...(from === undefined ? {} : { from }) },
       });
-      return;
     }
     const thread = readThreadShell(target);
-    markThreadUnreadLocal(scopedThreadKey(target), thread?.latestRun?.completedAt);
+    markThreadUnreadLocal(
+      scopedThreadKey(target),
+      earlierTime(from, thread?.latestRun?.completedAt),
+    );
+    return undefined;
   };
 }
 

@@ -142,6 +142,8 @@ import {
   type TimelineListOpening,
   type TimelineViewport,
 } from "./timelineViewport";
+import { NewMessagesDivider, useUnreadDivider } from "./UnreadFromHere";
+import type { UnreadMarker } from "./unreadFromHere.logic";
 import { useThreadFindPositionReader } from "./useThreadFindPositionReader";
 import { ThreadActivityAnnouncer } from "./ThreadActivityAnnouncer";
 import { useStableHandoffRuns, useIncrementalTimelineRows, useStableRows } from "./useTimelineRows";
@@ -347,6 +349,8 @@ interface MessagesTimelineProps {
   findQuery?: string;
   activeFindMatch?: ThreadFindMatch | null;
   findNavigationId?: number;
+  /** Fork (Mark unread from here): the open thread's watermark at open; see useUnreadMarker. */
+  unreadMarker?: UnreadMarker | null;
 }
 
 export function MessagesTimeline(props: MessagesTimelineProps) {
@@ -441,6 +445,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   emptyPlaceholderInset,
   topFadeEnabled = false,
   historyControls,
+  unreadMarker,
 }: MessagesTimelineProps) {
   const gt = useGT();
   const canvas = useChatCanvas();
@@ -1366,6 +1371,21 @@ const ConversationTimeline = memo(function ConversationTimeline({
     contentInsetEndAdjustment,
   });
 
+  // Fork (Mark unread from here): the "New" divider, and the opening's jump to it.
+  const unreadDividerRowId = useUnreadDivider({
+    identity: listIdentityKey,
+    marker: unreadMarker,
+    entries: timelineEntries,
+    rows,
+    syncing,
+    hasMoreHistory: historyControls?.hasMoreHistory ?? false,
+    latestRun,
+    listReady: findListReady && !restoringThreadPosition,
+    listRef,
+    viewportRef,
+    viewportElement: timelineViewportElement,
+  });
+
   useThreadFindNavigation({
     // Find reveals its match only after the opening restore settles; both
     // scroll the list directly, so the restore would otherwise pull it back.
@@ -1417,13 +1437,20 @@ const ConversationTimeline = memo(function ConversationTimeline({
           data-timeline-root="true"
         >
           <AudioPreviewUnmountContext value={onAudioUnmount}>
+            {/* Fork (Mark unread from here). */}
+            {item.id === unreadDividerRowId ? <NewMessagesDivider /> : null}
             <TimelineRowContent row={item} />
           </AudioPreviewUnmountContext>
         </div>
       </div>
     </TimelineRowCtx>
   );
-  const listExtraData = { identity: listIdentityKey, rowCount: rows.length, sharedState };
+  const listExtraData = {
+    identity: listIdentityKey,
+    rowCount: rows.length,
+    sharedState,
+    unreadDividerRowId, // Fork (Mark unread from here): rows redraw when the divider moves.
+  };
   const timelineListFooter = (
     <TimelineListFooter
       composerInset={anchoredEndSpace ? 0 : contentInsetEndAdjustment}
