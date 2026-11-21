@@ -69,6 +69,8 @@ const actions = {
     attach: (item: { readonly id: number; readonly text: string }) => state.attach(item),
   },
   reopen: { isPending: () => false, start: () => {} },
+  dismiss: { isPending: () => false, start: () => {} },
+  questionsHeld: false,
 };
 
 const item = (id: number, change: Partial<ThreadParkedItem> = {}): ThreadParkedItem => ({
@@ -99,6 +101,7 @@ const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSna
   parkedOpenCount: parked.length,
   artifacts: [],
   artifactCount: 0,
+  lastTypedMessageRead: null,
 });
 
 const panel = () => <ThreadParkedPanel threadRef={threadRef} actions={actions} />;
