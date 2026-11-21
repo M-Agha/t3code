@@ -83,6 +83,7 @@ async function openThread(name: string, ...parked: ReadonlyArray<ThreadParkedIte
     parkedOpenCount: rows.filter((row) => row.state === "open").length,
     artifacts: [],
     artifactCount: 0,
+    lastTypedMessageRead: null,
   });
   const decisions = answerStreamRpc(WS_METHODS.threadDecisionsSubscribe, snapshotOf(parked));
   __setClientSettingsForTests({

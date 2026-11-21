@@ -39,6 +39,8 @@ const actions = {
   inDraft: {},
   parked: { inDraft: [], attach: () => true },
   reopen: { isPending: () => false, start: () => {} },
+  dismiss: { isPending: () => false, start: () => {} },
+  questionsHeld: false,
 };
 
 // On a touch screen the actions always show (Sol round 1, S7): beside the row's time, never over it.
@@ -63,6 +65,7 @@ it("keeps a touch screen's always-shown actions off the row's time", async () =>
     parkedOpenCount: 1,
     artifacts: [],
     artifactCount: 0,
+    lastTypedMessageRead: null,
   };
   const session = cdp();
   await session.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });

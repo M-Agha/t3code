@@ -5,7 +5,8 @@ import {
   type ThreadArtifactLinkInput,
   type ThreadArtifactUnlinkInput,
   type ThreadDecisionQuestion,
-  type ThreadDecisionReopenInput,
+  type ThreadDecisionQuestionInput,
+  ENDED_RUN_STATUSES,
   ThreadDecisionsError,
   type ThreadDecisionsSnapshot,
   type ThreadId,
@@ -50,16 +51,6 @@ import { CORE_ARTIFACT_TYPE_NAMES, readArtifactCall } from "./artifactCalls.ts";
 import * as DecisionJudge from "./DecisionJudge.ts";
 
 // Fork-only. Questions are derived from projected messages; only resolutions are irreplaceable.
-
-// A completed turn is first persisted as `waiting` (RunExecutionService), so it counts as ended.
-const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
-  "waiting",
-  "completed",
-  "interrupted",
-  "failed",
-  "cancelled",
-  "rolled_back",
-]);
 
 // The line the Tracker's Veto adds for a choice made without asking (`decisionMessages.veto`).
 const VETO_PREFIX = "Veto: ";
@@ -265,7 +256,11 @@ export class ThreadDecisions extends Context.Service<
       threadId: ThreadId,
     ) => Stream.Stream<ThreadDecisionsSnapshot, ThreadDecisionsError>;
     readonly reopen: (
-      input: ThreadDecisionReopenInput,
+      input: ThreadDecisionQuestionInput,
+    ) => Effect.Effect<void, ThreadDecisionsError>;
+    /** Closes an open question as `dismissed`; nothing reaches the agent. */
+    readonly dismiss: (
+      input: ThreadDecisionQuestionInput,
     ) => Effect.Effect<void, ThreadDecisionsError>;
     /** Parks every item or none. */
     readonly park: (input: ThreadParkRequest) => Effect.Effect<void, ThreadDecisionsError>;
@@ -566,13 +561,17 @@ export const layer = Layer.effect(
           { ...row, text: row.text },
           judgedThread && row.judged === 1,
         );
+        // A message read while questions were open publishes even when it closes none: the composer hides
+        // them from the send until the snapshot's `lastTypedMessageRead` names it (FORK.md, "Hidden while a send is judged").
         changed =
           (yield* applyRows(
             threadId,
             [row],
             replies,
             new Map(closing === undefined ? [] : [[row.messageId, closing]]),
-          )) || changed;
+          )) ||
+          closing !== undefined ||
+          changed;
         start = index + 1;
       }
       changed = (yield* applyRows(threadId, ready.slice(start), replies, new Map())) || changed;
@@ -1119,6 +1118,17 @@ export const layer = Layer.effect(
               OR EXISTS (SELECT 1 FROM fork_artifact_type_names AS known
                 WHERE known.type_url = artifact.url)))
         `;
+        // The newest person-typed message at or before the watermark; a card read before any message
+        // leaves the watermark at ('', ''), which passes none.
+        const [lastTypedRead] = yield* sql<{ readonly messageId: string }>`
+          SELECT message.message_id AS "messageId"
+          FROM orchestration_v2_projection_messages AS message
+          JOIN fork_thread_decision_sync AS sync ON sync.thread_id = message.thread_id
+          WHERE message.thread_id = ${threadId} AND message.role = 'user' AND ${userAuthored()}
+            AND (message.created_at, message.message_id) <= (sync.after_created_at, sync.after_message_id)
+          ORDER BY message.created_at DESC, message.message_id DESC
+          LIMIT 1
+        `;
         return {
           threadId,
           questions: questions.map((row): ThreadDecisionQuestion => ({
@@ -1155,6 +1165,8 @@ export const layer = Layer.effect(
             notFoundAt: row.notFoundAt,
           })),
           artifactCount: artifactCount?.count ?? 0,
+          lastTypedMessageRead:
+            lastTypedRead === undefined ? null : MessageId.make(lastTypedRead.messageId),
         };
       },
       NodeSqliteClient.readOnly,
@@ -1185,23 +1197,63 @@ export const layer = Layer.effect(
         }),
       );
 
+    // A question asked again since the user saw it (a new source message) is not the one they reopen.
+    // One already open, asked again or reopened elsewhere, is what Reopen asks for, so it succeeds.
     const reopen = Effect.fn("ThreadDecisions.reopen")(function* (
-      input: ThreadDecisionReopenInput,
+      input: ThreadDecisionQuestionInput,
     ) {
-      const reopened = yield* locks
+      const state = yield* locks
         .withLock(
           input.threadId,
-          sql`
-            UPDATE fork_thread_decision_questions
-            SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL
-            WHERE thread_id = ${input.threadId} AND label = ${input.label} AND state <> 'open'
-            RETURNING label
-          `,
+          Effect.gen(function* () {
+            const reopened = yield* sql`
+              UPDATE fork_thread_decision_questions
+              SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL
+              WHERE thread_id = ${input.threadId} AND label = ${input.label}
+                AND source_message_id = ${input.sourceMessageId} AND state <> 'open'
+              RETURNING label
+            `;
+            if (reopened.length > 0) return "reopened";
+            const [current] = yield* sql<{ readonly state: string }>`
+              SELECT state FROM fork_thread_decision_questions
+              WHERE thread_id = ${input.threadId} AND label = ${input.label}
+            `;
+            if (current === undefined) return "unknown";
+            return current.state === "open" ? "alreadyOpen" : "askedAgain";
+          }),
         )
         .pipe(Effect.mapError(fail(`Could not reopen ${input.label}.`)));
-      if (reopened.length === 0) {
+      if (state === "unknown") {
         return yield* new ThreadDecisionsError({
-          message: `${input.label} is not a resolved question in this thread.`,
+          message: `${input.label} is not a question in this thread.`,
+        });
+      }
+      if (state === "askedAgain") {
+        return yield* new ThreadDecisionsError({
+          message: `${input.label} was asked again since; nothing was reopened.`,
+        });
+      }
+      if (state === "reopened") yield* PubSub.publish(changes, input.threadId);
+    });
+
+    // Not under the thread's lock, unlike Reopen: it would wait out a judge call (up to 20 s). A sync's
+    // closings write only open questions, so none lands on a dismissed one; its re-ask upsert does reopen
+    // one, by design, as it reopens any closed question. A question asked again since the user saw it
+    // (a new source message) is refused, so a re-ask racing the click is not dismissed unseen.
+    const dismiss = Effect.fn("ThreadDecisions.dismiss")(function* (
+      input: ThreadDecisionQuestionInput,
+    ) {
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const dismissed = yield* sql`
+        UPDATE fork_thread_decision_questions
+        SET state = 'dismissed', answer_text = NULL, answer_message_id = NULL, resolved_at = ${now}
+        WHERE thread_id = ${input.threadId} AND label = ${input.label}
+          AND source_message_id = ${input.sourceMessageId} AND state = 'open'
+        RETURNING label
+      `.pipe(Effect.mapError(fail(`Could not dismiss ${input.label}.`)));
+      if (dismissed.length === 0) {
+        return yield* new ThreadDecisionsError({
+          message: `${input.label} is no longer open as shown (closed, or asked again); nothing was dismissed.`,
         });
       }
       yield* PubSub.publish(changes, input.threadId);
@@ -1389,6 +1441,7 @@ export const layer = Layer.effect(
       snapshot,
       subscribe,
       reopen,
+      dismiss,
       park,
       updateParked,
       linkArtifact,

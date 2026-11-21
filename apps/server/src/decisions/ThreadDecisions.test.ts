@@ -158,6 +158,13 @@ const states = Effect.fn("states")(function* () {
   return Object.fromEntries(snapshot.questions.map((q) => [q.label, q.state]));
 });
 
+/** Dismiss's and Reopen's input for a question as the snapshot shows it now. */
+const target = Effect.fn("target")(function* (label: string) {
+  const shown = yield* question(label);
+  assert.isDefined(shown, `${label} is not in the snapshot`);
+  return { threadId, label, sourceMessageId: shown.sourceMessageId };
+});
+
 it.effect("tracks a thread's questions from its replies and the user's answers", () =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -185,7 +192,9 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
 
     yield* run("r2", 2, "running");
     yield* message("u2", "r2", "user", "What does the log say?");
-    assert.isFalse(yield* decisions.sync(threadId));
+    // Closes nothing, but read while questions are open it publishes: the composer shows them again once
+    // the snapshot's watermark passes it.
+    assert.isTrue(yield* decisions.sync(threadId));
     yield* message("u3", "r2", "user", "Q4: yes", { senderThreadId: "another-agent" });
     // An agent's t3_thread_send is role user, created by the agent.
     yield* message("u3b", "r2", "user", "Q4: yes", { createdBy: "agent", creationSource: "mcp" });
@@ -218,12 +227,12 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
       ["open", "Resume now?", "a3", null],
     );
 
-    yield* decisions.reopen({ threadId, label: "Q5" });
+    yield* decisions.reopen(yield* target("Q5"));
     assert.deepEqual(yield* states(), { Q4: "open", Q5: "open" });
     // The watermark keeps the old "Q5: not a decision" from closing it again.
     assert.isFalse(yield* decisions.sync(threadId));
-    const refused = yield* Effect.flip(decisions.reopen({ threadId, label: "Q5" }));
-    assert.include(refused.message, "not a resolved question");
+    const unknown = yield* Effect.flip(decisions.reopen({ ...(yield* target("Q5")), label: "Q9" }));
+    assert.include(unknown.message, "Q9 is not a question in this thread");
 
     // The snapshot carries a preview of a long answer.
     yield* message("u6", "r2", "user", `Q4: yes, ${"x".repeat(400)}`);
@@ -254,6 +263,156 @@ it.effect("tracks a thread's questions from its replies and the user's answers",
       [decided.length, decided[0]?.text],
       [THREAD_DECIDED_WITHOUT_ASKING_LIMIT, "Choice 0."],
     );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("dismisses an open question without a message, and reopens it like any other", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+
+    const published = yield* decisions
+      .subscribe(threadId)
+      .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* decisions.dismiss(yield* target("Q4"));
+    const [, after] = yield* Fiber.join(published);
+    assert.deepEqual(
+      after?.questions.map((q) => [q.label, q.state, q.answerText, q.answerMessageId]),
+      [
+        ["Q4", "dismissed", null, null],
+        ["Q5", "open", null, null],
+      ],
+    );
+    assert.strictEqual(after?.openCount, 1);
+    assert.isNotNull((yield* question("Q4"))?.resolvedAt);
+    // Only an open question is dismissed.
+    const refused = yield* Effect.flip(decisions.dismiss(yield* target("Q4")));
+    assert.include(refused.message, "nothing was dismissed");
+
+    // A later answer naming it does not touch it: it is no longer open.
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "Q4: yes");
+    yield* decisions.sync(threadId);
+    assert.deepEqual(yield* states(), { Q4: "dismissed", Q5: "open" });
+
+    yield* decisions.reopen(yield* target("Q4"));
+    const reopened = yield* question("Q4");
+    assert.deepEqual([reopened?.state, reopened?.resolvedAt], ["open", null]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("reopens a dismissed question when a later reply asks it again, as any closed one", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    yield* decisions.dismiss(yield* target("Q5"));
+
+    // An unshaped echo leaves it dismissed; a shaped re-ask reopens and rewords it.
+    yield* run("r2", 2, "completed");
+    yield* message("a2", "r2", "assistant", "Q5: still thinking about the table name.");
+    yield* decisions.sync(threadId);
+    assert.strictEqual((yield* question("Q5"))?.state, "dismissed");
+    yield* run("r3", 3, "completed");
+    yield* message(
+      "a3",
+      "r3",
+      "assistant",
+      "Q5, table name: Rename it now? My pick is yes: it is read.",
+    );
+    assert.isTrue(yield* decisions.sync(threadId));
+    const reasked = yield* question("Q5");
+    assert.deepEqual(
+      [reasked?.state, reasked?.question, reasked?.sourceMessageId, reasked?.resolvedAt],
+      ["open", "Rename it now?", "a3", null],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("acts only on the question as the user saw it, so a re-ask racing a click wins", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    const seen = yield* target("Q4");
+    // The next reply asks Q4 again before the click lands: the Dismiss is refused, Q4 stays open.
+    yield* run("r2", 2, "completed");
+    yield* message(
+      "a2",
+      "r2",
+      "assistant",
+      "Q4, resume: Resume it now? My pick is yes: it is safe.",
+    );
+    yield* decisions.sync(threadId);
+    const refused = yield* Effect.flip(decisions.dismiss(seen));
+    assert.include(refused.message, "nothing was dismissed");
+    assert.deepEqual(
+      [(yield* question("Q4"))?.state, (yield* question("Q4"))?.sourceMessageId],
+      ["open", "a2"],
+    );
+
+    // Undo after a re-ask: Q4 is already open, which is what Undo asks for, so it succeeds.
+    yield* decisions.dismiss(yield* target("Q5"));
+    const dismissedQ5 = yield* target("Q5");
+    yield* run("r3", 3, "completed");
+    yield* message("a3", "r3", "assistant", "Q5, table: Rename it today? My pick is no: wait.");
+    yield* decisions.sync(threadId);
+    yield* decisions.reopen(dismissedQ5);
+    assert.strictEqual((yield* question("Q5"))?.sourceMessageId, "a3");
+    // A resolved question asked again since it was seen is not the one reopened.
+    yield* run("r4", 4, "completed");
+    yield* message("u4", "r4", "user", "Q5: no");
+    yield* decisions.sync(threadId);
+    const stale = yield* Effect.flip(decisions.reopen(dismissedQ5));
+    assert.include(stale.message, "Q5 was asked again since; nothing was reopened");
+    assert.strictEqual((yield* question("Q5"))?.state, "answered");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("names the newest typed message read, past a user's message once it is judged", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const sql = yield* SqlClient.SqlClient;
+    yield* seed();
+    assert.isNull((yield* decisions.snapshot(threadId)).lastTypedMessageRead);
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    assert.isNull((yield* decisions.snapshot(threadId)).lastTypedMessageRead);
+    yield* run("r2", 2, "running");
+    yield* message("u1", "r2", "user", "Tell me more first.");
+    // The new run's reply streams after it, so u1 is read now, while the run still runs.
+    yield* message("a2", "r2", "assistant", "Looking.", {}, true);
+    const published = yield* decisions
+      .subscribe(threadId)
+      .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* decisions.sync(threadId);
+    const [, after] = yield* Fiber.join(published);
+    assert.strictEqual(after?.lastTypedMessageRead, "u1");
+    assert.deepEqual(yield* states(), { Q4: "open", Q5: "open" });
+
+    // Sent mid-run, u2 queues behind r2; it is read when r2 ends, and the watermark moves on past it to
+    // r2's last reply. The snapshot still names u2, the message the composer waits on.
+    yield* run("r3", 3, "queued");
+    yield* message("u2", "r3", "user", "And check the logs.");
+    yield* message("a3", "r2", "assistant", "Done looking.");
+    yield* sql`UPDATE orchestration_v2_projection_messages SET streaming = 0 WHERE message_id = 'a2'`;
+    yield* run("r2", 2, "completed");
+    yield* decisions.sync(threadId);
+    const [watermark] = yield* sql<{ readonly id: string }>`
+      SELECT after_message_id AS id FROM fork_thread_decision_sync WHERE thread_id = ${threadId}
+    `;
+    assert.strictEqual(watermark?.id, "a3");
+    assert.strictEqual((yield* decisions.snapshot(threadId)).lastTypedMessageRead, "u2");
   }).pipe(Effect.provide(withDecisions)),
 );
 
@@ -2106,7 +2265,7 @@ it.effect("leaves a question asked again after the card, or reopened by hand, op
     });
     assert.strictEqual((yield* question("Q5"))?.sourceMessageId, "a2");
 
-    yield* decisions.reopen({ threadId, label: "Q6" });
+    yield* decisions.reopen(yield* target("Q6"));
     assert.isFalse(yield* decisions.sync(threadId));
     assert.deepEqual((yield* answers()).Q6, ["open", null, null]);
   }).pipe(Effect.provide(withDecisions)),
@@ -2124,7 +2283,8 @@ it.effect("waits to read a card answered while its run still runs", () =>
     // The running reply asks Q8 again before the card answers it; read first, it would reopen Q8.
     yield* message("a2", "r2", "assistant", "Q8, key words: Ship it now? My pick is yes: ready.");
     yield* card("c1", "r2", [{ question: "Q8: Ship it now?" }], { "Q8: Ship it now?": "Ship" });
-    assert.isFalse(yield* decisions.sync(threadId));
+    // u1 is read, which publishes while Q8 is open (the composer's hold ends there); the card waits.
+    assert.isTrue(yield* decisions.sync(threadId));
     assert.deepEqual((yield* answers()).Q8, ["open", null, null]);
 
     yield* run("r2", 2, "waiting");
