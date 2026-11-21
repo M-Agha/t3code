@@ -57,7 +57,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.11-nightly.20261118.4864`, whose last upstream migration is 098.
+`v0.1.12-nightly.20261121.5024`, whose last upstream migration is 102.
 
 ### Questions and decisions
 
@@ -719,9 +719,9 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    - 007 (`ThreadParkedSends`) maps the old parked kinds (`prompt` to `agent`, `todo` and `later`
      to `me`), adds `sent_message_id` and creates `fork_thread_parked_set_aside` (Parked items, "Add
      to draft and Sent"). It was rewritten before any database ran it (the owner's live ledger was at
-     005), and the lifecycle's 008 dropped; round 1 of PR #9's chip review changed it in place again,
-     still unmerged. A database that recorded an earlier 007 would lack `sent_message_id` and the
-     set-aside table, so this holds only while none exists.
+     005), and the lifecycle's 008 dropped; round 1 of PR #9's chip review changed it in place again
+     before it merged. The owner's live ledger recorded this 007 on 2026-11-20, so it is now as fixed
+     as the rest: never edit it.
    - _Rejected:_ new orchestration event types, since official builds reject unknown events on
      server replay.
 2. **The fork refuses a database ahead of it.** On startup the fork refuses when
@@ -834,7 +834,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/chat/composerSlashCommandSearch.ts`,
        `apps/web/src/components/chat/useComposerMenuItems.ts`,
        `apps/web/src/components/chat/useComposerSend.ts` (the park branch before a send reaches
-       the provider), and mobile's refusal, `apps/mobile/src/state/use-thread-composer-state.ts`.
+       the provider), and mobile's refusal, `apps/mobile/src/state/use-thread-composer-state.ts`
+       (right before upstream's `/side` handling, which 5024 moved below the attachment and
+       context checks).
      - The right panel's surfaces: `apps/web/src/rightPanelStore.ts`,
        `apps/web/src/rightPanelStore.test.ts`, `apps/web/src/closedViewStore.ts`,
        `apps/web/src/closedViewStore.test.ts`, `apps/web/src/components/RightPanelTabs.tsx`,
@@ -843,7 +845,12 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/chat/useRightPanelActions.ts`, and the palette's Show Tracker,
        parked and Artifacts actions in `apps/web/src/components/CommandPalette.tsx`, no parked one
        in a side chat (its case and the `activeThread` mock in
-       `apps/web/src/components/CommandPalette.browser.test.tsx`).
+       `apps/web/src/components/CommandPalette.browser.test.tsx`, which falls back to the hook's
+       own thread: the palette's thread actions test `activeThread !== null`, and upstream's mock
+       passes `undefined`). Since 5024 upstream's thread surfaces are `thread` and
+       `linked-thread` (7c6e889ddb renamed `side-chat`, and `decodeThreadSurface` still reads a
+       saved `side-chat`); the fork's kinds `decisions`, `parked` and `artifacts` sit right before
+       them in each list, switch and union.
      - The `decisions.toggle` shortcut: `packages/contracts/src/keybindings.ts`,
        `packages/shared/src/keybindings.ts`, `apps/web/src/components/settings/KeybindingsSettings.logic.ts`.
      - The composer seams below: `apps/web/src/components/chat/ComposerBannerStack.tsx`,
@@ -934,7 +941,12 @@ it fails instead. The steps below are what the script encodes and what stays a p
      send snapshot, `chatViewSend.ts`, `useQueuedRunEdit.ts`, `composerContextUndo.ts`,
      `composerSend.logic.ts`, `useComposerStash.ts` and `composerInlineTokenPaste.ts`, which drop the
      chip). Most hunks are a
-     `parked` line beside its `environment` twin; the rest carry a `Fork (Parked)` comment. If
+     `parked` line beside its `environment` twin; the rest carry a `Fork (Parked)` comment.
+     `chatViewSend.ts` restores a refused send's parked chips through upstream's `withRestored`,
+     keyed on `contextId`, as it restores the other kinds. Since 5024 a `/side` command starts its
+     side chat with the draft's context (upstream refuses context only while answering a pending
+     question); `useComposerSend.ts` still refuses one carrying a parked chip, since the chip marks
+     its item sent in the parent thread and Parked stays out of side chats. If
      upstream adds a kind in a new place, add `parked` there too; if upstream reshapes how kinds are
      declared, follow it. Beyond the kind's slots: `ComposerPromptEditorTiptap.tsx` takes a fork prop,
      `restoresParkedChip` (the undo gate), and calls `removesRefusedParkedChips` (which runs the
@@ -977,7 +989,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
    - Seams already moved: MCP tools that act as their calling thread must carry
      `.annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients)`, or every
      toolkit layer dies at build ("t3_park acts as its calling thread, so outside clients must not be
-     offered it"). `t3_park` has it since v0.1.11.
+     offered it"). `t3_park` has it since v0.1.11. Since 5024 `t3_park` sits after upstream's
+     `t3_submit_output`, which carries the same annotation: a keep-both resolution that puts the
+     fork's tool inside the other tool's `.annotate(...)` chain still parses (ASI) and silently
+     drops that tool's last annotation. `AgentContextBudget.test.ts` caught it in the 5024 rebase.
    - Fix-ups go in as `git commit --fixup=<fork commit>`, then
      `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <tag>`, so each fork commit stays whole.
 5. **Check:** `node scripts/fork/upstream-sync.ts verify --target <tag> --baseline <file>` runs,
@@ -1102,3 +1117,15 @@ If the app will not open after step 3: `~/.t3/bin/t3 service uninstall`, then re
   tags.
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"); use
   the repo's `node_modules/.bin/vp`.
+- `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when
+  its real directory in a symlinked home …" fails on this Mac on the plain
+  `v0.1.12-nightly.20261121.5024` tag too (it returns no removed runtime), so `check:changed` fails
+  on it whenever the fork changes `pinnedRuntime.ts`.
+- `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
+  themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
+- Run tests from a shell T3 Code started (an agent's terminal) with
+  `env -u T3CODE_PORT -u T3CODE_HOST`. With the service's `T3CODE_PORT=3773` and
+  `T3CODE_HOST=127.0.0.1` inherited, every web browser test that renders `AppRoot` over the fake
+  environment hangs until its 15 s timeout: the shell snapshot never arrives, so no project or
+  thread renders (checked on the plain `v0.1.12-nightly.20261121.5024` tag, 2026-11-20; upstream's
+  CI passes there). `upstream-sync.ts suite` and `verify` inherit them too.
