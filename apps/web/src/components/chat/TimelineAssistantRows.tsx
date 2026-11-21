@@ -24,6 +24,7 @@ import { useV2ItemSupport } from "../../state/v2ItemSupport";
 import { TimelineRowCtx, TimelineRowActivityCtx, type TimelineRow } from "./timelineRowContext";
 import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts";
 import { SharedTooltipTrigger } from "../ui/shared-tooltip";
+import { MarkUnreadFromHereButton } from "./UnreadFromHere";
 
 export function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
@@ -235,6 +236,8 @@ function AssistantMessageMeta({
       {!message.streaming && projectedItem ? (
         <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
       ) : null}
+      {/* Fork (Mark unread from here). */}
+      <MarkUnreadFromHereButton message={message} />
       {!message.streaming && (
         <SharedTooltipTrigger
           render={<p className="text-muted-foreground text-xs tabular-nums" />}
