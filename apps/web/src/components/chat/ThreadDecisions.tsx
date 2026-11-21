@@ -9,10 +9,10 @@ import {
   type ThreadDecisionsSnapshot,
   type ThreadParkedItem,
 } from "@t3tools/contracts";
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import { useAtomValue } from "@effect/atom-react";
 import {
   ArrowUpRightIcon,
-  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   MessageCircleQuestionIcon,
@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useNavigate } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
+import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import {
   createContext,
@@ -76,6 +77,7 @@ import {
   groupSelection,
   latestReplyOpenQuestions,
   lineEnd,
+  neighbourOf,
   nextUndrafted,
   openQuestions,
   openQuestionsByReply,
@@ -129,6 +131,13 @@ export interface ThreadDecisionActions {
   };
   /** Reopen, held for its Undo by ChatView (`useReopenWithUndo`), which outlives the panel. */
   readonly reopen: ReopenWithUndo;
+  /** Dismiss, with its Undo toast, held by ChatView (`useDismissWithUndo`) for the same reason. */
+  readonly dismiss: DismissWithUndo;
+  /**
+   * The user's newest message may answer the open questions and is not yet judged, nor its run over
+   * (`questionsHeld`): the question card and the Tracker's open questions wait for it.
+   */
+  readonly questionsHeld: boolean;
 }
 
 export function useThreadDecisions(
@@ -304,10 +313,18 @@ function OptionRow(props: {
   );
 }
 
-/**
- * The composer's open questions, one at a time, built like T3's AskUserQuestion panel. Mounted per
- * reply (keyed by its message), so the shown question and the collapse start over with a new one.
- */
+/** The question card's shown question (by label) and collapse, for the reply that asked it. */
+interface QuestionCardView {
+  readonly reply: string;
+  readonly label: string;
+  readonly collapsed: boolean;
+}
+
+// By thread, outside the card, which a send's hold unmounts; a new reply starts over. Ceiling: one entry
+// per thread opened in a session, never pruned (drop a thread's entry when its view closes if it grows).
+const useQuestionCardViews = create<Record<string, QuestionCardView>>()(() => ({}));
+
+/** The composer's open questions, one at a time, built like T3's AskUserQuestion panel. */
 function QuestionPanel(props: {
   readonly questions: readonly [ThreadDecisionQuestion, ...ThreadDecisionQuestion[]];
   readonly earlier: number;
@@ -318,13 +335,35 @@ function QuestionPanel(props: {
 }) {
   const { questions, actions } = props;
   const gt = useGT();
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const reply = questions[0].sourceMessageId;
+  const threadKey = scopedThreadKey(props.threadRef);
+  const stored = useQuestionCardViews((views) => views[threadKey]);
+  const setView = (next: QuestionCardView) => useQuestionCardViews.setState({ [threadKey]: next });
   // By label, never index: answered questions leave the list as the snapshot updates.
-  const [currentLabel, setCurrentLabel] = useState(props.questions[0].label);
-  const [collapsed, setCollapsed] = useState(false);
-  const question = questions.find((q) => q.label === currentLabel) ?? questions[0];
+  const view =
+    stored?.reply === reply ? stored : { reply, label: questions[0].label, collapsed: false };
+  const collapsed = view.collapsed;
+  const setCurrentLabel = (label: string) => setView({ ...view, label });
+  const setCollapsed = (next: boolean) => setView({ ...view, collapsed: next });
+  const question = questions.find((q) => q.label === view.label) ?? questions[0];
   const index = questions.indexOf(question);
   const choice = actions.inDraft[question.label];
   const disabled = !actions.canOperate || choice !== undefined;
+  // The card moves on to the next question and keeps focus on its row; with none left, the composer.
+  const dismiss = () => {
+    const next = neighbourOf(
+      questions.map((q) => q.label),
+      question.label,
+    );
+    actions.dismiss.start(props.threadRef, question);
+    if (next === null) {
+      actions.focusLine(null);
+      return;
+    }
+    setCurrentLabel(next);
+    toggleRef.current?.focus();
+  };
   const choose = (text: string, advance: boolean) => {
     if (!actions.insert(text) || !advance) return;
     const next = nextUndrafted(
@@ -348,19 +387,26 @@ function QuestionPanel(props: {
   };
   const openTracker =
     props.earlier > 0 ? `Open Tracker (+${props.earlier} earlier)` : "Open Tracker";
+  const toggleName = collapsed ? `Show ${question.label}` : `Hide ${question.label}`;
+  const dismissName = `Dismiss ${question.label} without answering (tells the agent nothing)`;
+  // One collapse control under the whole row: FORK.md, "Questions and decisions", Display.
   return (
     <Collapsible
       open={!collapsed}
       onOpenChange={(open) => setCollapsed(!open)}
       data-thread-decision={question.label}
     >
-      <ComposerBanner.Row>
+      <ComposerBanner.Row className="relative rounded-xl px-4 py-1.5 hover:bg-foreground/5">
         <CollapsibleTrigger
+          ref={toggleRef}
+          aria-label={toggleName}
           title={
             collapsed ? "Show the question and its answers" : "Hide the question and its answers"
           }
-          className="col-[1/3] row-start-1 flex min-h-7 min-w-0 items-center gap-1 self-stretch rounded-xl ps-4 pe-2 text-start hover:bg-foreground/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring sm:min-h-6"
-        >
+          data-thread-decision-toggle={collapsed ? "collapsed" : "expanded"}
+          className="absolute inset-0 cursor-pointer rounded-xl outline-none focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring"
+        />
+        <ComposerBanner.Content className="pointer-events-none">
           <span className="shrink-0 font-medium text-foreground">{question.label}</span>
           {question.keyWords === "" ? null : (
             <>
@@ -377,8 +423,8 @@ function QuestionPanel(props: {
               </span>
             </>
           ) : null}
-        </CollapsibleTrigger>
-        <ComposerBanner.Actions className="flex-nowrap gap-0">
+        </ComposerBanner.Content>
+        <ComposerBanner.Actions className="pointer-events-none relative flex-nowrap gap-0 *:[button]:pointer-events-auto">
           {choice === undefined ? null : (
             <span className="px-1.5 text-muted-foreground">In draft</span>
           )}
@@ -419,12 +465,7 @@ function QuestionPanel(props: {
               </Button>
             </>
           ) : null}
-          <CollapsibleTrigger
-            render={<Button size="icon-xs" variant="ghost" />}
-            aria-label={collapsed ? `Show ${question.label}` : `Hide ${question.label}`}
-          >
-            <ChevronDownIcon className={cn("size-3.5", collapsed && "rotate-180")} />
-          </CollapsibleTrigger>
+          <ComposerBanner.ToggleIcon expanded={!collapsed} />
           <Tooltip>
             <TooltipTrigger
               render={
@@ -440,6 +481,12 @@ function QuestionPanel(props: {
             </TooltipTrigger>
             <TooltipPopup side="top">{openTracker}</TooltipPopup>
           </Tooltip>
+          <ComposerBanner.Dismiss
+            aria-label={dismissName}
+            title={dismissName}
+            disabled={disabled || actions.dismiss.isPending(props.threadRef, question)}
+            onClick={dismiss}
+          />
         </ComposerBanner.Actions>
       </ComposerBanner.Row>
       <CollapsiblePanel>
@@ -503,6 +550,7 @@ export function threadDecisionsBannerItem(input: {
   readonly threadRef: ScopedThreadRef;
   readonly cwd: string | undefined;
 }): ComposerBannerStackItem | null {
+  if (input.actions.questionsHeld) return null;
   const [first, ...rest] = latestReplyOpenQuestions(input.snapshot);
   if (first === undefined) return null;
   return {
@@ -513,7 +561,6 @@ export function threadDecisionsBannerItem(input: {
     title: null,
     content: (
       <QuestionPanel
-        key={first.sourceMessageId}
         questions={[first, ...rest]}
         earlier={(input.snapshot?.openCount ?? 0) - rest.length - 1}
         actions={input.actions}
@@ -717,9 +764,13 @@ function QuestionBody(props: { readonly question: ThreadDecisionQuestion }) {
 function QuestionRow(props: {
   readonly question: ThreadDecisionQuestion;
   readonly open: ReadonlyArray<ThreadDecisionQuestion>;
+  /** The labels of the rows the tab shows, in order. */
+  readonly order: ReadonlyArray<string>;
   readonly actions: ThreadDecisionActions;
+  readonly threadRef: ScopedThreadRef;
 }) {
   const { question, actions } = props;
+  const gt = useGT();
   const focusAfter = useContext(FocusAfterContext);
   const drafted = actions.inDraft[question.label] !== undefined;
   const line = drafted ? draftLineOf(actions.draft, question, props.open) : null;
@@ -819,6 +870,25 @@ function QuestionRow(props: {
             onClick={() => answer(decisionMessages.drop(question))}
           >
             Not a decision
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            className="ms-auto"
+            disabled={!actions.canOperate || actions.dismiss.isPending(props.threadRef, question)}
+            aria-label={`Dismiss ${question.label} without answering (tells the agent nothing)`}
+            onClick={() => {
+              actions.dismiss.start(props.threadRef, question);
+              // The row leaves with the snapshot; its neighbour takes focus, or the composer, as the card.
+              const next = neighbourOf(props.order, question.label);
+              if (next === null) {
+                actions.focusLine(null);
+                return;
+              }
+              focusAfter({ row: next, controls: ["accept", "answer", "edit", "edit-in-composer"] });
+            }}
+          >
+            {gt("Dismiss")}
           </Button>
         </div>
       )}
@@ -988,9 +1058,18 @@ function QuestionsTab(props: {
   const focusAfter = useContext(FocusAfterContext);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const groups = openQuestionsByReply(props.snapshot);
+  const shownLabels = groups.flatMap((group) => group.items.map((question) => question.label));
   const open = openQuestions(props.snapshot);
   // A selection ends with Select mode, however it ends.
   if (!selecting && selected.size > 0) setSelected(new Set());
+  if (actions.questionsHeld) {
+    return (
+      <EmptyState
+        title="Reading your message"
+        description="Open questions come back once your message is checked against them, or once the reply is done."
+      />
+    );
+  }
   if (groups.length === 0) {
     return (
       <EmptyState
@@ -1126,7 +1205,9 @@ function QuestionsTab(props: {
                       key={question.label}
                       question={question}
                       open={open}
+                      order={shownLabels}
                       actions={actions}
+                      threadRef={props.threadRef}
                     />
                   ),
                 )}
@@ -1223,7 +1304,11 @@ export function useReopenWithUndo() {
     const run = () =>
       void reopen({
         environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId, label: question.label },
+        input: {
+          threadId: threadRef.threadId,
+          label: question.label,
+          sourceMessageId: question.sourceMessageId,
+        },
       }).then((result) => {
         // A failed reopen was reported; its row may be tried again.
         if (result._tag !== "Success") unpend(key);
@@ -1259,6 +1344,67 @@ export function useReopenWithUndo() {
 }
 
 export type ReopenWithUndo = ReturnType<typeof useReopenWithUndo>;
+
+/**
+ * Dismiss: closes an open question at once, sending nothing to the agent (unlike Not a decision, a
+ * draft line it reads), then offers Undo, which reopens it. Held by ChatView, so the toast's Undo
+ * outlives the card and the panel. A dismiss in flight disables its button.
+ */
+export function useDismissWithUndo() {
+  const gt = useGT();
+  const dismiss = useAtomCommand(serverEnvironment.dismissThreadDecision, { reportFailure: true });
+  const reopen = useAtomCommand(serverEnvironment.reopenThreadDecision, { reportFailure: true });
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const keyOf = (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) =>
+    `${threadRef.threadId}:${question.label}`;
+  const start = (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) => {
+    const key = keyOf(threadRef, question);
+    setPending((current) => new Set(current).add(key));
+    const target = {
+      environmentId: threadRef.environmentId,
+      input: {
+        threadId: threadRef.threadId,
+        label: question.label,
+        sourceMessageId: question.sourceMessageId,
+      },
+    };
+    void dismiss(target).then((result) => {
+      setPending((current) => {
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+      // A failed dismiss was reported.
+      if (result._tag !== "Success") return;
+      // Undo's reopen waits on the thread's lock, held through a judge call (up to 20 s), so the toast
+      // stays, saying so, until it is done. A question asked again meanwhile is already open: the
+      // server counts that as reopened.
+      const undo = () => {
+        toastManager.update(toastId, {
+          title: `Reopening ${question.label}…`,
+          description: "It goes back to Questions.",
+          timeout: 0,
+          actionProps: { children: gt("Undo"), disabled: true },
+        });
+        void reopen(target).then(() => toastManager.close(toastId));
+      };
+      // No `type`: the info icon is a fixed blue no theme sets (FORK.md, Colours).
+      const toastId = toastManager.add({
+        title: `Dismissed ${question.label}`,
+        description: "Nothing was sent. It is under Decisions, where Reopen brings it back.",
+        timeout: REOPEN_UNDO_MS,
+        actionProps: { children: gt("Undo"), onClick: undo },
+      });
+    });
+  };
+  return {
+    isPending: (threadRef: ScopedThreadRef, question: ThreadDecisionQuestion) =>
+      pending.has(keyOf(threadRef, question)),
+    start,
+  };
+}
+
+export type DismissWithUndo = ReturnType<typeof useDismissWithUndo>;
 
 function ResolvedRow(props: {
   readonly question: ThreadDecisionQuestion;
@@ -1392,12 +1538,13 @@ function DecisionsTab(props: {
     return (
       <EmptyState
         title="No decisions yet"
-        description="Answered and dropped questions, and the choices agents list under Decided without asking, appear here."
+        description="Answered, dropped and dismissed questions, and the choices agents list under Decided without asking, appear here."
       />
     );
   }
   const answered = resolved.filter((question) => question.state === "answered");
-  const dropped = resolved.filter((question) => question.state !== "answered");
+  const dropped = resolved.filter((question) => question.state === "dropped");
+  const dismissed = resolved.filter((question) => question.state === "dismissed");
   const toReview = choicesToReview(snapshot, actions.draft);
   const vetoesInDraft = (snapshot?.decidedWithoutAsking ?? []).filter(
     (item) => !item.vetoed && vetoInDraft(actions.draft, item),
@@ -1406,6 +1553,7 @@ function DecisionsTab(props: {
     ...(vetoesInDraft > 0 ? [`${plural(vetoesInDraft, "veto", "vetoes")} in draft`] : []),
     ...(answered.length > 0 ? [`${answered.length} answered`] : []),
     ...(dropped.length > 0 ? [`${dropped.length} not a decision`] : []),
+    ...(dismissed.length > 0 ? [`${dismissed.length} dismissed`] : []),
   ];
   const resolvedSection = (title: string, questions: ReadonlyArray<ThreadDecisionQuestion>) =>
     questions.length === 0 ? null : (
@@ -1462,6 +1610,7 @@ function DecisionsTab(props: {
         ) : null}
         {resolvedSection("Answered", answered)}
         {resolvedSection("Not a decision", dropped)}
+        {resolvedSection("Dismissed", dismissed)}
       </ScrollArea>
     </>
   );
@@ -1537,13 +1686,14 @@ export function ThreadDecisionsPanel(props: {
   const panelRef = useRef<HTMLDivElement>(null);
   const focusAfter = useFocusAfter(panelRef);
   const counts = {
-    questions: snapshot?.openCount ?? 0,
+    questions: actions.questionsHeld ? 0 : (snapshot?.openCount ?? 0),
     decisions: choicesToReview(snapshot, actions.draft),
   };
-  // Select mode ends once the draft or the snapshot leaves nothing to select.
+  // Select mode ends once the draft or the snapshot leaves nothing to select, or the questions are held.
   if (
     selecting &&
-    !openQuestions(snapshot).some((question) => actions.inDraft[question.label] === undefined)
+    (actions.questionsHeld ||
+      !openQuestions(snapshot).some((question) => actions.inDraft[question.label] === undefined))
   ) {
     setSelecting(false);
   }

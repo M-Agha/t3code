@@ -461,7 +461,7 @@ import {
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
 import {
-  ThreadDecisionReopenInput,
+  ThreadDecisionQuestionInput,
   ThreadDecisionsError,
   ThreadDecisionsSnapshot,
   ThreadDecisionsSubscribeInput,
@@ -677,6 +677,7 @@ export const WS_METHODS = {
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
   threadDecisionsSubscribe: "threadDecisions.subscribe",
   threadDecisionsReopen: "threadDecisions.reopen",
+  threadDecisionsDismiss: "threadDecisions.dismiss",
   threadDecisionsPark: "threadDecisions.park",
   threadDecisionsUpdateParked: "threadDecisions.updateParked",
   threadDecisionsLinkArtifact: "threadDecisions.linkArtifact",
@@ -2434,7 +2435,13 @@ const WsThreadDecisionsSubscribeRpc = Rpc.make(WS_METHODS.threadDecisionsSubscri
 });
 
 const WsThreadDecisionsReopenRpc = Rpc.make(WS_METHODS.threadDecisionsReopen, {
-  payload: ThreadDecisionReopenInput,
+  payload: ThreadDecisionQuestionInput,
+  success: Schema.Void,
+  error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
+});
+
+const WsThreadDecisionsDismissRpc = Rpc.make(WS_METHODS.threadDecisionsDismiss, {
+  payload: ThreadDecisionQuestionInput,
   success: Schema.Void,
   error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
 });
@@ -2654,6 +2661,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsScheduledTasksGetWebhookDeliveryRpc,
   WsThreadDecisionsSubscribeRpc,
   WsThreadDecisionsReopenRpc,
+  WsThreadDecisionsDismissRpc,
   WsThreadDecisionsParkRpc,
   WsThreadDecisionsUpdateParkedRpc,
   WsThreadDecisionsLinkArtifactRpc,
