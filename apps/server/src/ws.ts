@@ -2422,6 +2422,7 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.threadDecisionsReopen]: (input) => threadDecisions.reopen(input),
+        [WS_METHODS.threadDecisionsDismiss]: (input) => threadDecisions.dismiss(input),
         [WS_METHODS.threadDecisionsPark]: (input) =>
           threadDecisions.park({ ...input, parkedBy: "user" }),
         [WS_METHODS.threadDecisionsUpdateParked]: (input) => threadDecisions.updateParked(input),
