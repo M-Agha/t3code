@@ -776,7 +776,13 @@ export function resolveThreadLastVisitedAt(
   return serverLastVisitedAt ?? undefined;
 }
 
-export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
+export function hasUnseenCompletion(thread: {
+  readonly latestRun: Pick<
+    NonNullable<ThreadStatusInput["latestRun"]>,
+    "status" | "completedAt"
+  > | null;
+  readonly lastVisitedAt?: string | null | undefined;
+}): boolean {
   if (!thread.latestRun?.completedAt) return false;
   if (thread.latestRun.status === "interrupted" || thread.latestRun.status === "cancelled") {
     return false;
