@@ -39,6 +39,8 @@ import {
   resolveSpec,
   seamLines,
   suiteOwed,
+  suiteRun,
+  suiteWidth,
   tablesIn,
   targetProblem,
   testPackages,
@@ -46,6 +48,7 @@ import {
   undiscovered,
   upstreamFileFates,
   verifyRefusal,
+  writingRefusal,
   type Repo,
   type Suite,
 } from "./upstream-sync.ts";
@@ -117,7 +120,8 @@ describe("target and Node", () => {
     expect(readArgs(["verify", "--target", "t", "--baseline", "b.txt"])).toMatchObject({
       baseline: "b.txt",
     });
-    expect(readArgs(["suite", "--out", "o.txt"])).toMatchObject({ command: "suite", out: "o.txt" });
+    expect(readArgs(["suite"])).toMatchObject({ command: "suite" });
+    expect(readArgs(["suite", "--out", "o.txt"])).toBe("suite does not take --out");
     expect(readArgs([])).toMatchObject({ command: "plan" });
     expect(readArgs(["plan", "--tagret", "t"])).toBe("plan does not take --tagret");
     expect(readArgs(["rebase", "--target", "t", "--notes"])).toBe("rebase does not take --notes");
@@ -499,12 +503,12 @@ describe("the full suite", () => {
     expect(baselineAt(`${text}\n`, sha)).toEqual(recorded);
     expect(baselineAt(`# upstream-sync suite at ${sha}\n`, sha)).toContain("has no package lines");
     expect(baselineAt(`${text}\n# web ran 5 tests\n`, sha)).toBe(
-      "has a line suite --out does not write: # web ran 5 tests",
+      "has a line suite does not write: # web ran 5 tests",
     );
     expect(baselineAt(`# upstream-sync suite at ${"b".repeat(40)}\n`, sha)).toContain(
       `not at the target's commit ${sha}`,
     );
-    expect(baselineAt("web: a.test.ts > x\n", sha)).toContain("is not a file `suite --out` wrote");
+    expect(baselineAt("web: a.test.ts > x\n", sha)).toContain("is not a file `suite` wrote");
   });
   it("marks each failure against the baseline, names each package to read for unhandled errors, and each upstream test file that ran less", () => {
     const files = (entries: Record<string, number>) => new Map(Object.entries(entries));
@@ -564,7 +568,7 @@ describe("the full suite", () => {
     };
     expect(suiteOwed(clean, clean, "v1", new Set())).toEqual([]);
     const noBaseline = (count: number) =>
-      `- No baseline was given (--baseline <file>, FORK.md step 5): ${count} full-suite failures, none marked new or also failing at v1, and no test file compared; read each.`;
+      `- No baseline was given (--baseline <file>) or kept by suite for v1 (FORK.md step 5): ${count} full-suite failures, none marked new or also failing at v1, and no test file compared; read each.`;
     expect(suiteOwed(run, null, "v1", new Set())).toEqual([
       noBaseline(6) +
         "\n  - [ ] t3: b.test.ts > y\n  - [ ] web: a.test.ts > x\n  - [ ] web: c.test.ts > z" +
@@ -585,9 +589,8 @@ describe("the full suite", () => {
         NodePath.join(dir, "pkgs/a/package.json"),
         JSON.stringify({ name: "a", scripts: { test: "vp test run" } }),
       );
-      const out = NodePath.join(dir, "baseline.txt");
       const suiteIn = (cwd: string) =>
-        NodeChildProcess.spawnSync(process.execPath, [script, "suite", "--out", out], {
+        NodeChildProcess.spawnSync(process.execPath, [script, "suite"], {
           cwd,
           encoding: "utf8",
         });
@@ -622,7 +625,192 @@ describe("the full suite", () => {
       expect(clone.stderr).toMatch(
         /clone's HEAD [0-9a-f]{40} is not in .*: run suite in a worktree of it/,
       );
-      expect(NodeFS.existsSync(out)).toBe(false);
+      // Nothing kept, nor begun.
+      expect(NodeFS.existsSync(NodePath.join(dir, ".git", "upstream-sync"))).toBe(false);
+    });
+  });
+  it("refuses while a suite still writes the baseline, naming its file, and passes over one that crashed", () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upstream-sync-writing-"));
+    try {
+      const kept = NodePath.join(dir, "baseline-abc.txt");
+      expect(writingRefusal(kept)).toBeNull();
+      NodeFS.writeFileSync(`${kept}.99999999`, "");
+      NodeFS.writeFileSync(NodePath.join(dir, `baseline-other.txt.${process.pid}`), "");
+      expect(writingRefusal(kept)).toBeNull();
+      NodeFS.writeFileSync(`${kept}.${process.pid}`, "");
+      expect(writingRefusal(kept)).toBe(
+        `suite (pid ${process.pid}) is still writing the baseline to ${kept}.${process.pid}; run verify once it ends, or pass --baseline <file> (if pid ${process.pid} is no suite, remove that file)`,
+      );
+    } finally {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("runs as many test scripts at once as its width", async () => {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upstream-sync-width-"));
+    const quiet = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      const vp = NodePath.join(dir, "vp");
+      NodeFS.mkdirSync(NodePath.join(dir, "running"));
+      NodeFS.writeFileSync(
+        vp,
+        [
+          "#!/bin/bash",
+          `cd "${dir}" && touch "running/$3" && ls running | wc -l >>widths`,
+          'sleep 1; rm "running/$3"',
+          "",
+        ].join("\n"),
+        { mode: 0o755 },
+      );
+      const run = await suiteRun(dir, vp, ["a", "b", "c"], { width: 2 });
+      expect([...run.packages.values()].map(({ exit }) => exit)).toEqual([0, 0, 0]);
+      const widths = NodeFS.readFileSync(NodePath.join(dir, "widths"), "utf8")
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map(Number);
+      expect(Math.max(...widths)).toBe(2);
+    } finally {
+      quiet.mockRestore();
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  /** A checkout suite runs in: this script, `names` packages, and a vp whose run is `vpRun`. */
+  const suiteRepo = (dir: string, names: ReadonlyArray<string>, vpRun: ReadonlyArray<string>) => {
+    const script = NodePath.join(dir, "scripts/fork/upstream-sync.ts");
+    NodeFS.mkdirSync(NodePath.dirname(script), { recursive: true });
+    NodeFS.copyFileSync(NodePath.join(import.meta.dirname, "upstream-sync.ts"), script);
+    for (const name of names) {
+      NodeFS.mkdirSync(NodePath.join(dir, "pkgs", name), { recursive: true });
+      NodeFS.writeFileSync(
+        NodePath.join(dir, "pkgs", name, "package.json"),
+        JSON.stringify({ name, scripts: { test: "vp test run" } }),
+      );
+    }
+    NodeFS.writeFileSync(NodePath.join(dir, "pnpm-workspace.yaml"), "packages:\n  - pkgs/*\n");
+    NodeFS.writeFileSync(
+      NodePath.join(dir, "package.json"),
+      JSON.stringify({ engines: { node: process.version.slice(1) } }),
+    );
+    NodeFS.writeFileSync(NodePath.join(dir, ".gitignore"), "node_modules/\nmarks/\n");
+    const marks = NodePath.join(dir, "marks");
+    const vp = NodePath.join(dir, "node_modules/.bin/vp");
+    NodeFS.mkdirSync(NodePath.dirname(vp), { recursive: true });
+    NodeFS.mkdirSync(NodePath.join(marks, "running"), { recursive: true });
+    NodeFS.writeFileSync(
+      vp,
+      ["#!/bin/bash", '[ "$1" = --version ] && exit 0', `marks="${marks}"`, ...vpRun, ""].join(
+        "\n",
+      ),
+      { mode: 0o755 },
+    );
+    return { script, marks };
+  };
+  it("runs the packages' test scripts no wider than one per four CPUs, without the T3 service's address, and keeps the baseline by commit", () => {
+    scratchGit((run, dir) => {
+      const width = suiteWidth(NodeOS.availableParallelism());
+      // One more package than the bound, so an unbounded run would show one more at once.
+      const names = Array.from({ length: width + 1 }, (_, at) => `p${String(at).padStart(2, "0")}`);
+      // A vp that notes what the T3 service's variables were, how many scripts ran with it, and
+      // writes a report: p00 fails its test and exits 1, the others pass.
+      const { script, marks } = suiteRepo(dir, names, [
+        'name="$3" report="${7#--outputFile.json=}"',
+        'echo "${T3CODE_PORT-unset} ${T3CODE_HOST-unset}" >"$marks/env-$name"',
+        'touch "$marks/running/$name" && ls "$marks/running" | wc -l >>"$marks/widths"',
+        'ls "$(git rev-parse --git-common-dir)/upstream-sync" >"$marks/kept-$name"',
+        'echo "start $name"; sleep 1; echo "end $name"',
+        'rm "$marks/running/$name"',
+        'status=passed; [ "$name" != p00 ] || status=failed',
+        'printf \'{"testResults":[{"name":"%s","status":"%s","message":"","assertionResults":[{"ancestorTitles":[],"title":"t","status":"%s"}]}]}\' "$PWD/pkgs/$name/a.test.ts" "$status" "$status" >"$report"',
+        '[ "$status" = passed ]',
+      ]);
+      run("add", "-A");
+      run("commit", "-qm", "packages");
+      const head = run("rev-parse", "HEAD").trim();
+
+      const suite = NodeChildProcess.spawnSync(process.execPath, [script, "suite"], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, T3CODE_PORT: "3773", T3CODE_HOST: "127.0.0.1" },
+      });
+      expect(suite.status, suite.stderr).toBe(0);
+      for (const name of names)
+        expect(NodeFS.readFileSync(NodePath.join(marks, `env-${name}`), "utf8")).toBe(
+          "unset unset\n",
+        );
+      const widths = NodeFS.readFileSync(NodePath.join(marks, "widths"), "utf8")
+        .split("\n")
+        .filter((line) => line.trim() !== "")
+        .map(Number);
+      expect(Math.max(...widths)).toBeLessThanOrEqual(width);
+      // Each package says when it starts, before its output.
+      for (const name of names) expect(suite.stdout).toContain(`== ${name} started\n`);
+      // While it runs, verify can see that it writes the baseline.
+      expect(NodeFS.readFileSync(NodePath.join(marks, "kept-p00"), "utf8")).toMatch(
+        new RegExp(`^baseline-${head}\\.txt\\.\\d+\\n$`),
+      );
+      // Each script's output whole, under its exit.
+      for (const name of names)
+        expect(suite.stdout).toContain(
+          `== ${name}: its test script exited ${name === "p00" ? 1 : 0}\nstart ${name}\nend ${name}\n`,
+        );
+      // In the packages' order, whatever order they finished in.
+      const kept = NodePath.join(dir, ".git", "upstream-sync", `baseline-${head}.txt`);
+      expect(NodeFS.readFileSync(kept, "utf8")).toBe(
+        [
+          `# upstream-sync suite at ${head}`,
+          ...names.flatMap((name) => [
+            `# ${name} exited ${name === "p00" ? 1 : 0}`,
+            `# ${name}: pkgs/${name}/a.test.ts ran 1 tests`,
+          ]),
+          "p00: pkgs/p00/a.test.ts > t",
+          "",
+        ].join("\n"),
+      );
+    });
+  });
+  it("on a signal, stops its test scripts, removes its reports and its <kept>.<pid> file, and ends by that signal", () => {
+    scratchGit((run, dir) => {
+      // The script's own pid, then sleep in its place, so the pid is what the suite must stop.
+      const { script, marks } = suiteRepo(
+        dir,
+        ["p00"],
+        ['echo $$ >"$marks/started"', "exec sleep 30"],
+      );
+      run("add", "-A");
+      run("commit", "-qm", "packages");
+      const tmp = NodePath.join(dir, "marks", "tmp");
+      NodeFS.mkdirSync(tmp);
+      // A SIGTERM to the suite alone, as `kill` sends it, once its one package runs.
+      const stop = `
+        const child = require("node:child_process").spawn(process.execPath, [process.argv[1], "suite"], { stdio: "ignore" });
+        const started = ${JSON.stringify(NodePath.join(marks, "started"))};
+        const wait = setInterval(() => {
+          if (!require("node:fs").existsSync(started) || require("node:fs").readFileSync(started, "utf8") === "") return;
+          clearInterval(wait);
+          child.kill("SIGTERM");
+        }, 50);
+        child.on("close", (code, signal) => console.log(JSON.stringify({ code, signal })));`;
+      const stopped = NodeChildProcess.spawnSync(process.execPath, ["-e", stop, script], {
+        cwd: dir,
+        encoding: "utf8",
+        env: { ...process.env, TMPDIR: tmp },
+        timeout: 20_000,
+      });
+      expect(JSON.parse(stopped.stdout), stopped.stderr).toEqual({ code: null, signal: "SIGTERM" });
+      expect(NodeFS.readdirSync(NodePath.join(dir, ".git", "upstream-sync"))).toEqual([]);
+      expect(NodeFS.readdirSync(tmp)).toEqual([]);
+      // Signalled before the suite ended; a killed process can take a moment to go.
+      const pid = Number(NodeFS.readFileSync(NodePath.join(marks, "started"), "utf8"));
+      const gone = () => {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      };
+      for (let tries = 0; !gone() && tries < 50; tries++)
+        NodeChildProcess.spawnSync("sleep", ["0.1"]);
+      expect(gone(), `pid ${pid} still runs`).toBe(true);
     });
   });
 });

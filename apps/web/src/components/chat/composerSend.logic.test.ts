@@ -181,6 +181,7 @@ describe("composerParkDecision", () => {
     hasNonPromptContent: false,
     threadStarted: true,
     sideChat: false,
+    subagent: false,
   };
 
   it("parks the command's items", () => {
@@ -203,6 +204,7 @@ describe("composerParkDecision", () => {
     ["with attachments or context", { hasNonPromptContent: true }],
     ["before the thread started", { threadStarted: false }],
     ["in a side chat, even a bare /park", { sideChat: true, prompt: "/park" }],
+    ["in a subagent, even a bare /park", { subagent: true, prompt: "/park" }],
     ["when every item is a placeholder", { prompt: "/park tbd" }],
     ["when an item is too long", { prompt: `/park ${"x".repeat(4_001)}` }],
   ])("refuses %s", (_name, change) => {

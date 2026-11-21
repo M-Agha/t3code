@@ -23,8 +23,12 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { AppRoot } from "~/AppRoot";
 // The route loads ChatView lazily; importing it here keeps its first transform out of the timeout.
 import "~/components/ChatView";
+import {
+  addPreparingComposerImages,
+  removePreparingComposerImages,
+} from "~/components/chat/preparingComposerImages";
 import { ariaItemText } from "~/components/chat/threadDecisions.logic";
-import { useComposerDraftStore } from "~/composerDraftStore";
+import { composerTargetKey, useComposerDraftStore } from "~/composerDraftStore";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { usePromptStashStore } from "~/promptStashStore";
 import { useRightPanelStore } from "~/rightPanelStore";
@@ -188,6 +192,35 @@ it("counts the strip's Parked tab from the snapshot, and /park's toast takes no 
   await expect.element(page.getByText("In this thread's Parked tab.")).toBeVisible();
   // Base UI marks a typed toast `data-type`, which colours its icon with the fixed success green.
   expect(document.querySelector('[data-slot="toast-icon"]')).toBeNull();
+});
+
+// 5124 review, F1: upstream stopped holding a send for compressing images except for question answers,
+// so `/park` counts them itself, as upstream's /usage guard does.
+it("refuses /park while an image is still compressing", async () => {
+  const parks: unknown[] = [];
+  using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
+    parks.push(input);
+    return Effect.void;
+  });
+  await using view = await openThread("thread-parked-preparing");
+  const key = composerTargetKey(view.threadRef);
+  addPreparingComposerImages(key, [
+    {
+      id: "pasted",
+      name: "shot.png",
+      file: new File(["png"], "shot.png", { type: "image/png" }),
+      hidden: false,
+    },
+  ]);
+  using _preparing = {
+    [Symbol.dispose]: () => removePreparingComposerImages(key, new Set(["pasted"])),
+  };
+
+  await userEvent.click(editor());
+  await userEvent.keyboard("/park me fix the flaky test");
+  await userEvent.keyboard("{Enter}");
+  await expect.element(page.getByText("Parked items take text only")).toBeVisible();
+  expect(parks).toEqual([]);
 });
 
 // Opus r5, C1: the reason is beside `restoresParkedChip` (ChatComposer.tsx).
@@ -387,33 +420,37 @@ it("leaves no parked chip without its record after a stash restore or a paste", 
   expect(view.chips()).toHaveLength(1);
 });
 
-// Opus on #12 (r1 C4, r2, r3): ChatView's side chat wiring, in the parent's pane and at its own URL (not
-// embedded there). Older settled, as in upstream's side chat tab test (ChatView.browser.test.tsx), it
-// loads in any place but the file's first. Run alone (-t or .only), it is first and fails falsely.
+// Opus on #12 (r1 C4, r2, r3) and MAIN-105: a side chat (in its parent's pane, and at its own URL)
+// and a delegate_task subagent park nowhere. The side chat is older settled, as upstream's tab test
+// has it, so it loads in any place but the file's first: run alone (-t or .only), it fails falsely.
 it.each([
-  ["in its parent's pane", "parent"],
-  ["opened at its own URL", "side"],
-] as const)("refuses /park in a side chat %s, whose menu offers no /park", async (_name, route) => {
-  const parent = threadWithHistory(`parked-side-parent-${route}`, 1);
-  const side = {
-    ...threadWithHistory(`parked-side-${route}`, 1),
-    sideChatOf: parent.id,
-    olderSettled: true as const,
-  };
+  ["side chat in its parent's pane", "parent"],
+  ["side chat opened at its own URL", "side"],
+  ["subagent opened at its own URL", "subagent"],
+] as const)("refuses /park in a %s, whose menu offers no /park", async (_name, route) => {
+  const parent = threadWithHistory(`parked-${route}-parent`, 1);
+  const child =
+    route === "subagent"
+      ? { ...threadWithHistory("parked-subagent", 1), delegateOf: parent.id }
+      : {
+          ...threadWithHistory(`parked-side-${route}`, 1),
+          sideChatOf: parent.id,
+          olderSettled: true as const,
+        };
   const parks: unknown[] = [];
   using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
     parks.push(input);
     return Effect.void;
   });
   await page.viewport(1400, 900);
-  using _environment = installFakeEnvironment([parent, side]);
+  using _environment = installFakeEnvironment([parent, child]);
   __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt: AT });
   if (route === "parent") {
-    useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, parent.id), side.id);
+    useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, parent.id), child.id);
   } else {
-    useRightPanelStore.getState().show(scopeThreadRef(ENVIRONMENT_ID, side.id));
+    useRightPanelStore.getState().show(scopeThreadRef(ENVIRONMENT_ID, child.id));
   }
-  const shown = route === "parent" ? parent : side;
+  const shown = route === "parent" ? parent : child;
   const router = getRouter(
     createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${shown.id}`] }),
   );
@@ -422,8 +459,8 @@ it.each([
     // AppRoot brings its own router.
     router: false,
   });
-  const sideEditor = page.getByRole("textbox", { name: `Message ${side.title}`, exact: true });
-  await userEvent.click(sideEditor);
+  const childEditor = page.getByRole("textbox", { name: `Message ${child.title}`, exact: true });
+  await userEvent.click(childEditor);
   await userEvent.keyboard("/");
   const menuItem = (id: string) => document.querySelector(`[data-composer-item-id="${id}"]`);
   await vi.waitFor(() => expect(menuItem("slash:model")).not.toBeNull());
@@ -431,9 +468,13 @@ it.each([
 
   await userEvent.keyboard("park me fix the flaky test");
   await userEvent.keyboard("{Enter}");
-  await expect.element(page.getByText("A side chat can't park")).toBeVisible();
+  await expect
+    .element(
+      page.getByText(route === "subagent" ? "A subagent can't park" : "A side chat can't park"),
+    )
+    .toBeVisible();
   expect(parks).toEqual([]);
-  if (route === "side") {
+  if (route !== "parent") {
     // Its own panel offers Tracker (Q) but no Parked (K), which the server would refuse.
     const launcher = page.getByLabelText("Open a surface", { exact: true });
     await expect

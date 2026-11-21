@@ -1,5 +1,7 @@
 import {
+  EnvironmentId,
   EventId,
+  isDelegatedAppThread,
   MessageId,
   type OrchestrationV2Run,
   type OrchestrationV2StoredEvent,
@@ -1541,6 +1543,46 @@ it.effect("parks, edits, moves and resolves a thread's items", () =>
       }),
     );
     assert.strictEqual((yield* parked()).open, 2);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// park reads isDelegatedAppThread in SQL, from the stored payload: they must agree on every shape.
+it.effect("refuses to park exactly the threads isDelegatedAppThread names", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const root = ThreadId.make("thread-root");
+    const lineage = (relationshipToParent: "fork" | "subagent" | null) => ({
+      parentThreadId: relationshipToParent === null ? null : root,
+      relationshipToParent,
+      rootThreadId: root,
+    });
+    const delegatedFrom = {
+      environmentId: EnvironmentId.make("linked"),
+      threadId: root,
+      title: "Parent",
+    };
+    const shapes: ReadonlyArray<Parameters<typeof isDelegatedAppThread>[0]> = [
+      { lineage: lineage(null) },
+      // As an MCP-launched thread stores it.
+      { lineage: lineage(null), delegatedFrom: null },
+      { lineage: lineage("fork") },
+      { lineage: lineage("subagent") },
+      { lineage: lineage(null), delegatedFrom },
+      { lineage: lineage("fork"), delegatedFrom },
+    ];
+    const park = (id: ThreadId) =>
+      decisions
+        .park({ threadId: id, parkedBy: "user", items: [{ kind: "me", text: "real" }] })
+        .pipe(Effect.match({ onFailure: (error) => error.message, onSuccess: () => null }));
+    for (const [index, shape] of shapes.entries()) {
+      const id = ThreadId.make(`thread-shape-${index}`);
+      yield* seed(null, id, shape);
+      assert.equal(
+        yield* park(id),
+        isDelegatedAppThread(shape) ? ThreadDecisions.SUBAGENT_PARK_MESSAGE : null,
+        JSON.stringify(shape),
+      );
+    }
   }).pipe(Effect.provide(withDecisions)),
 );
 

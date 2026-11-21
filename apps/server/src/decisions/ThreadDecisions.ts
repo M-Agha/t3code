@@ -239,6 +239,10 @@ export const PLACEHOLDER_PARK_MESSAGE =
 export const SIDE_CHAT_PARK_MESSAGE =
   "not parked: a side chat has no Parked tab; park it in the main thread.";
 
+/** Nor does a thread another agent drives (`isDelegatedAppThread`): a subagent or a delegated task. */
+export const SUBAGENT_PARK_MESSAGE =
+  "not parked: a subagent has no Parked tab; park it in the main thread.";
+
 const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped" } as const;
 
 export class ThreadDecisions extends Context.Service<
@@ -1273,14 +1277,21 @@ export const layer = Layer.effect(
       });
       const now = DateTime.formatIso(yield* DateTime.now);
       const parked = yield* Effect.gen(function* () {
-        const [thread] = yield* sql<{ readonly side_chat: number | null }>`
-          SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat
+        // `delegated` is isDelegatedAppThread in SQL: a JSON null delegatedFrom reads as NULL too.
+        const [thread] = yield* sql<{
+          readonly side_chat: number | null;
+          readonly delegated: number;
+        }>`
+          SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat,
+            (json_extract(payload_json, '$.lineage.relationshipToParent') IS 'subagent'
+              OR json_extract(payload_json, '$.delegatedFrom') IS NOT NULL) AS delegated
           FROM orchestration_v2_projection_threads
           WHERE thread_id = ${input.threadId} AND deleted_at IS NULL
         `;
         if (thread === undefined) return "missing";
         // Every park passes here (the Parked tab's field, t3_park, any client), not only `/park`'s.
         if (thread.side_chat === 1) return "sideChat";
+        if (thread.delegated === 1) return "subagent";
         for (const item of input.items) {
           yield* sql`
             INSERT INTO fork_thread_parked_items (
@@ -1299,6 +1310,9 @@ export const layer = Layer.effect(
       }
       if (parked === "sideChat") {
         return yield* new ThreadDecisionsError({ message: SIDE_CHAT_PARK_MESSAGE });
+      }
+      if (parked === "subagent") {
+        return yield* new ThreadDecisionsError({ message: SUBAGENT_PARK_MESSAGE });
       }
       yield* PubSub.publish(changes, input.threadId);
     });
