@@ -3472,6 +3472,9 @@ export const OrchestrationV2Command = Schema.Union([
     type: Schema.Literal("thread.mark-unread"),
     commandId: CommandId,
     threadId: ThreadId,
+    // Fork (Mark unread from here): a message's createdAt; the server marks unread from it.
+    // Absent, from the latest run's completion; older servers ignore it.
+    from: Schema.optional(IsoDateTime),
   }),
   Schema.Struct({
     type: Schema.Literal("thread.metadata.update"),
