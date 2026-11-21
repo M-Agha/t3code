@@ -36,6 +36,7 @@ import { MESSAGE_HEADING_LEVEL, MessageAuthorHeading } from "./TimelineRowParts"
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { vcsEnvironment } from "../../state/vcs";
+import { MarkUnreadFromHereButton } from "./UnreadFromHere";
 
 const NO_VCS_STATUS = Atom.make(AsyncResult.initial());
 
@@ -256,6 +257,8 @@ function AssistantMessageMeta({
       {!message.streaming && projectedItem ? (
         <AssistantReplyButton message={message} itemId={projectedItem.sourceItemId} />
       ) : null}
+      {/* Fork (Mark unread from here). */}
+      <MarkUnreadFromHereButton message={message} />
       {!message.streaming && (
         <Tooltip>
           <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>

@@ -54,6 +54,7 @@ reasons are the ones they accepted.
 | `(fork) tracker: the startup sweep keeps what the user made, and artifacts are read in time order`    | Artifacts                     |
 | `(fork) decisions: an answer sent mid-run stays answered when that run's reply asks again`            | Questions and decisions       |
 | `(fork) decisions: Dismiss closes a question without a message, and a send hides questions till read` | Questions and decisions       |
+| `(fork) timeline: Mark unread from here on agent messages, with a New divider and a jump on open`     | Mark unread from here         |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -748,6 +749,55 @@ and keep working after every fork rebuild.
   prune keeps. Make the seed and install.sh produce what the new code accepts; if a service install
   now insists on a published release, stop and ask the owner.
 
+### Mark unread from here
+
+The owner asked for "a mark unread from a specific message similar to the mark unread on the thread
+menu item" and answered Q64 "yes, with the divider" (2026-11-21; _rejected:_ the menu item alone).
+
+- **The action:** "Mark unread from here" with an agent message's own actions, web and desktop
+  (mobile untouched, rule 5), hidden while the thread's latest run is under way, when the server
+  refuses as it does the menu's, and without the right to operate the thread: unlike the menu's
+  item, which upstream leaves to read-only clients, since every `dispatchCommand` (this one too)
+  needs `orchestration:operate` (`apps/server/src/auth/RpcAuthorization.ts`, checked 2026-11-21).
+  It takes the menu's path with the message's time:
+  `thread.mark-unread` carries an optional `from`, and the server sets the watermark 1 ms before
+  the earlier of `from` and the latest run's end. No new storage and no new event; an official
+  server drops `from` on decode (Effect Schema's default for a struct, checked 2026-11-21; its RPC
+  layer's own options _unverified_) and marks from its latest run.
+- **The divider:** a "New" separator above the first unread entry of the visit, against the
+  watermark as it was at open. Ordinary unread (the menu's mark, the run's end less 1 ms) shows it
+  at the start of that run's reply; another watermark with no agent message after it, at the
+  message being written then (updated after it, in any run), else at the latest run's first entry
+  that has a row. A watermark older than the loaded history shows no divider until the user pages
+  back to it.
+- **The jump:** on the opening whose first decision found a divider, upstream's
+  `startTimelinePositionRestore` scrolls its row below the top fade, once, after upstream's own
+  opening restore; not while the latest run is under way, nor after the user's own navigation.
+  _Rejected:_ feeding the divider into upstream's opening restore itself, which needs the rows when
+  the thread changes (they often load later) and touches every reader of the remembered position.
+- **Where:** `UnreadFromHere.tsx` and `unreadFromHere.logic.ts` in `apps/web/src/components/chat/`
+  (their doc comments carry the rules).
+- **Seams:** `packages/contracts/src/orchestrationV2.ts` (`from` on `thread.mark-unread`),
+  `apps/server/src/orchestration-v2/Orchestrator.ts` (the clamp),
+  `packages/client-runtime/src/operations/commands.ts` (`MarkThreadUnreadInput.from`),
+  `apps/web/src/hooks/useThreadActions.ts` (`useMarkThreadUnread` exported, with `from`, returning
+  the command's result), `apps/web/src/components/Sidebar.logic.ts` (`hasUnseenCompletion`'s
+  parameter narrowed to the run and the watermark, so the divider calls it),
+  `apps/web/src/components/chat/TimelineAssistantRows.tsx` (the button in `AssistantMessageMeta`),
+  `apps/web/src/components/chat/MessagesTimeline.tsx` (the `unreadMarker` prop, the
+  `useUnreadDivider` call, the divider in `renderItem`, its row in `listExtraData`), and
+  `apps/web/src/components/ChatView.tsx` (the `useUnreadMarker` call and the prop).
+- **Tests:** `apps/server/src/orchestration-v2/Orchestrator.markUnreadFrom.test.ts`,
+  `apps/web/src/hooks/useThreadActions.markUnreadFrom.test.ts`, and `unreadFromHere.logic.test.ts`
+  and `UnreadFromHere.browser.test.tsx` in `apps/web/src/components/chat/`. Not covered: ChatView's
+  wiring.
+- **Conflict guidance:** if upstream gives `thread.mark-unread` a time of its own, drop the fork's
+  field and call upstream's. If upstream moves an agent message's actions, put the button with them.
+  If upstream rebuilds the timeline's rows or its opening restore, keep the divider on the row that
+  holds (or folds) the first unread entry and the jump after the restore; if upstream renames a
+  tool group's row ids or stops giving folds their `runId`, `rowHoldingEntry` and its tests go
+  first. If upstream ships its own unread divider, stop and ask the owner (step 4).
+
 ### Translation
 
 Upstream translates the app with `gt-react` (present at 4825; the app-wide rollout and the lint rule
@@ -987,6 +1037,12 @@ it fails instead. The steps below are what the script encodes and what stays a p
        tests `apps/desktop/src/app/DesktopEnvironment.test.ts`,
        `apps/desktop/src/app/DesktopAppIdentity.test.ts`,
        `apps/desktop/src/app/DesktopPreReadyPlatform.test.ts`, `scripts/build-desktop-artifact.test.ts`.
+     - Mark unread from here (its section above): `packages/contracts/src/orchestrationV2.ts`,
+       `apps/server/src/orchestration-v2/Orchestrator.ts`,
+       `packages/client-runtime/src/operations/commands.ts`, `apps/web/src/hooks/useThreadActions.ts`,
+       `apps/web/src/components/Sidebar.logic.ts`,
+       `apps/web/src/components/chat/TimelineAssistantRows.tsx`,
+       `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/ChatView.tsx`.
      - Tooling: `vite.config.ts` and `knip.jsonc` (rule 4's exemptions), and `AGENTS.md` (the pointer
        to this file).
    - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a
