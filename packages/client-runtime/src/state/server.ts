@@ -2035,6 +2035,10 @@ export function createServerEnvironmentAtoms<R, E>(
       label: "environment-data:server:thread-decisions:reopen",
       tag: WS_METHODS.threadDecisionsReopen,
     }),
+    dismissThreadDecision: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:thread-decisions:dismiss",
+      tag: WS_METHODS.threadDecisionsDismiss,
+    }),
     parkThreadItems: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:thread-decisions:park",
       tag: WS_METHODS.threadDecisionsPark,

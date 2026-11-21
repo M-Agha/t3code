@@ -53,6 +53,7 @@ reasons are the ones they accepted.
 | `(fork) upstream-sync: a rerunnable plan, rebase and verify for moving onto a newer upstream`         | Rebasing onto upstream        |
 | `(fork) tracker: the startup sweep keeps what the user made, and artifacts are read in time order`    | Artifacts                     |
 | `(fork) decisions: an answer sent mid-run stays answered when that run's reply asks again`            | Questions and decisions       |
+| `(fork) decisions: Dismiss closes a question without a message, and a send hides questions till read` | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -156,12 +157,74 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   first message, can be retried that way).
   _Rejected:_ the run's start time (`$.startedAt`): a run queued before the answer can start after
   it without seeing it, and a steer arrives after the start yet is seen.
+- **Dismissing:** Dismiss, on the question card (upstream's `ComposerBanner.Dismiss`, the ✕ its own card
+  has for "Dismiss question without answering") and on a Tracker question row, closes the question at
+  once as `dismissed` (`threadDecisions.dismiss`), sending nothing to the agent, and a toast offers Undo
+  for 8 s, which reopens it (an ordinary `threadDecisions.reopen`, so unlike Reopen nothing is held
+  back; the toast says "Reopening Q4…" until it is done, since Reopen waits on the thread's lock). It
+  lists under the Decisions tab's Dismissed with Reopen; a later shaped re-ask reopens it as it
+  reopens any closed question, and a later answer naming it changes nothing, since only open
+  questions close. "Not a decision" stays a draft line the agent reads. It takes no thread lock (a
+  judge call can hold that for 20 s): a sync's closings write only open questions, so none lands on a
+  dismissed one; the one sync write that changes a dismissed question is the re-ask upsert
+  (`applyRows`), which reopens it by design. Dismiss and Reopen both name the question as the user
+  saw it (`ThreadDecisionQuestionInput`: label and `sourceMessageId`), so a re-ask racing the click
+  (a new source message) is not dismissed unseen: the Dismiss is refused and reported, as a Reopen
+  (or Undo) of a question asked again and answered since is ("Q4 was asked again since; nothing was
+  reopened"). Reopen of a question already open (asked again, or reopened elsewhere) succeeds and
+  changes nothing, so an Undo after a re-ask reports no error. The card's Dismiss waits while the
+  draft answers its question, as the Tracker row's does (the row offers it only undrafted); after a
+  Dismiss the card shows the next question with focus on its row, and the Tracker moves focus to the
+  next row (`neighbourOf`); with none left, in either, the composer has focus. ChatView holds it
+  (`useDismissWithUndo`), so the Undo outlives the card and the panel. The state is a new value in
+  `fork_thread_decision_questions.state`, a plain TEXT column, so no fork migration; a client from
+  before it drops such rows (`ForwardCompatibleArray`). (2026-11-21: the owner could close a
+  question the agent had replaced only by sending a message.) _Rejected:_ a table of its own;
+  holding the dismiss behind its toast as Reopen is held (the card would stay up for 8 s). Tests:
+  `ThreadDecisions.test.ts` "dismisses an open question without a message, …", "reopens a dismissed
+  question when a later reply asks it again, …" and "acts only on the question as the user saw it,
+  …"; `ThreadDecisions.question-panel.browser.test.tsx` "Dismiss on the card …", "Dismiss on a
+  Tracker row …", "the card's Dismiss waits while the draft …", "dismissing the card's last question
+  …", "dismissing the Tracker's last open question …" and "Undo says it is reopening …".
+- **Hidden while a send is judged:** after the user sends a message while questions are open, the card
+  and the Tracker's open questions (and the Questions count) are hidden, the Tracker saying "Reading
+  your message", until the server has read it or its run ends, whichever is first; then they show with
+  whatever the judge closed. `questionsHeld` (`threadDecisions.logic.ts`) decides from what the client
+  already has: the message the user sent (an optimistic one if there is one, else the newest in the
+  server's `(created_at, message_id)` order, its time from the projection's messages, of those queued
+  outside the timeline and the timeline's last typed one, so a steer typed after a queued message is
+  the one sent), its run's status
+  (`ENDED_RUN_STATUSES`, which `packages/contracts/src/threadDecisions.ts` exports for the server and
+  the client), and the snapshot's `lastTypedMessageRead`: the newest person-typed message at or before
+  the message watermark (`fork_thread_decision_sync`) in that same order, read in `snapshot`. Read
+  means it names the sent message, both sides having picked by the server's times. The server
+  publishes a snapshot whenever it reads a person-typed message with text while questions are open,
+  even one that closes nothing; every composer send has text (an image-only one carries
+  `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`), and a message without text would show only at its run's end.
+  Nothing is hidden with no question open. The panel's `actions.questionsHeld` carries it to the card
+  (`threadDecisionsBannerItem`) and the Tracker. A message sent mid-run is read when the running run
+  ends (the watermark waits at its still-growing reply), so its questions stay hidden until then and
+  show at that moment, the judge done; it queues behind that run, and its own run's end comes later.
+  (2026-11-21, the owner: "hide the questions till we get back a response from the judge or we get
+  back your answer fully".) _Rejected:_ a "judging" flag in the snapshot (the server cannot publish
+  when a message arrives that it cannot read yet); publishing the watermark itself (round 1): it
+  usually ends on the run's later reply, which the client cannot place against a queued message not
+  yet in its timeline, so such a send stayed hidden until the next run ended; comparing
+  `(created_at, message_id)` with the sent message's: the server stamps a user message with its own
+  clock (`Orchestrator.ts`, `DateTime.now`), not the client command's `createdAt`, so the optimistic
+  copy's time is not the stored one; picking a queued message ahead of the timeline's (round 1): a
+  steer typed after it is the one the server reads, so the hold lasted through the queued run. Tests:
+  `threadDecisions.logic.test.ts` "holding questions back
+  while a sent message is judged"; `ThreadDecisions.test.ts` "names the newest typed message read, …";
+  the browser tests "a sent message hides the open questions until the judge has read it", "… come
+  back when its run ends, …" and "a send's hold keeps the card's question and collapse".
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
 - **Display:** the latest reply's open questions above the composer, one at a time, built like T3's
-  own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, collapse, Open
-  Tracker, whose tooltip counts earlier open questions), the question as markdown, then option rows
+  own AskUserQuestion panel: a header (label, key words, `1/3` with Previous/Next, upstream's
+  `ComposerBanner.ToggleIcon` chevron, Open Tracker, whose tooltip counts earlier open questions, and
+  Dismiss), the question as markdown, then option rows
   Accept: <pick> (its reason below it), Answer… and Not a decision. The selected row follows the draft
   (`questionsClosedByDraft`, the server's fallback rules `closingFor`: "go with your picks", or a
   question's own part of the draft reading as its Accept line in any case, selects Accept) and the header says "In draft". Accept and Not a decision move to
@@ -175,7 +238,16 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   labelled "Send draft". (2026-11-17: the owner's Q31 added Accept and send and a Yes to all line
   `Yes to your picks: Q3, Q4`; Q34 removed both send arrows, since an unlabelled arrow sends
   half-typed text in one mis-click; Q36's design moved Yes to all to one line per question, the lines
-  every other answer writes.) Collapse lasts for one reply. While T3's own question is pending, the composer hides this panel
+  every other answer writes.) Collapse lasts for one reply: a store in `ThreadDecisions.tsx`
+  (`useQuestionCardViews`, by thread) holds the card's shown question and collapse per reply, so a
+  send's hold, which unmounts the card, does not reset it. The whole header row is its one collapse
+  control, as upstream's card's row is, so it has one hover: a full-row `CollapsibleTrigger` under the
+  row ("Hide Q4" / "Show Q4"), the label and chevron drawn over it with pointer events passing
+  through, and the other controls above it. Upstream makes its row the button and nests its Dismiss in
+  it as a `span role="button"`; with five controls here that would be five nested pseudo-buttons, so
+  the trigger sits under them instead. (2026-11-21: the owner's screenshot showed two collapse
+  controls with different hovers.) The browser test "the question card's whole row is its one
+  collapse control, …" counts the `aria-expanded` elements. While T3's own question is pending, the composer hides this panel
   (`shelfItems`), and a browser test holds that. Nothing shows inside replies, and nothing on mobile.
   (2026-11-17, replacing a strip of one row per question that the owner called ugly; design approved
   by a two-model council.) _Rejected:_ a two-line list (tall, three buttons per row); chips with
@@ -203,7 +275,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     its age, a button that shows that reply in the chat, and "Accept N picks" (`answerLines`: only
     questions with a pick the draft does not close, hidden at zero). A row has its label chip (open,
     or "In draft" in words), key words, the question and "Pick: …" as markdown, then Accept: <pick>
-    (none without a pick), Answer… and Not a decision. Once the draft closes a question, the row shows
+    (none without a pick), Answer…, Not a decision and Dismiss (above). Once the draft closes a question, the row shows
     the line that does it (`draftLineOf`): its own `Qn: …` line with Edit (the caret goes to the end
     of that line) and Remove (that line leaves the draft, `withoutLine`), or a shared line ("go with
     your picks", one naming several) with Edit in composer only. The label may be typed in any case.
@@ -243,7 +315,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     that line (lines read trimmed; a message whose run never started, `neverStarted`, is ignored; as the panel reads its draft; one read of the thread's messages
     with a `Veto: ` line, matched in TypeScript), and a message with a `Veto: ` line publishes a snapshot even when it closes no
     question. (A client-side check would miss messages the timeline has not loaded.) Then Answered
-    (accent chip) and Not a decision (muted chip), each with "You" and the question's own part of the
+    (accent chip), Not a decision and Dismissed (muted chips), each answered one with "You" and the question's own part of the
     answer (`answerPart` in `packages/shared/src/sessionKit/decisions.ts`, derived on the server from
     the full message: from the label to the next label that opens an answer, the whole message when
     the label is not named), "Pick was: …" when that part's first line does not read as the Accept
@@ -257,7 +329,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     close). ChatView holds it (`useReopenWithUndo`, passed in the Tracker's actions), not the panel,
     so switching to Parked or Artifacts, which unmounts the panel, keeps the Undo (Astra on #7); the
     hold names its thread, so its toast reopens that one after a thread switch too. ChatView
-    unmounting or the page going away (`pagehide`, best effort) sends what is still held. It is the only Tracker action that skips the draft; the row's Reopen
+    unmounting or the page going away (`pagehide`, best effort) sends what is still held. With Dismiss (above), it is one of the two Tracker actions that skip the draft; the row's Reopen
     stays disabled while held or sent, until the snapshot moves the question back. No bulk Reopen.
     (2026-11-17: a window timer that ignored hover, and a ✕ that committed, reopened a question the
     owner had undone.)
@@ -724,6 +796,8 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      005), and the lifecycle's 008 dropped; round 1 of PR #9's chip review changed it in place again
      before it merged. The owner's live ledger recorded this 007 on 2026-11-20, so it is now as fixed
      as the rest: never edit it.
+   - A new value in a TEXT state column needs no migration: `dismissed` (Questions and decisions,
+     Dismissing) went into `fork_thread_decision_questions.state`, which has no CHECK.
    - _Rejected:_ new orchestration event types, since official builds reject unknown events on
      server replay.
 2. **The fork refuses a database ahead of it.** On startup the fork refuses when
@@ -962,8 +1036,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
      the editor lets through. `ChatView.tsx` calls `useParkedDraft` (`ThreadDecisions.tsx`) and passes
      its
      `actions` to the Tracker and its `chipRestorable` to the composer as `parkedChipRestorable`.
-     It also puts `useReopenWithUndo` in the Tracker's actions (`reopen`, so the hold outlives the
-     panel), and keys the composer menu's `parkAvailable` and the panel's `onAddParked` on the
+     It also puts `useReopenWithUndo` and `useDismissWithUndo` in the Tracker's actions (`reopen` and
+     `dismiss`, so their toasts outlive the panel), and `questionsHeld` (from `threadDecisions`,
+     `serverVisibleTurnItems`, `serverProjection`'s messages and runs, and `optimisticUserMessages`;
+     "Hidden while a send is judged"), and keys the composer menu's `parkAvailable` and the panel's `onAddParked` on the
      thread's `lineage.sideChat` (not `embedded`, which a side chat at its own URL is not);
      `useComposerSend.ts` passes the same flag to `composerParkDecision`, which refuses `/park` on it.
      `packages/shared/package.json` exports the fork's `./parkedReferences` beside its `sessionKit`
@@ -1116,7 +1192,7 @@ If the app will not open after step 3: `~/.t3/bin/t3 service uninstall`, then re
 - `apps/web/src/components/ChatView.browser.test.tsx` "a shortcut conditioned on rightPanelOpen sees
   the thread's open right panel" times out when the whole file runs on this Mac, and passes alone. It
   fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
-  tags.
+  tags, and on `fork/main` at 7c371b246e (5024).
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"); use
   the repo's `node_modules/.bin/vp`.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when
