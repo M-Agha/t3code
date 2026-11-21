@@ -1006,7 +1006,8 @@ describe("composer and pull request shortcuts", () => {
       ["k", "pullRequest.copyNumber"],
       ["8", "thread.copyReference"],
       ["c", null],
-      ["y", null],
+      // Fork (MAIN-104): mod+shift+y is the fork's decisions.toggle (FORK.md's seam list).
+      ["y", "decisions.toggle"],
     ] as const) {
       assert.strictEqual(
         resolveShortcutCommand(event({ key, metaKey: true, shiftKey: true }), bindings, {

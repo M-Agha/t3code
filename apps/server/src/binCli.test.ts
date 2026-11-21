@@ -116,7 +116,9 @@ it.live("keeps migration warnings out of JSON thread output", () =>
       },
       { concurrency: "unbounded" },
     );
-    assert.strictEqual(Number(exitCode), 0, stderr);
-    assert.deepStrictEqual(JSON.parse(stdout), []);
+    // Fork (MAIN-104, FORK.md rule 2): the fork refuses a database a newer build migrated, where
+    // upstream warns and lists the threads. The CLI's logger writes the refusal to stdout.
+    assert.strictEqual(Number(exitCode), 1, stderr);
+    assert.include(stdout, "This database was migrated by a newer official T3 Code build");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
