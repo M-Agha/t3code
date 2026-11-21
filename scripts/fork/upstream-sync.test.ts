@@ -714,6 +714,7 @@ describe("the full suite", () => {
       const { script, marks } = suiteRepo(dir, names, [
         'name="$3" report="${7#--outputFile.json=}"',
         'echo "${T3CODE_PORT-unset} ${T3CODE_HOST-unset}" >"$marks/env-$name"',
+        'command -v vp >"$marks/vp-$name"',
         'touch "$marks/running/$name" && ls "$marks/running" | wc -l >>"$marks/widths"',
         'ls "$(git rev-parse --git-common-dir)/upstream-sync" >"$marks/kept-$name"',
         'echo "start $name"; sleep 1; echo "end $name"',
@@ -735,6 +736,11 @@ describe("the full suite", () => {
       for (const name of names)
         expect(NodeFS.readFileSync(NodePath.join(marks, `env-${name}`), "utf8")).toBe(
           "unset unset\n",
+        );
+      // A bare `vp` in a test reaches the checkout's, not mise's unversioned shim.
+      for (const name of names)
+        expect(NodeFS.readFileSync(NodePath.join(marks, `vp-${name}`), "utf8")).toBe(
+          `${NodePath.join(NodeFS.realpathSync(dir), "node_modules/.bin/vp")}\n`,
         );
       const widths = NodeFS.readFileSync(NodePath.join(marks, "widths"), "utf8")
         .split("\n")

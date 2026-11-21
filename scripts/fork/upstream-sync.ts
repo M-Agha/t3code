@@ -1387,14 +1387,18 @@ const requireNode = (target: string): void => {
       `run this under the target's Node: mise install node@${wanted} && mise exec node@${wanted} -- node ${import.meta.filename} …`,
     );
 };
-// Children (vp, git hooks) find this validated Node first; verify's run of this script's own test
-// makes its 4864 proof fail rather than skip without its refs. The T3 service's T3CODE_PORT and
-// T3CODE_HOST, which an agent shell inherits, hang AppRoot browser tests (FORK.md, "Known noise").
+// Children find this validated Node first, then the checkout's vp (mise's shim has no version set);
+// verify's run of this script's own test makes its 4864 proof fail rather than skip without its refs.
+// The T3 service's T3CODE_PORT and T3CODE_HOST hang AppRoot browser tests (FORK.md, "Known noise").
 const nodeEnv = (): NodeJS.ProcessEnv => {
   const { T3CODE_PORT: _port, T3CODE_HOST: _host, ...env } = process.env;
   return {
     ...env,
-    PATH: [NodePath.dirname(process.execPath), env.PATH ?? ""].join(NodePath.delimiter),
+    PATH: [
+      NodePath.dirname(process.execPath),
+      NodePath.join(ROOT_DIR, "node_modules", ".bin"),
+      env.PATH ?? "",
+    ].join(NodePath.delimiter),
     UPSTREAM_SYNC_PROOF: "required",
   };
 };
