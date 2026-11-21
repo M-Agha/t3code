@@ -146,6 +146,8 @@ export function composerParkDecision(
      * refuse it.
      */
     readonly sideChat: boolean;
+    /** A thread another agent drives (a subagent or a delegated task): the server refuses it too. */
+    readonly subagent: boolean;
   },
   resolve: MessageResolver = m,
 ): ComposerParkDecision {
@@ -156,6 +158,13 @@ export function composerParkDecision(
     return {
       kind: "refuse",
       title: resolve(msg("A side chat can't park")),
+      description: resolve(msg("Park in the main thread, whose Parked tab lists it.")),
+    };
+  }
+  if (input.subagent) {
+    return {
+      kind: "refuse",
+      title: resolve(msg("A subagent can't park")),
       description: resolve(msg("Park in the main thread, whose Parked tab lists it.")),
     };
   }

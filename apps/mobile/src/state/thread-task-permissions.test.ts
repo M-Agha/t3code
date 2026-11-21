@@ -60,6 +60,9 @@ const state = vi.hoisted(() => ({
   answer: vi.fn(),
   feedback: vi.fn(),
   updateSettings: vi.fn(),
+  // Fork (Parked): the queued message being edited, and its save.
+  queuedEdit: null as { runId: string; existingAttachments: [] } | null,
+  startSave: vi.fn(() => null),
   question: {
     id: "language",
     header: "Language",
@@ -138,7 +141,9 @@ vi.mock("../lib/composerAttachmentPreviewRetention", () => ({
 }));
 vi.mock("./queued-run-edit", () => ({
   useQueuedRunEdit: () => null,
-  getQueuedRunEdit: () => null,
+  getQueuedRunEdit: () => state.queuedEdit,
+  queuedEditDraftKey: (threadKey: string, runId: string) => `${threadKey}:${runId}`,
+  startQueuedRunEditSave: state.startSave,
 }));
 vi.mock("./preferences", async () => {
   const { Atom, AsyncResult } = await import("effect/reactivity");
@@ -263,6 +268,7 @@ beforeEach(() => {
     runtimeMode: undefined,
   };
   state.freshPending = false;
+  state.queuedEdit = null;
   state.questionDrafts = {};
   state.compactModel = null;
   state.compactDueAt = "";
@@ -802,5 +808,22 @@ describe("mobile handoff preview and submission", () => {
       }),
     );
     expect(state.clearDraft).toHaveBeenCalledTimes(1);
+  });
+
+  // Fork (Parked): an edited queued message goes to the provider as it stands.
+  it("refuses to save a queued message edited to /park", async () => {
+    state.grantedEnvironments.add("secondary");
+    state.queuedEdit = { runId: "run", existingAttachments: [] };
+    state.draft = { ...state.draft, text: "/park fix the flaky test" };
+    expect(await useThreadComposerState(NO_SIDE_CHATS).onSendMessage()).toBeNull();
+    expect(Alert.alert).toHaveBeenCalledWith(
+      "Queued message not updated",
+      "A queued message can't be parked.",
+    );
+    expect(state.startSave).not.toHaveBeenCalled();
+    // The same edit without /park is saved.
+    state.draft = { ...state.draft, text: "fix the flaky test" };
+    await useThreadComposerState(NO_SIDE_CHATS).onSendMessage();
+    expect(state.startSave).toHaveBeenCalledOnce();
   });
 });

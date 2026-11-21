@@ -373,12 +373,15 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `readParks`/`isPlaceholder`, so the syntax matches session-kit's `/board`: `agent` and `me`, the
   old words still accepted, and a bare `agent` or `me` names a kind only on the first line (after it,
   `agent:`), since those words start lines of prose. It is refused while editing a queued message,
-  with attachments, on an unstarted thread, on mobile, and in a side chat, in its pane or at its
-  own URL: a side chat never holds parks, as `t3_park` and the server refuse it (Astra on #7; in its
-  pane the panel is its parent's, `hostRightPanel`, so a bare `/park` would open the parent's). The
-  menu leaves `/park` out there too, and at its own URL the panel offers no Parked tab. The composer's
-  refusal only saves a round trip: `ThreadDecisions.park` refuses a side chat for every caller (the
-  Parked tab's field, `t3_park`, any client). A bare `/park` opens the Parked surface.
+  with attachments, on an unstarted thread, on mobile (a queued message edited to `/park` too), and
+  in a side chat, in its pane or at its own URL: a side chat never holds parks, as `t3_park` and the
+  server refuse it (Astra on #7; in its pane the panel is its parent's, `hostRightPanel`, so a bare
+  `/park` would open the parent's). The menu leaves `/park` out there too, and at its own URL the
+  panel offers no Parked tab. A subagent (one T3 or a linked machine delegated: the contracts'
+  `isDelegatedAppThread`) is refused the same way (MAIN-105): only the main thread parks on the
+  owner's list. The composer's refusal only saves a round trip: `ThreadDecisions.park` refuses a
+  side chat and a subagent for every caller (the Parked tab's field, `t3_park`, any client). A bare
+  `/park` opens the Parked surface.
 - `t3_park` in the thread MCP toolkit, for every provider: its `kind` takes `agent` or `me`, and the
   old words, which `ThreadDecisions.ts` maps when it stores the row (`PARK_KIND_OF_WORD` in
   `packages/shared/src/sessionKit/parks.ts`, a total record that `parks.test.ts` holds equal to
@@ -388,7 +391,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   compares with the repo's `main`, an older upstream, and fails for every fork PR without its
   `agent-context-increase` label. It refuses delegated child threads itself, and passes on
   `ThreadDecisions.park`'s refusals as `invalid_request`: a side chat (`SIDE_CHAT_PARK_MESSAGE`, the
-  one rule, as `/park`) and placeholder text. Its eval cases
+  one rule, as `/park`), a subagent (`SUBAGENT_PARK_MESSAGE`, for a caller other than `t3_park`,
+  which refuses one first) and placeholder text. Its eval cases
   (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with `--dry-run`; a real run is owed.
 - **Add to draft and Sent** (MAIN-75, the owner's Q55 design, 2026-11-20):
   - **A chip.** Add to draft (an open item for the agent) puts the item in the composer as a chip of
@@ -723,8 +727,9 @@ and keep working after every fork rebuild.
   a fork version unless `T3CODE_LEAVE_FORK=1` is set (in the shell for `t3 update`, in `service.env`
   for the service). The guard protects only commands run by fork code: every packaged T3 Code app
   points `~/.t3/bin/t3` at its own CLI when it starts (`DesktopCliShim.ts`), and after an official
-  app ran, `t3 service install` or `t3 update` is upstream's code, with no guard. install.sh checks
-  that `~/.t3/bin/t3` is this build's before it says to run one.
+  app ran, `t3 service install` or `t3 update` is upstream's code, with no guard. So install.sh
+  runs the service step through the new build's own runtime
+  (`~/.t3/runtime/versions/<version>/t3`), never `~/.t3/bin/t3`.
 - **Seam:** one, `ensurePinnedRuntimeInstalled` in `pinnedRuntime.ts`, chained after
   `refuseLeavingFork` beside it. On conflict keep upstream's body and chain the guard before it
   again; if upstream splits the function, the guard goes where `t3 update`, the server's self-update
@@ -806,7 +811,8 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
    from an upstream that has those migrations.
 4. **The reply.ts and judge.ts copies stay byte-identical** (see Shared logic). If upstream's tooling
    starts formatting them, keep them exempt in `vite.config.ts` and `knip.jsonc`.
-5. **Mobile stays untouched** except the `/park` refusal in `use-thread-composer-state.ts`.
+5. **Mobile stays untouched** except the `/park` refusals in `use-thread-composer-state.ts` and
+   their test.
 
 ## Rebasing onto upstream
 
@@ -842,7 +848,12 @@ and `verifyRefusal` say the main refusals, and the others are in `requireNode` a
   prints the leased push step 7 uses.
 - `verify` checks the rebased `fork/main` (step 5) and ends by printing that push command.
 - `suite` records the target's own full suite (each package's exit, each test file's tests run,
-  every failure), the baseline `verify` reads (step 5).
+  every failure), the baseline `verify` reads (step 5). It keeps it in the git common dir by the
+  target's commit, where `verify` finds it, so start it in the background right after `plan`.
+- `suite` and `verify` run the workspace packages' test scripts side by side (`suiteRun` in the
+  script says how many at once, and why no more), each in full, naming it when it starts and
+  printing its output whole when it ends; their children never see the T3 service's `T3CODE_PORT`
+  and `T3CODE_HOST` ("Known noise").
 
 Read the plan before every upgrade. Its test, `scripts/fork/upstream-sync.test.ts`, runs from the
 repo root (`vp test run scripts/fork/upstream-sync.test.ts`) or from `scripts/` through the
@@ -899,7 +910,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/server/src/provider/agentContextBudget.json` with
        `apps/server/src/provider/AgentContextBudget.test.ts`.
      - Storage: `apps/server/src/persistence/Sqlite.ts` (fork migrations after upstream's, and the
-       ahead-of-fork guard; rule 1) and `apps/server/src/persistence/Sqlite.test.ts`.
+       ahead-of-fork guard; rule 1) and `apps/server/src/persistence/Sqlite.test.ts`; and
+       `apps/server/src/binCli.test.ts`, whose "keeps migration warnings out of JSON thread output"
+       migrates a database past upstream's head, which the fork refuses (rule 2): its assertions
+       expect that refusal (MAIN-104).
      - `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`: the `T3CODE_OWNS_BOARD` line,
        in the query `env` beside `PortScanner.AGENT_THREAD_ENV`.
      - `/park` in the composer send path: `apps/web/src/composer-logic.ts`,
@@ -908,9 +922,11 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/chat/composerSlashCommandSearch.ts`,
        `apps/web/src/components/chat/useComposerMenuItems.ts`,
        `apps/web/src/components/chat/useComposerSend.ts` (the park branch before a send reaches
-       the provider), and mobile's refusal, `apps/mobile/src/state/use-thread-composer-state.ts`
-       (right before upstream's `/side` handling, which 5024 moved below the attachment and
-       context checks).
+       the provider), and mobile's refusals, `apps/mobile/src/state/use-thread-composer-state.ts`
+       (a send's right before upstream's `/side` handling, which 5024 moved below the attachment and
+       context checks; a queued message's save right before its `/side` check in
+       `saveQueuedRunEdit`), with their case in `apps/mobile/src/state/thread-task-permissions.test.ts`
+       (its `queued-run-edit` mock reads `state.queuedEdit`).
      - The right panel's surfaces: `apps/web/src/rightPanelStore.ts`,
        `apps/web/src/rightPanelStore.test.ts`, `apps/web/src/closedViewStore.ts`,
        `apps/web/src/closedViewStore.test.ts`, `apps/web/src/components/RightPanelTabs.tsx`,
@@ -923,10 +939,14 @@ it fails instead. The steps below are what the script encodes and what stays a p
        own thread: the palette's thread actions test `activeThread !== null`, and upstream's mock
        passes `undefined`). Since 5024 upstream's thread surfaces are `thread` and
        `linked-thread` (7c6e889ddb renamed `side-chat`, and `decodeThreadSurface` still reads a
-       saved `side-chat`); the fork's kinds `decisions`, `parked` and `artifacts` sit right before
-       them in each list, switch and union.
+       saved `side-chat`). The fork's kinds `decisions`, `parked` and `artifacts` sit right after
+       `issue` (before `thread`) in `RIGHT_PANEL_KINDS`, the surface union and the tab switches, and
+       among the singletons (after `pull-requests`) in `closedViewStore.ts`'s check and
+       `rightPanelStore.ts`'s `singletonSurface`.
      - The `decisions.toggle` shortcut: `packages/contracts/src/keybindings.ts`,
-       `packages/shared/src/keybindings.ts`, `apps/web/src/components/settings/KeybindingsSettings.logic.ts`.
+       `packages/shared/src/keybindings.ts`, `apps/web/src/components/settings/KeybindingsSettings.logic.ts`,
+       and `apps/web/src/keybindings.test.ts`, whose "fills missing number shortcuts…" expects
+       `mod+shift+y` unbound upstream and `decisions.toggle` here (MAIN-104 kept the chord).
      - The composer seams below: `apps/web/src/components/chat/ComposerBannerStack.tsx`,
        `apps/web/src/components/chat/ComposerPendingUserInputPanel.tsx`,
        `apps/web/src/components/chat/ChatComposer.tsx`, `apps/web/src/components/ChatView.tsx`,
@@ -1037,9 +1057,12 @@ it fails instead. The steps below are what the script encodes and what stays a p
      It also puts `useReopenWithUndo` and `useDismissWithUndo` in the Tracker's actions (`reopen` and
      `dismiss`, so their toasts outlive the panel), and `questionsHeld` (from `threadDecisions`,
      `serverVisibleTurnItems`, `serverProjection`'s messages and runs, and `optimisticUserMessages`;
-     "Hidden while a send is judged"), and keys the composer menu's `parkAvailable` and the panel's `onAddParked` on the
-     thread's `lineage.sideChat` (not `embedded`, which a side chat at its own URL is not);
-     `useComposerSend.ts` passes the same flag to `composerParkDecision`, which refuses `/park` on it.
+     "Hidden while a send is judged"), and keys the composer menu's `parkAvailable` and the panel's
+     `onAddParked` on the thread's `lineage.sideChat` (not `embedded`, which a side chat at its own URL
+     is not) and on upstream's `isSubagentThread` beside it; `useComposerSend.ts` passes the same two
+     flags to `composerParkDecision`, which refuses `/park` on either, the second through
+     `isDelegatedAppThread`, whose parameter `packages/contracts/src/orchestrationV2.ts` widens to
+     take the null `delegatedFrom` of client-runtime's `EnvironmentThreadShell`.
      `packages/shared/package.json` exports the fork's `./parkedReferences` beside its `sessionKit`
      entries; web (`useComposerStash.ts`, `composerInlineTokenPaste.ts`, the editor's paste) and mobile
      strip pasted chips through it. On mobile: `composerContextClipboard.ts`'s import and
@@ -1048,8 +1071,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
      before its unknown-kind branch, and `apps/mobile/vite.config.ts` lists
      `ComposerContextSheet.test.tsx` among its React tests. `t3_park`'s `kind` in
      `thread/tools.ts` takes `ThreadParkedKindWord`. In tests: `apps/web/test/fakeEnvironment.ts` has
-     `answerStreamRpc` (a subscription the test pushes snapshots into), `core.test.ts`'s `t3_park`
-     case holds its own refusal (a delegated child) and the server's it passes on (a side chat, a
+     `answerStreamRpc` (a subscription the test pushes snapshots into) and a thread's `delegateOf`
+     (a subagent `delegate_task` started, which has a composer, unlike `providerSubagentOf`),
+     `core.test.ts`'s `t3_park` case holds its own refusal (a delegated child) and the server's it passes on (a side chat, a
      placeholder), and reads the stored kind through `parkKind`, and `ChatView.logic.test.ts`,
      `composerSend.logic.test.ts` and `useQueuedRunEdit.browser.test.tsx` carry the `parkedContexts`
      slot.
@@ -1071,7 +1095,7 @@ it fails instead. The steps below are what the script encodes and what stays a p
      drops that tool's last annotation. `AgentContextBudget.test.ts` caught it in the 5024 rebase.
    - Fix-ups go in as `git commit --fixup=<fork commit>`, then
      `GIT_SEQUENCE_EDITOR=true git rebase -i --autosquash <tag>`, so each fork commit stays whole.
-5. **Check:** `node scripts/fork/upstream-sync.ts verify --target <tag> --baseline <file>` runs,
+5. **Check:** `node scripts/fork/upstream-sync.ts verify --target <tag>` runs,
    with vp under the validated Node, `vp run check:changed <tag>` (the typecheck, lint, and the
    test files beside the changed files), then every test file the fork adds or changes, then the
    full test suite once (each workspace package's own `test` script, as CI runs them, every one
@@ -1084,17 +1108,20 @@ it fails instead. The steps below are what the script encodes and what stays a p
    person", compared with a baseline recorded at the target: `suiteOwed` in the script says what
    each line means. It compares counts, not names, so an upstream test the rebase replaced
    one-for-one in a test file the fork changes is not listed; its commit shows in the `range-diff`
-   list below. Record the baseline first, in a worktree of the fork checkout at the
-   tag, each line under the target's Node (step 2):
+   list below. Record the baseline right after `plan`, in the background while you rebase (its
+   worktree is independent of the rebase), in a worktree of the fork checkout at the tag, under the
+   target's Node (step 2):
    ```
    git worktree add --detach /tmp/t3-<n> <tag>
-   cd /tmp/t3-<n> && vp i
-   node <fork checkout>/scripts/fork/upstream-sync.ts suite --out /tmp/baseline-<n>.txt
-   cd <fork checkout> && git worktree remove /tmp/t3-<n>
+   cd /tmp/t3-<n> && vp i && node <fork checkout>/scripts/fork/upstream-sync.ts suite
    ```
-   What `suite` refuses is `suite` in the script; what `verify` refuses in a baseline (another
-   commit, a line `suite` does not write) is `baselineAt`. A failure whose message names the
-   checkout's path reads as new. What none of these reach (a live run, the build) is steps 6 and 7.
+   `suite` keeps the baseline at `<git common dir>/upstream-sync/baseline-<commit>.txt`, which every
+   worktree of the checkout shares, and `verify` reads the target's from there unless
+   `--baseline <file>` names another; while a `suite` still writes it, `verify` refuses and says
+   so. Once it is kept, `git worktree remove /tmp/t3-<n>` from the fork checkout.
+   What `suite` refuses is `suite` in the script; what `verify` refuses in a baseline, kept or
+   given (another commit, a line `suite` does not write), is `baselineAt`. A failure whose message
+   names the checkout's path reads as new. What none of these reach (a live run, the build) is steps 6 and 7.
    When `verify` names a fork commit or test file the rebase lost, name each one the rebase meant
    to drop, reword or rename with `--dropped-commit <subject>` or `--dropped <path>`: a
    `git rebase --skip` while resolving a conflict leaves no failing test behind. It then lists, from `git range-diff`, each fork commit
@@ -1143,28 +1170,33 @@ it fails instead. The steps below are what the script encodes and what stays a p
 
 ## Installing
 
-`scripts/fork/install.sh` refuses while any T3 Code app runs. It then copies the live
-`~/.t3/userdata/statev2.sqlite` to `~/.claude/trash/` with SQLite's online backup, checks the copy's
-integrity, and installs `T3 Code (Fork).app` from `release/` beside the official apps. The first start
-of a newer build migrates `~/.t3` one way, and that copy is the only way back.
+`scripts/fork/install.sh` installs `T3 Code (Fork).app` from `release/` beside the official apps and
+moves a background service it stopped to that build; its header says when it refuses, what it puts
+back after a failure, and what it prints. The first start of a newer build migrates `~/.t3` one way,
+so before it installs anything it copies the live `~/.t3/userdata/statev2.sqlite` to
+`~/.claude/trash/` (SQLite's online backup, integrity-checked): that copy is the only way back.
 
-It also seeds the build's t3 runtime into `~/.t3/runtime/versions/<version>/` ("Background
-service"). With the background service, for each install:
+**Automatically** (the default, MAIN-106): at the end of `/t3code-fork upgrade` or `ship`, after the
+push and the build, the agent runs `scripts/fork/auto-install.sh` and tells the owner T3 will close
+and reopen. It returns at once, having handed the work to a one-shot launchd job that waits until no
+run is active, quits every T3 Code app, stops the service, and runs install.sh, opening the fork
+again itself only when something failed and no T3 Code app runs. Its header says what counts as
+active, how long it waits, where it logs and how its last line reads, and why a launchd job rather
+than `nohup`.
 
-1. Before install.sh, stop the service if it runs (install.sh refuses otherwise, and names the
-   command): `launchctl bootout gui/$(id -u)/com.t3tools.t3code.service`. If the install then does
-   not go ahead, `~/.t3/bin/t3 service restart` starts it again on the runtime it ran; install.sh
-   says so whenever it stops short.
-2. Run install.sh. If its last lines say `~/.t3/bin/t3` is not this build's CLI, open T3 Code (Fork)
-   once first.
-3. Turn Local environment off in Settings → Environments (the first time only).
-4. Run the command install.sh prints last: `~/.t3/bin/t3 service install`, which finds the seeded
-   runtime and starts the service on this build, or, when the same build was installed again,
-   `~/.t3/bin/t3 service restart` (`service install` would answer "already installed").
-5. Pair the app with `http://127.0.0.1:3773` (the first time only).
-6. In the dotfiles repo, run `./doctor.sh` and check its "T3 Code" step.
+Whether macOS asks before osascript, run by the job, may quit an app (Automation consent) is
+_unverified_; a refusal ends the run with `FAILED` and nothing installed.
 
-If the app will not open after step 3: `~/.t3/bin/t3 service uninstall`, then reopen it.
+**By hand** (the fallback):
+
+1. Quit every T3 Code app, then run install.sh from a terminal T3 did not start.
+2. The first time only: turn Local environment off in Settings → Environments, then run the
+   command install.sh's last lines name (`~/.t3/runtime/versions/<version>/t3 service install`).
+3. Pair the app with `http://127.0.0.1:3773` (the first time only).
+4. Read the doctor's "T3 Code" step install.sh printed (or run `./doctor.sh` in the dotfiles repo).
+
+If the app will not open after a first service install: `~/.t3/runtime/versions/<version>/t3 service
+uninstall`, then reopen it.
 
 ## Outside this repo
 
@@ -1199,9 +1231,7 @@ If the app will not open after step 3: `~/.t3/bin/t3 service uninstall`, then re
   on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
   themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
-- Run tests from a shell T3 Code started (an agent's terminal) with
-  `env -u T3CODE_PORT -u T3CODE_HOST`. With the service's `T3CODE_PORT=3773` and
-  `T3CODE_HOST=127.0.0.1` inherited, every web browser test that renders `AppRoot` over the fake
-  environment hangs until its 15 s timeout: the shell snapshot never arrives, so no project or
-  thread renders (checked on the plain `v0.1.12-nightly.20261121.5024` tag, 2026-11-20; upstream's
-  CI passes there). `upstream-sync.ts suite` and `verify` inherit them too.
+- Run tests by hand from a shell T3 Code started (an agent's terminal) with
+  `env -u T3CODE_PORT -u T3CODE_HOST`: with the service's values inherited, every web browser test
+  that renders `AppRoot` over the fake environment hangs to its 15 s timeout (checked on the plain
+  `v0.1.12-nightly.20261121.5024` tag, 2026-11-20). `upstream-sync.ts` clears them for its children.

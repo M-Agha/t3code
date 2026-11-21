@@ -3,13 +3,21 @@
 # and seeds its t3 runtime into the T3 home for the background service.
 #
 # The fork shares ~/.t3 with them, and its first start migrates that database one way. So this script
-# refuses while any T3 Code app or the background service runs, copies the live database to
-# ~/.claude/trash first (SQLite's online backup), checks the copy, and only then installs.
+# refuses while any T3 Code app runs, and again before it replaces the app, stops the background
+# service if it runs, copies the live database to ~/.claude/trash first (SQLite's online backup),
+# checks the copy, and only then installs.
 # It never overwrites an app: an existing "T3 Code (Fork).app" is moved to ~/.claude/trash first, and
-# put back if the new one cannot be put in place.
+# put back if the new one cannot be put in place; a service it stopped is started again then.
+# Installed, it moves a service it stopped to this build through this build's own runtime (a failure
+# there starts the unit on disk again; an app started meanwhile leaves it stopped), opens T3 Code
+# (Fork), and runs the dotfiles doctor's T3 Code step when ~/.config is a dotfiles checkout.
+#
+# Usage: install.sh [--service-stopped]   the flag: the caller (auto-install.sh) stopped the service,
+#                                        and this run treats it as one it stopped
 # T3_FORK_APPLICATIONS_DIR replaces /Applications, for forkServiceRuntime.test.ts.
 # macOS only. Written for /bin/bash 3.2.
 set -euo pipefail
+[ $# -eq 0 ] || [ "$*" = --service-stopped ] || { echo "usage: install.sh [--service-stopped]" >&2; exit 2; }
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 apps_dir="${T3_FORK_APPLICATIONS_DIR:-/Applications}"
@@ -33,8 +41,21 @@ plist="$HOME/Library/LaunchAgents/$service_label.plist"
 # ran; a new runtime that nothing names is pruned like any other unused runtime.
 aside=""
 moved_in=""
-# The owner may have stopped the service for this run (below); a run that does not finish says how
-# to start it again, on the runtime it ran before. Only a failure reaches this: success clears the trap.
+# A failure starts again only a service this run (or its caller) stopped: one the owner stopped
+# stays stopped.
+stopped=""
+[ "${1:-}" = --service-stopped ] && stopped=yes
+# A failure starts a service it stopped again from the unit on disk, or says how to. The unit runs
+# the launcher, which runs service-state.json's activeVersion (serviceLauncher.ts).
+restart_service() {
+  if [ ! -f "$plist" ] || launchctl print "$service_target" >/dev/null 2>&1; then return 0; fi
+  if [ -n "$stopped" ] && launchctl bootstrap "gui/$(id -u)" "$plist"; then
+    echo "install: started the background service again; it runs t3 $(jq -r '.activeVersion // "(no activeVersion)"' "$t3_home/runtime/service-state.json" 2>/dev/null || echo "(service-state.json unread)")." >&2
+  else
+    echo "install: the background service is stopped. To start it again, run: \"$shim\" service restart" >&2
+  fi
+}
+# Only a failure reaches this: once the app is in place the trap is restart_service alone.
 on_exit() {
   if [ -n "$moved_in" ] && [ -e "$dest" ]; then
     mv "$dest" "$staging/not-installed.app" || echo "install: could not move $dest out of the way." >&2
@@ -46,9 +67,7 @@ on_exit() {
       echo "install: the previous fork app is at $aside; move it back to $dest." >&2
     fi
   fi
-  if [ -f "$plist" ] && ! launchctl print "$service_target" >/dev/null 2>&1; then
-    echo "install: the background service is stopped. To start it again, run: \"$shim\" service restart" >&2
-  fi
+  restart_service
 }
 trap on_exit EXIT
 
@@ -68,16 +87,18 @@ zip="$(ls -t "$repo"/release/T3-Code-*-arm64.zip 2>/dev/null | head -1 || true)"
 # Any T3 Code app (official or fork) holding the database would race the backup and the migration.
 # The pattern avoids `+` and `\(`: macOS pgrep does not read them as an extended regex would.
 running='\.app/Contents/MacOS/T3 Code'
-if pgrep -f "$running" >/dev/null; then
+apps_running() {
+  pgrep -f "$running" >/dev/null || return 1
   pgrep -fl "$running" | cut -c1-120 | sed 's/^/  running: /' >&2
-  fail "quit every T3 Code app first, then run this again."
-fi
+}
+apps_running && fail "quit every T3 Code app first, then run this again."
 # So does the background service, and the backup must hold what `t3 service install` then migrates.
 # T3 has no `t3 service stop`; this is the stop step of its own install (bootService.ts), and
 # `t3 service install` starts the service again. Loaded is running here: the unit keeps it alive.
 if launchctl print "$service_target" >/dev/null 2>&1; then
-  fail "the background service is running and holds the database. Stop it with: launchctl bootout $service_target
-Then run this again. If you do not go ahead, \"$shim\" service restart starts it again."
+  launchctl bootout "$service_target" || fail "could not stop the background service ($service_target)."
+  stopped=yes
+  echo "Stopped the background service for this install."
 fi
 
 mkdir -p "$trash"
@@ -125,10 +146,13 @@ runtime="$repo/release/t3-$built_version-darwin-arm64.tar.gz"
 mise exec "$node" -- "$repo/scripts/fork/seed-runtime.sh" "$built_version" "$runtime"
 
 if [ -e "$dest" ]; then
-  # Named first, so an interrupt right after the move still finds it.
-  aside="$trash/${app_name%.app}_$stamp.app"
+  # Named first, so an interrupt right after the move still finds it. A folder of its own: two
+  # installs in one second share the stamp, and `mv` onto an existing app moves into it.
+  aside="$(mktemp -d "$trash/${app_name%.app}_$stamp.XXXX")/$app_name"
   mv "$dest" "$aside"
 fi
+# One can start while the backup and the seed run: checked again where it would race.
+apps_running && fail "a T3 Code app started during the install; quit it, then run this again."
 moved_in=yes
 mv "$built" "$dest"
 # Keeps the new runtime from prune (FORK.md, "Background service", "Kept from prune").
@@ -139,30 +163,50 @@ out="$(T3CODE_INSTALL_BIN_DIR="$fork_bin" "$runtime_t3" install 2>&1)" ||
 # `t3 install` only warns when it cannot record its launcher, and an unrecorded one keeps nothing.
 grep -Fqx "$(cd "$fork_bin" && pwd -P)/t3" "$t3_home/runtime/launchers" 2>/dev/null ||
   fail "$runtime_t3 install did not record $fork_bin/t3 in $t3_home/runtime/launchers, so prune could remove that runtime: $out"
-# Installed: nothing below can fail, and nothing is put back from here on.
-trap - EXIT
+# Installed: nothing is put back from here on. A failure of the service step below starts the
+# service it stopped again.
+trap restart_service EXIT
 [ -z "$aside" ] || echo "Moved the previous fork app to $aside."
 rmdir "$staging" 2>/dev/null || true
 echo "Installed $dest from $(basename "$zip")."
 echo "Run one T3 Code app at a time: they share ~/.t3."
 
-# A service already on this build (the same build installed again) answers `service install` with
-# "already installed" and stays stopped; `service restart` starts it.
+# The service this run stopped moves to this build, through this build's own CLI: ~/.t3/bin/t3 is
+# whichever packaged app started last, and upstream's would move the service off the fork with no
+# guard against it (FORK.md, "Leaving the fork"). A service already on this build (the same build
+# installed again) answers `service install` with "already installed" and stays stopped; `service
+# restart` starts it. One the owner had stopped stays stopped.
 service_cmd=install
-if [ -f "$plist" ] &&
-  [ "$(jq -r '.activeVersion // empty' "$t3_home/runtime/service-state.json" 2>/dev/null)" = "$built_version" ]; then
+if [ "$(jq -r '.activeVersion // empty' "$t3_home/runtime/service-state.json" 2>/dev/null)" = "$built_version" ]; then
   service_cmd=restart
 fi
-start="\"$shim\" service $service_cmd"
-# Every packaged T3 Code app points $t3_home/bin/t3 at its own CLI when it starts, so after an official
-# app ran, `t3` is upstream's: it would move the service off the fork, and it has no guard against that
-# (FORK.md, "Leaving the fork"). Only this build's own CLI may be told to install the service.
-shim_version="$("$shim" --version 2>/dev/null || true)"
+start="\"$runtime_t3\" service $service_cmd"
 echo
-[ ! -f "$plist" ] || echo "The background service is stopped."
-if [ "${shim_version##*[[:space:]]}" != "v$built_version" ]; then
-  echo "$shim is not this build's CLI: it reports '${shim_version:-nothing}', not v$built_version."
-  echo "Open T3 Code (Fork) once, then run: $start"
+if [ -n "$stopped" ]; then
+  # Not started again here: an app that hosts its own server would share the database with it.
+  if apps_running; then
+    trap - EXIT
+    fail "a T3 Code app started during the install, which is done; the background service stays stopped. Quit the app, then run: $start"
+  fi
+  "$runtime_t3" service "$service_cmd" || fail "$start failed; run it again to move the service to this build."
+  echo "The background service runs on this build ($built_version)."
+elif [ -f "$plist" ]; then
+  echo "The background service was not running, and is left so. To run it on this build, run: $start"
 else
-  echo "To run the background service on this build, run: $start"
+  echo "No background service is installed. To run one on this build: turn Local environment off in"
+  echo "Settings → Environments (the first time only), then run: $start"
+fi
+trap - EXIT
+# Before the doctor, so T3 is back while it runs.
+open "$dest" || echo "install: could not open $dest; open it by hand." >&2
+
+# The dotfiles doctor's T3 Code step, where ~/.config is a dotfiles checkout (FORK.md, "Installing").
+# Doctor runs every step; only that one is shown, and it never fails the install.
+dotfiles="$(cd -P "$HOME/.config" 2>/dev/null && cd .. && pwd)" || dotfiles=""
+echo
+if [ -n "$dotfiles" ] && [ -x "$dotfiles/doctor.sh" ]; then
+  echo "The dotfiles doctor's T3 Code step:"
+  "$dotfiles/doctor.sh" 2>&1 | awk '/^[^[:space:]]+ T3 Code([[:space:]]|$)/ { on = 1; print; next } on && /^[[:space:]]/ { print; next } { on = 0 }' || true
+else
+  echo "No dotfiles checkout behind ~/.config: doctor's T3 Code step not run."
 fi
