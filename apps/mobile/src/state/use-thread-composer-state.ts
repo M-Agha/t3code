@@ -532,6 +532,14 @@ export function useThreadComposerState(input: {
       );
       return;
     }
+    // Fork (Parked): a queued message is sent to the provider as it stands, and `/park` must never be.
+    if (readParkCommand(text) !== null) {
+      Dialog.alert(
+        m(msg("Queued message not updated")),
+        m(msg("A queued message can't be parked.")),
+      );
+      return;
+    }
     // A queued message stays in its thread, so saving `/side` would send it to main.
     if (parseSideChatCommand(text)) {
       Dialog.alert(

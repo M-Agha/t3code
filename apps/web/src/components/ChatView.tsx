@@ -3145,8 +3145,9 @@ export default function ChatView(props: ChatViewProps) {
     activeThread?.lineage.sideChat !== true &&
     !isSubagentThread &&
     serverConfig?.environment.capabilities.sideChats === true;
-  // A side chat never parks (ThreadDecisions.park refuses it).
-  const parkOffered = isServerThread && activeThread?.lineage.sideChat !== true;
+  // A side chat or a subagent never parks (ThreadDecisions.park refuses both).
+  const parkOffered =
+    isServerThread && activeThread?.lineage.sideChat !== true && !isSubagentThread;
   const sideChat = useSideChat({
     threadRef: sideChatsOffered && isServerThread ? activeThreadRef : null,
     readSettings: () => ({

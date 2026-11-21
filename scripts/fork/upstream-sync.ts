@@ -4,7 +4,7 @@
 //   plan    read-only: what a person must read before moving the fork from its base tag to a target tag
 //   rebase  pushes the old head as a branch, then rebases the fork's commits onto the target tag
 //   verify  after the rebase, before the push: what it runs and reaches is FORK.md step 5
-//   suite   the full suite wherever it runs (failures, exits, tests run per file): verify's baseline, from a worktree at the target
+//   suite   the full suite wherever it runs (failures, exits, tests run per file): verify's baseline, from a worktree at the target, kept per commit
 // `plan` judges nothing safe: it lists files and facts to read.
 // Exit codes: 0 done, 1 a step failed or the rebase stopped on a conflict, 2 refused before acting.
 import * as NodeChildProcess from "node:child_process";
@@ -105,10 +105,8 @@ interface Args {
   readonly dropped: ReadonlyArray<string>;
   /** `--dropped-commit <subject>`, repeatable: a fork commit verify no longer expects after the rebase. */
   readonly droppedCommits: ReadonlyArray<string>;
-  /** verify's `--baseline <file>`: what `suite --out` wrote at the target. */
+  /** verify's `--baseline <file>`: what `suite` wrote at the target; null reads the one it kept. */
   readonly baseline: string | null;
-  /** suite's `--out <file>`. */
-  readonly out: string | null;
   /** The live database plan reads read-only; null takes it from upstream's config.ts at the target. */
   readonly db: string | null;
 }
@@ -117,10 +115,10 @@ const FLAGS: Readonly<Record<string, ReadonlyArray<string>>> = {
   plan: ["--target", "--base", "--head", "--nightly", "--notes"],
   rebase: ["--target"],
   verify: ["--target", "--dropped", "--dropped-commit", "--baseline"],
-  suite: ["--out"],
+  suite: [],
 };
 const USAGE =
-  "usage: upstream-sync.ts plan [--target <tag>] [--base <tag>] [--head <ref>] [--nightly <tag|none>] [--notes] | rebase --target <tag> | verify --target <tag> [--dropped <path>]… [--dropped-commit <subject>]… [--baseline <file>] | suite --out <file>";
+  "usage: upstream-sync.ts plan [--target <tag>] [--base <tag>] [--head <ref>] [--nightly <tag|none>] [--notes] | rebase --target <tag> | verify --target <tag> [--dropped <path>]… [--dropped-commit <subject>]… [--baseline <file>] | suite";
 /** The command line read, or what is wrong with it: every word must be understood. */
 export const readArgs = (argv: ReadonlyArray<string>): Args | string => {
   const [command = "plan", ...rest] = argv;
@@ -144,7 +142,6 @@ export const readArgs = (argv: ReadonlyArray<string>): Args | string => {
     dropped: values.get("--dropped") ?? [],
     droppedCommits: values.get("--dropped-commit") ?? [],
     baseline: values.get("--baseline")?.[0] ?? null,
-    out: values.get("--out")?.[0] ?? null,
     db: null,
   };
 };
@@ -583,7 +580,7 @@ const BASELINE_HEADER = "# upstream-sync suite at ";
 const BASELINE_EXIT = /^# (\S+) exited (\d+|on a signal)( with no report)?$/;
 const BASELINE_FILE = /^# (\S+): (.+) ran (\d+) tests$/;
 const exitText = (exit: number | null): string => (exit === null ? "on a signal" : String(exit));
-/** What `suite --out` writes: the commit, each package's exit and its files' ran counts, then every failure line. */
+/** What `suite` keeps: the commit, each package's exit and its files' ran counts, then every failure line. */
 export const baselineText = (commit: string, run: Suite): string =>
   [
     `${BASELINE_HEADER}${commit}`,
@@ -593,10 +590,10 @@ export const baselineText = (commit: string, run: Suite): string =>
     ]),
     ...run.failures,
   ].join("\n");
-/** A `suite --out` file read back, or why it is not one recorded at `commit`. */
+/** A file `suite` kept, read back, or why it is not one recorded at `commit`. */
 export const baselineAt = (text: string, commit: string): Suite | string => {
   const [header = "", ...rest] = lines(text.trimEnd());
-  if (!header.startsWith(BASELINE_HEADER)) return "is not a file `suite --out` wrote";
+  if (!header.startsWith(BASELINE_HEADER)) return "is not a file `suite` wrote";
   const at = header.slice(BASELINE_HEADER.length);
   if (at !== commit) return `was recorded at ${at}, not at the target's commit ${commit}`;
   const failures: string[] = [];
@@ -612,7 +609,7 @@ export const baselineAt = (text: string, commit: string): Suite | string => {
     // baselineText writes a package's exit line before its files.
     else if (file !== null) packages.get(file[1] ?? "")?.files?.set(file[2] ?? "", Number(file[3]));
     // An older format's lines would read as failures, and its packages as absent.
-    else if (line.startsWith("# ")) return `has a line suite --out does not write: ${line}`;
+    else if (line.startsWith("# ")) return `has a line suite does not write: ${line}`;
     else failures.push(line);
   }
   if (packages.size === 0) return "has no package lines: record it again with this script's suite";
@@ -640,7 +637,7 @@ export const suiteOwed = (
       .filter(([name]) => !run.failures.some((line) => packageOf(line) === name))
       .map(([name, ran]) => exitLine(name, ran));
     return [
-      `- No baseline was given (--baseline <file>, FORK.md step 5): ${run.failures.length + silent.length} full-suite failures, none marked new or also failing at ${target}, and no test file compared; read each.${list([...run.failures, ...silent])}`,
+      `- No baseline was given (--baseline <file>) or kept by suite for ${target} (FORK.md step 5): ${run.failures.length + silent.length} full-suite failures, none marked new or also failing at ${target}, and no test file compared; read each.${list([...run.failures, ...silent])}`,
     ];
   }
   // undefined (no such package at the target) and null (no report) alike leave nothing to compare.
@@ -1369,7 +1366,10 @@ export const plan = (args: Args): string => {
 
   say("\n## Next");
   say(
-    `- \`node scripts/fork/upstream-sync.ts rebase --target ${target}\` (under node ${exactTarget ?? nodeTarget}), resolve conflicts by FORK.md step 4, then \`… verify --target ${target} --baseline <file>\` (step 5 records the baseline).`,
+    `- Now, in the background: \`suite\` in a worktree at ${target} (FORK.md step 5), so its baseline is kept by the time verify runs.`,
+  );
+  say(
+    `- \`node scripts/fork/upstream-sync.ts rebase --target ${target}\` (under node ${exactTarget ?? nodeTarget}), resolve conflicts by FORK.md step 4, then \`… verify --target ${target}\`, which reads that baseline.`,
   );
   say(`\n${items} item(s) to read or do.`);
   return report.join("\n");
@@ -1387,13 +1387,17 @@ const requireNode = (target: string): void => {
       `run this under the target's Node: mise install node@${wanted} && mise exec node@${wanted} -- node ${import.meta.filename} …`,
     );
 };
-// Children (vp, git hooks) find this validated Node first rather than whatever PATH has; verify's
-// run of this script's own test makes its 4864 proof fail rather than skip without its refs.
-const nodeEnv = (): NodeJS.ProcessEnv => ({
-  ...process.env,
-  PATH: [NodePath.dirname(process.execPath), process.env.PATH ?? ""].join(NodePath.delimiter),
-  UPSTREAM_SYNC_PROOF: "required",
-});
+// Children (vp, git hooks) find this validated Node first; verify's run of this script's own test
+// makes its 4864 proof fail rather than skip without its refs. The T3 service's T3CODE_PORT and
+// T3CODE_HOST, which an agent shell inherits, hang AppRoot browser tests (FORK.md, "Known noise").
+const nodeEnv = (): NodeJS.ProcessEnv => {
+  const { T3CODE_PORT: _port, T3CODE_HOST: _host, ...env } = process.env;
+  return {
+    ...env,
+    PATH: [NodePath.dirname(process.execPath), env.PATH ?? ""].join(NodePath.delimiter),
+    UPSTREAM_SYNC_PROOF: "required",
+  };
+};
 const spawnIn = (dir: string, command: string, args: string[]): number | null =>
   NodeChildProcess.spawnSync(command, args, { cwd: dir, stdio: "inherit", env: nodeEnv() }).status;
 /** The checkout's vp, once it starts under this Node; a missing or broken one refuses before any step. */
@@ -1549,7 +1553,7 @@ const rebase = (args: Args): void => {
     process.exit(1);
   }
   console.log(
-    `Rebased onto ${target}. Next: vp i, then node scripts/fork/upstream-sync.ts verify --target ${target} --baseline <file> (FORK.md step 5 records it)`,
+    `Rebased onto ${target}. Next: vp i, then node scripts/fork/upstream-sync.ts verify --target ${target}, once suite has kept the baseline at ${target} (FORK.md step 5)`,
   );
 };
 
@@ -1580,7 +1584,7 @@ const lockAdvice = (lock: number | undefined, installed: number | undefined): st
   lock !== undefined && (installed === undefined || installed < lock)
     ? "node_modules/.pnpm/lock.yaml is older than pnpm-lock.yaml (or missing): run vp i if you have not since the rebase."
     : null;
-const verify = (args: Args): void => {
+const verify = async (args: Args): Promise<void> => {
   const target = args.target ?? fail("verify needs --target <tag>, the tag rebase moved onto");
   // The fork's tests are the test files it adds or changes. A test the rebase dropped is in the
   // kept head's list and not HEAD's, so the expected list comes from the kept head.
@@ -1602,17 +1606,24 @@ const verify = (args: Args): void => {
   });
   if (refusal !== null) fail(refusal);
   requireNode(target);
+  // `--baseline <file>` when given, else the one `suite` kept for the target, if any.
+  const kept = keptBaseline(targetSha);
+  const writing = args.baseline === null && !NodeFS.existsSync(kept) ? writingRefusal(kept) : null;
+  if (writing !== null) fail(writing);
+  const baselineFile = args.baseline ?? (NodeFS.existsSync(kept) ? kept : null);
+  if (baselineFile === null) console.log(`No kept baseline at ${kept}.`);
+  const named = `${args.baseline === null ? "the kept baseline" : "--baseline"} ${baselineFile}`;
   const recorded =
-    args.baseline === null
+    baselineFile === null
       ? null
       : baselineAt(
-          NodeFS.existsSync(args.baseline)
-            ? NodeFS.readFileSync(args.baseline, "utf8")
-            : fail(`--baseline ${args.baseline} does not exist`),
+          NodeFS.existsSync(baselineFile)
+            ? NodeFS.readFileSync(baselineFile, "utf8")
+            : fail(`${named} does not exist`),
           targetSha,
         );
-  const baseline =
-    typeof recorded === "string" ? fail(`--baseline ${args.baseline} ${recorded}`) : recorded;
+  const baseline = typeof recorded === "string" ? fail(`${named} ${recorded}`) : recorded;
+  if (baselineFile !== null) console.log(`Full-suite baseline: ${baselineFile}`);
   // A commit a conflict resolution skipped (`git rebase --skip`) leaves no failing test behind.
   const subjects = (range: string) => lines(gitLog("--no-merges", "--format=%s", range));
   // range-diff, like this, leaves merges out.
@@ -1684,7 +1695,7 @@ const verify = (args: Args): void => {
     .map(([name]) => name);
   // Why the full suite runs, and why its failures are read rather than fail verify: FORK.md step 5.
   console.log(`\n== the full test suite (${packages.length} packages' test scripts)`);
-  const run = suiteRun(ROOT_DIR, vp, packages);
+  const run = await suiteRun(ROOT_DIR, vp, packages);
   const lease = NodeFS.existsSync(leaseFile())
     ? NodeFS.readFileSync(leaseFile(), "utf8").trim()
     : null;
@@ -1708,44 +1719,134 @@ const verify = (args: Args): void => {
   if (failed.length > 0) process.exit(1);
 };
 
+/** One package's test script; its output is held until it ends, so runs side by side do not interleave. */
+const runPackage = (
+  root: string,
+  vp: string,
+  name: string,
+  report: string,
+  children: Set<NodeChildProcess.ChildProcess>,
+) =>
+  new Promise<number | null>((resolve) => {
+    const child = NodeChildProcess.spawn(
+      vp,
+      [
+        "run",
+        "--filter",
+        name,
+        "test",
+        "--reporter=default",
+        "--reporter=json",
+        `--outputFile.json=${report}`,
+      ],
+      { cwd: root, env: nodeEnv(), stdio: ["ignore", "pipe", "pipe"] },
+    );
+    children.add(child);
+    // Its output waits for its end, so this line is what shows a package that hangs.
+    process.stdout.write(`== ${name} started\n`);
+    const output: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => output.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => output.push(chunk));
+    // A child that never started emits `error` and may not emit `close`: null, as spawnSync's status.
+    let ended = false;
+    const end = (exit: number | null, note = "") => {
+      if (ended) return;
+      ended = true;
+      children.delete(child);
+      process.stdout.write(`\n== ${name}: its test script exited ${exitText(exit)}${note}\n`);
+      process.stdout.write(Buffer.concat(output));
+      resolve(exit);
+    };
+    child.on("error", (error) => end(null, ` (${error.message})`));
+    child.on("close", (exit) => end(exit));
+  });
 /**
- * The full suite at `root`: one `vp run` per package's own `test` script, each failure as
- * `<package>: <failure>`. `vp run -r test` stops at the first failed package, and a root `vp test
- * run` also runs files no CI job runs. Every script is `vp test run`, which takes the reporters; one
- * that rejects them exits non-zero with no report and is listed for that.
+ * How many test scripts `suite` runs side by side. Ceiling: one per four CPUs, as each Vitest
+ * spreads over every CPU (one per CPU timed out four tests a lone run passes, 2026-11-21). To raise
+ * it, lower the divisor and compare the failures.
  */
-const suiteRun = (root: string, vp: string, packages: ReadonlyArray<string>): Suite => {
-  const reports = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upstream-sync-suite-"));
+export const suiteWidth = (cpus: number): number => Math.max(1, Math.floor(cpus / 4));
+const suiteReports = (): string =>
+  NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "upstream-sync-suite-"));
+/**
+ * The full suite at `root`: each package's own `test` script (`vp run -r test` stops at the first
+ * failure; a root `vp test run` runs files no CI job runs), each failure as `<package>: <failure>`.
+ * `width` scripts run side by side (suiteWidth). Each report goes in `reports`, removed at the end;
+ * `children` holds the scripts still running, for a caller that stops them on a signal.
+ */
+export const suiteRun = async (
+  root: string,
+  vp: string,
+  packages: ReadonlyArray<string>,
+  {
+    width = suiteWidth(NodeOS.availableParallelism()),
+    reports = suiteReports(),
+    children = new Set<NodeChildProcess.ChildProcess>(),
+  } = {},
+): Promise<Suite> => {
+  const report = (index: number) => NodePath.join(reports, `${index}.json`);
+  // Each result at its package's index, so they read in the packages' order whatever order they
+  // finished in: the baseline and the owed list read alike.
+  const results: Array<{ readonly name: string; readonly exit: number | null }> = [];
+  // One iterator shared by every worker: each takes the next package when it is free.
+  const queue = packages.entries();
+  const worker = async () => {
+    for (const [index, name] of queue)
+      results[index] = {
+        name,
+        exit: await runPackage(root, vp, name, report(index), children),
+      };
+  };
+  await Promise.all(Array.from({ length: Math.min(packages.length, width) }, worker));
   const failures: string[] = [];
   const runs = new Map<string, PackageRun>();
-  packages.forEach((name, index) => {
-    const report = NodePath.join(reports, `${index}.json`);
-    const exit = spawnIn(root, vp, [
-      "run",
-      "--filter",
-      name,
-      "test",
-      "--reporter=default",
-      "--reporter=json",
-      `--outputFile.json=${report}`,
-    ]);
+  for (const [index, { name, exit }] of results.entries()) {
     const read = readReport(
-      NodeFS.existsSync(report) ? NodeFS.readFileSync(report, "utf8") : "",
+      NodeFS.existsSync(report(index)) ? NodeFS.readFileSync(report(index), "utf8") : "",
       root,
     );
     runs.set(name, { exit, files: read.files });
     failures.push(...read.failures.map((failure) => `${name}: ${failure}`));
-  });
+  }
   NodeFS.rmSync(reports, { recursive: true, force: true });
   return { failures, packages: runs };
+};
+/** Where `suite` keeps the baseline of `commit`: the git common dir, which every worktree of this checkout shares. */
+const keptBaseline = (commit: string): string =>
+  NodePath.join(
+    git("rev-parse", "--path-format=absolute", "--git-common-dir"),
+    "upstream-sync",
+    `baseline-${commit}.txt`,
+  );
+/**
+ * verify's refusal while a running suite writes `kept` (its `<kept>.<pid>`), or null; a crashed
+ * one's file is passed over. Ceiling: a crashed suite's pid that a live process reuses reads as
+ * running, which the refusal names the file for.
+ */
+export const writingRefusal = (kept: string): string | null => {
+  const prefix = `${NodePath.basename(kept)}.`;
+  const entries = NodeFS.existsSync(NodePath.dirname(kept))
+    ? NodeFS.readdirSync(NodePath.dirname(kept))
+    : [];
+  for (const entry of entries) {
+    const pid = entry.startsWith(prefix) ? Number(entry.slice(prefix.length)) : Number.NaN;
+    if (!Number.isInteger(pid)) continue;
+    try {
+      // Signal 0 only asks whether it runs.
+      process.kill(pid, 0);
+      return `suite (pid ${pid}) is still writing the baseline to ${kept}.${pid}; run verify once it ends, or pass --baseline <file> (if pid ${pid} is no suite, remove that file)`;
+    } catch {
+      // It no longer runs.
+    }
+  }
+  return null;
 };
 /**
  * verify's baseline: the full suite in the checkout this runs in, under its own Node. That checkout
  * is a worktree of this script's, so this repo reads its commit; the header names only the commit,
- * so the checkout must be clean.
+ * so the checkout must be clean. It is kept by commit, where verify looks for it by default.
  */
-const suite = (args: Args): void => {
-  const out = args.out ?? fail("suite needs --out <file>: the baseline verify --baseline reads");
+const suite = async (): Promise<void> => {
   const root = git("-C", process.cwd(), "rev-parse", "--show-toplevel");
   const head = git("-C", root, "rev-parse", "HEAD");
   if (gitTry("cat-file", "-e", `${head}^{commit}`) === null)
@@ -1758,17 +1859,39 @@ const suite = (args: Args): void => {
     );
   requireNode(head);
   const packages = suitePackages(head);
-  const text = baselineText(head, suiteRun(root, requireVp(root), packages));
-  NodeFS.writeFileSync(out, `${text}\n`);
-  console.log(`\n${text}`);
+  const vp = requireVp(root);
+  // Written from the start and renamed into place at the end, so verify never reads half of one,
+  // and knows by `<kept>.<pid>` that one is coming (writingRefusal). Removed however this ends
+  // short (a crash, fail, or a signal), so verify never waits on a suite that is gone.
+  const kept = keptBaseline(head);
+  const writing = `${kept}.${process.pid}`;
+  NodeFS.mkdirSync(NodePath.dirname(kept), { recursive: true });
+  process.on("exit", () => NodeFS.rmSync(writing, { force: true }));
+  // A signal (a `kill`, which reaches this process alone) stops the test scripts too, removes what
+  // the run wrote, and ends this process by that signal, so its caller reads how it ended. `once`
+  // has removed the listener when it runs, so the signal's default action ends the process.
+  const reports = suiteReports();
+  const children = new Set<NodeChildProcess.ChildProcess>();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const)
+    process.once(signal, () => {
+      for (const child of children) child.kill(signal);
+      NodeFS.rmSync(reports, { recursive: true, force: true });
+      NodeFS.rmSync(writing, { force: true });
+      process.kill(process.pid, signal);
+    });
+  NodeFS.writeFileSync(writing, "");
+  const text = `${baselineText(head, await suiteRun(root, vp, packages, { reports, children }))}\n`;
+  NodeFS.writeFileSync(writing, text);
+  NodeFS.renameSync(writing, kept);
+  console.log(`\n${text}\nKept at ${kept}.`);
 };
 
-const main = (): void => {
+const main = async (): Promise<void> => {
   const args = parseArgs(process.argv.slice(2));
   if (args.command === "plan") console.log(plan(args));
   else if (args.command === "rebase") rebase(args);
-  else if (args.command === "suite") suite(args);
-  else verify(args);
+  else if (args.command === "suite") await suite();
+  else await verify(args);
 };
 
-if (import.meta.main) main();
+if (import.meta.main) await main();
