@@ -10,7 +10,6 @@ import {
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
-import * as Stream from "effect/Stream";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
@@ -24,12 +23,15 @@ import { getRouter } from "~/router";
 import {
   ENVIRONMENT_ID,
   answerRpc,
+  answerStreamRpc,
   dispatchedCommands,
   emitThreadEvent,
   installFakeEnvironment,
   rejectPendingCommand,
+  runningRun,
   threadWithHistory,
   threadWithQuestion,
+  userItem,
   type FakeDriver,
   type FakeThread,
 } from "../../../test/fakeEnvironment";
@@ -88,6 +90,7 @@ const snapshotFor = (
     parkedOpenCount: 0,
     artifacts: [],
     artifactCount: 0,
+    lastTypedMessageRead: null,
   };
 };
 
@@ -98,16 +101,9 @@ async function openThread(
   others: ReadonlyArray<FakeThread> = [],
 ) {
   const environment = installFakeEnvironment([thread, ...others], options);
-  const decisions = answerRpc(
-    WS_METHODS.threadDecisionsSubscribe,
-    (input: { readonly threadId: string }) =>
-      Stream.concat(
-        Stream.make(
-          snapshotFor([thread, ...others].find((t) => t.id === input.threadId) ?? thread, rows),
-        ),
-        Stream.never,
-      ),
-  );
+  // Every thread is answered the first thread's rows (the panel never reads a snapshot's threadId);
+  // `push` sends the next snapshot, as the server's changes do.
+  const decisions = answerStreamRpc(WS_METHODS.threadDecisionsSubscribe, snapshotFor(thread, rows));
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,
     onboardingCompletedAt: "2026-01-01T00:00:00.000Z",
@@ -125,6 +121,7 @@ async function openThread(
         ?.prompt ?? "",
     setDraft: (prompt: string) =>
       useComposerDraftStore.getState().setPrompt(scopeThreadRef(ENVIRONMENT_ID, thread.id), prompt),
+    push: (snapshot: ThreadDecisionsSnapshot) => decisions.push(snapshot),
     [Symbol.asyncDispose]: async () => {
       await app[Symbol.asyncDispose]();
       decisions[Symbol.dispose]();
@@ -775,4 +772,232 @@ it("a send the server rejects leaves the draft as it was", async () => {
   await rejectPendingCommand("The provider is unavailable.");
   await vi.waitFor(() => expect(app.draft()).toBe("Q4: yes\nKeep this"));
   expect(page.getByText("Not sent", { exact: true }).elements()).toHaveLength(0);
+});
+
+const dismissCard = (label: string) =>
+  option(`Dismiss ${label} without answering (tells the agent nothing)`);
+const sentMessages = () =>
+  dispatchedCommands().flatMap((command) => (command.type === "message.dispatch" ? [command] : []));
+
+it("the question card's whole row is its one collapse control, with the chevron inside it", async () => {
+  await using _app = await openThread(threadWithHistory("thread-decision-one-toggle", 1));
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+  const card = document.querySelector<HTMLElement>("[data-thread-decision]")!;
+  // One element says whether the card is open; the chevron is drawn, not a control.
+  expect(card.querySelectorAll("[aria-expanded]")).toHaveLength(1);
+  await page.getByRole("button", { name: "Hide Q4", exact: true }).click();
+  await expect.element(accept("Q4", "yes")).not.toBeInTheDocument();
+  await expect.element(page.getByText("Settle Q4?")).toBeVisible();
+  expect(card.querySelectorAll("[aria-expanded]")).toHaveLength(1);
+  // The controls above the trigger still answer their own clicks.
+  await page.getByRole("button", { name: "Next question" }).click();
+  await expect.element(page.getByText("2/3")).toBeVisible();
+  await page.getByRole("button", { name: "Show Q5", exact: true }).click();
+  await expect.element(accept("Q5", "no")).toBeVisible();
+});
+
+it("Dismiss on the card closes the question at once, sends nothing, and Undo reopens it", async () => {
+  const dismissed: unknown[] = [];
+  const reopened: unknown[] = [];
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, (input: never) => {
+    dismissed.push(input);
+    return Effect.void;
+  });
+  using _reopen = answerRpc(WS_METHODS.threadDecisionsReopen, (input: never) => {
+    reopened.push(input);
+    return Effect.void;
+  });
+  const thread = threadWithHistory("thread-decision-dismiss-card", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await dismissCard("Q4").click();
+  await vi.waitFor(() =>
+    expect(dismissed).toEqual([{ threadId: thread.id, label: "Q4", sourceMessageId: "reply" }]),
+  );
+  await expect.element(page.getByText("Dismissed Q4")).toBeVisible();
+  expect(app.draft()).toBe("");
+  expect(sentTexts()).toEqual([]);
+  // At once, with no hold for an Undo: Undo is a Reopen of its own.
+  expect(reopened).toEqual([]);
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await vi.waitFor(() =>
+    expect(reopened).toEqual([{ threadId: thread.id, label: "Q4", sourceMessageId: "reply" }]),
+  );
+  await expect.element(page.getByText("Dismissed Q4")).not.toBeInTheDocument();
+});
+
+it("Dismiss on a Tracker row closes it without a message, and it lists under Dismissed", async () => {
+  const dismissed: unknown[] = [];
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, (input: never) => {
+    dismissed.push(input);
+    return Effect.void;
+  });
+  const thread = threadWithHistory("thread-decision-dismiss-row", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await openTracker();
+  await option("Dismiss Q5 without answering (tells the agent nothing)").click();
+  await vi.waitFor(() =>
+    expect(dismissed).toEqual([{ threadId: thread.id, label: "Q5", sourceMessageId: "reply" }]),
+  );
+  // The row leaves with the snapshot; focus moves on to the next row's first answer.
+  await vi.waitFor(() =>
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      "Accept Q6: later (adds to your draft)",
+    ),
+  );
+  expect(app.draft()).toBe("");
+  expect(sentTexts()).toEqual([]);
+
+  const after = snapshotFor(thread);
+  await app.push({
+    ...after,
+    questions: after.questions.map((question) =>
+      question.label === "Q5"
+        ? { ...question, state: "dismissed" as const, resolvedAt: "2026-01-01T00:02:00.000Z" }
+        : question,
+    ),
+    openCount: 2,
+  });
+  await expect.element(tracker.accept("Q5", "no")).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Decisions", exact: true }).click();
+  const section = page.getByRole("region", { name: "Dismissed", exact: true });
+  await expect.element(section.getByText("Settle Q5?")).toBeVisible();
+  await expect.element(section.getByRole("button", { name: "Reopen Q5" })).toBeEnabled();
+  await expect.element(page.getByText("1 dismissed")).toBeVisible();
+});
+
+it("a sent message hides the open questions until the judge has read it", async () => {
+  const thread = threadWithHistory("thread-decision-hold-judged", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await openTracker();
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+  await expect.element(tracker.accept("Q5", "no")).toBeVisible();
+
+  await userEvent.click(editor());
+  await userEvent.keyboard("Q4: only on main{Enter}");
+  await vi.waitFor(() => expect(sentTexts()).toEqual(["Q4: only on main"]));
+  await expect.element(accept("Q4", "yes")).not.toBeInTheDocument();
+  expect(document.querySelector("[data-thread-decision]")).toBeNull();
+  await expect.element(page.getByText("Reading your message")).toBeVisible();
+  await expect.element(page.getByRole("button", { name: "Questions", exact: true })).toBeVisible();
+
+  // The judge read it and closed Q4: the rest come back.
+  const [sent] = sentMessages();
+  const after = snapshotFor(thread);
+  await app.push({
+    ...after,
+    questions: after.questions.map((question) =>
+      question.label === "Q4" ? { ...question, state: "answered" as const } : question,
+    ),
+    openCount: 2,
+    lastTypedMessageRead: sent!.messageId,
+  });
+  await expect.element(accept("Q5", "no")).toBeVisible();
+  await expect.element(tracker.accept("Q6", "later")).toBeVisible();
+  await expect.element(page.getByText("Reading your message")).not.toBeInTheDocument();
+});
+
+it("a sent message's questions come back when its run ends, though the judge never read it", async () => {
+  const thread = threadWithHistory("thread-decision-hold-run", 1);
+  await using _app = await openThread(thread, { acceptCommands: true });
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+  await userEvent.click(editor());
+  await userEvent.keyboard("Tell me more{Enter}");
+  await vi.waitFor(() => expect(sentTexts()).toEqual(["Tell me more"]));
+  await expect.element(accept("Q4", "yes")).not.toBeInTheDocument();
+
+  const [sent] = sentMessages();
+  const running = runningRun(thread.id, "thread-decision-hold-run-run-1", 2, sent!.messageId);
+  await emitThreadEvent(thread.id, { type: "run.updated", payload: running });
+  await emitThreadEvent(thread.id, {
+    type: "turn-item.updated",
+    payload: userItem(thread.id, running.id, sent!.messageId, 2, "Tell me more"),
+  });
+  // The server has the message and its run still runs: still held.
+  await expect.element(page.getByText("Tell me more")).toBeVisible();
+  expect(document.querySelector("[data-thread-decision]")).toBeNull();
+
+  await emitThreadEvent(thread.id, {
+    type: "run.updated",
+    payload: { ...running, status: "completed", completedAt: running.requestedAt },
+  });
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+});
+
+it("the card's Dismiss waits while the draft answers its question, and hands focus on", async () => {
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, () => Effect.void);
+  const thread = threadWithHistory("thread-decision-dismiss-focus", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await answer("Q4").click();
+  await vi.waitFor(() => expect(app.draft()).toBe("Q4: "));
+  await expect.element(dismissCard("Q4")).toBeDisabled();
+  app.setDraft("");
+  await expect.element(dismissCard("Q4")).toBeEnabled();
+
+  // The card moves on to the next question, and focus stays on its row.
+  await dismissCard("Q4").click();
+  await expect.element(accept("Q5", "no")).toBeVisible();
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Hide Q5");
+});
+
+it("Undo says it is reopening until the reopen is done", async () => {
+  let release = () => {};
+  const done = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, () => Effect.void);
+  using _reopen = answerRpc(WS_METHODS.threadDecisionsReopen, () => Effect.promise(() => done));
+  const thread = threadWithHistory("thread-decision-undo-pending", 1);
+  await using _app = await openThread(thread, { acceptCommands: true });
+  await dismissCard("Q4").click();
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect.element(page.getByText("Reopening Q4…")).toBeVisible();
+  await expect.element(page.getByText("It goes back to Questions.")).toBeVisible();
+  await expect.element(page.getByText(/^Nothing was sent/)).not.toBeInTheDocument();
+  await expect.element(page.getByRole("button", { name: "Undo", exact: true })).toBeDisabled();
+  release();
+  await expect.element(page.getByText("Reopening Q4…")).not.toBeInTheDocument();
+});
+
+it("a send's hold keeps the card's question and collapse", async () => {
+  const thread = threadWithHistory("thread-decision-hold-keeps-view", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await page.getByRole("button", { name: "Next question" }).click();
+  await page.getByRole("button", { name: "Hide Q5", exact: true }).click();
+  await expect.element(accept("Q5", "no")).not.toBeInTheDocument();
+
+  await userEvent.click(editor());
+  await userEvent.keyboard("Tell me more{Enter}");
+  await vi.waitFor(() => expect(sentTexts()).toEqual(["Tell me more"]));
+  await vi.waitFor(() => expect(document.querySelector("[data-thread-decision]")).toBeNull());
+
+  const [sent] = sentMessages();
+  await app.push({ ...snapshotFor(thread), lastTypedMessageRead: sent!.messageId });
+  await expect.element(page.getByRole("button", { name: "Show Q5", exact: true })).toBeVisible();
+  await expect.element(page.getByText("2/3")).toBeVisible();
+});
+
+it("dismissing the card's last question hands focus to the composer", async () => {
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, () => Effect.void);
+  const thread = threadWithHistory("thread-decision-dismiss-last", 1);
+  await using _app = await openThread(
+    thread,
+    { acceptCommands: true },
+    { questions: [open("Q4", "yes", "it stopped cleanly")] },
+  );
+  await dismissCard("Q4").click();
+  await vi.waitFor(() => expect(editor().element().contains(document.activeElement)).toBe(true));
+});
+
+it("dismissing the Tracker's last open question hands focus to the composer", async () => {
+  using _dismiss = answerRpc(WS_METHODS.threadDecisionsDismiss, () => Effect.void);
+  const thread = threadWithHistory("thread-decision-dismiss-last-row", 1);
+  await using _app = await openThread(
+    thread,
+    { acceptCommands: true },
+    { questions: [open("Q4", "yes", "it stopped cleanly")] },
+  );
+  await openTracker();
+  // The row's, which reads "Dismiss"; the card's is its ✕, with the same name.
+  await page.getByText("Dismiss", { exact: true }).click();
+  await vi.waitFor(() => expect(editor().element().contains(document.activeElement)).toBe(true));
 });

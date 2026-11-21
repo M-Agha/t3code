@@ -14,7 +14,11 @@ import {
 export const ThreadDecisionLabel = Schema.String.check(Schema.isPattern(/^Q\d+$/));
 export type ThreadDecisionLabel = typeof ThreadDecisionLabel.Type;
 
-export const ThreadDecisionState = Schema.Literals(["open", "answered", "dropped"]);
+/**
+ * `dropped`: a message said it is not a decision; `dismissed`: the user closed it on the card or the
+ * Tracker, and nothing told the agent.
+ */
+export const ThreadDecisionState = Schema.Literals(["open", "answered", "dropped", "dismissed"]);
 export type ThreadDecisionState = typeof ThreadDecisionState.Type;
 
 export const ThreadDecisionQuestion = Schema.Struct({
@@ -149,14 +153,37 @@ export const ThreadDecisionsSnapshot = Schema.Struct({
   artifacts: ForwardCompatibleArray(ThreadArtifact),
   /** Every artifact of the thread, including those past the snapshot's limit. */
   artifactCount: Schema.Int,
+  /**
+   * The newest message a person typed that the message watermark has passed, so the judge (or the
+   * rules) has read it; null before one. The composer holds questions back until it names the
+   * message just sent (FORK.md, "Hidden while a send is judged").
+   */
+  lastTypedMessageRead: Schema.NullOr(MessageId).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
 });
 export type ThreadDecisionsSnapshot = typeof ThreadDecisionsSnapshot.Type;
 
-export const ThreadDecisionReopenInput = Schema.Struct({
+/**
+ * Dismiss's and Reopen's target: the question as the user saw it, so one asked again in the
+ * meantime (a new `sourceMessageId`) is not the one acted on.
+ */
+export const ThreadDecisionQuestionInput = Schema.Struct({
   threadId: ThreadId,
   label: ThreadDecisionLabel,
+  sourceMessageId: MessageId,
 });
-export type ThreadDecisionReopenInput = typeof ThreadDecisionReopenInput.Type;
+export type ThreadDecisionQuestionInput = typeof ThreadDecisionQuestionInput.Type;
+
+/** Run statuses that end a run. A completed turn is first persisted as `waiting` (RunExecutionService). */
+export const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
+  "waiting",
+  "completed",
+  "interrupted",
+  "failed",
+  "cancelled",
+  "rolled_back",
+]);
 
 export const ThreadParkInput = Schema.Struct({
   threadId: ThreadId,
