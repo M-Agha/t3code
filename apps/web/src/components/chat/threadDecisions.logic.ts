@@ -1,12 +1,14 @@
-import type {
-  ParkedContextRecord,
-  ThreadArtifact,
-  ThreadDecidedWithoutAsking,
-  ThreadDecisionQuestion,
-  ThreadDecisionsSnapshot,
-  ThreadParkedItem,
-  ThreadParkedKind,
+import {
+  ENDED_RUN_STATUSES,
+  type ParkedContextRecord,
+  type ThreadArtifact,
+  type ThreadDecidedWithoutAsking,
+  type ThreadDecisionQuestion,
+  type ThreadDecisionsSnapshot,
+  type ThreadParkedItem,
+  type ThreadParkedKind,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { parkKind } from "@t3tools/shared/sessionKit/parks";
 import { answerPart, closingFor, readReply } from "@t3tools/shared/sessionKit/decisions";
 
@@ -288,6 +290,89 @@ export const latestReplyOpenQuestions = (
   );
 };
 
+/** Who sent a message, as the server's `userAuthored` reads it (ThreadDecisions.ts). */
+interface Authorship {
+  readonly runId: string | null;
+  readonly createdBy?: string | undefined;
+  readonly idleCompaction?: unknown;
+  readonly senderThreadId?: unknown;
+  readonly scheduledTaskId?: unknown;
+  readonly linkedSender?: unknown;
+  readonly delegatedCompletion?: unknown;
+  readonly notification?: unknown;
+}
+
+/** A projected or optimistic message (an optimistic one has no `createdBy` yet: the composer's own). */
+export interface HoldMessage extends Authorship {
+  readonly id: string;
+  readonly role: string;
+}
+
+/** A timeline turn item; only `user_message` and `assistant_message` items carry a message. */
+export interface HoldTurnItem {
+  readonly item: Authorship & { readonly type: string; readonly messageId?: string };
+}
+
+const typedByUser = (message: Authorship) =>
+  (message.createdBy === undefined || message.createdBy === "user") &&
+  message.idleCompaction === undefined &&
+  message.senderThreadId === undefined &&
+  message.scheduledTaskId === undefined &&
+  message.linkedSender === undefined &&
+  message.delegatedCompletion === undefined &&
+  message.notification === undefined;
+
+/**
+ * True while open questions are held back: the user's newest typed message (an unsent one, else the
+ * newest in the server's order of those queued outside the timeline and the timeline's last) is neither
+ * read by the server nor done. Read: the snapshot's `lastTypedMessageRead`, the newest typed message the
+ * server has read in that same order, names it. FORK.md, "Hidden while a send is judged".
+ */
+export const questionsHeld = (input: {
+  readonly snapshot: ThreadDecisionsSnapshot | null;
+  /** The timeline's turn items, in order. */
+  readonly timeline: ReadonlyArray<HoldTurnItem>;
+  /** The projection's messages, which may be partial, with the server's times. */
+  readonly projected: ReadonlyArray<HoldMessage & { readonly createdAt: DateTime.Utc }>;
+  readonly optimistic: ReadonlyArray<HoldMessage>;
+  readonly runs: ReadonlyArray<{ readonly id: string; readonly status: string }>;
+}) => {
+  const { snapshot } = input;
+  if (snapshot === null || snapshot.openCount === 0) return false;
+  const inTimeline = new Set(
+    input.timeline.flatMap(({ item }) => (item.messageId === undefined ? [] : [item.messageId])),
+  );
+  const typed = (message: HoldMessage) => message.role === "user" && typedByUser(message);
+  const timelineSent = input.timeline.findLast(
+    ({ item }) => item.type === "user_message" && typedByUser(item),
+  )?.item;
+  // The server's (created_at, message_id) order: a steer typed after a queued message is newer, though
+  // the queued one is outside the timeline. The timeline's message can lack a projected time; it then
+  // counts as newest, so the hold waits for it rather than lifting on an older message.
+  const timelineAt = input.projected.find((message) => message.id === timelineSent?.messageId);
+  const candidates = [
+    ...input.projected
+      .filter((message) => typed(message) && !inTimeline.has(message.id))
+      .map((message) => ({ ...message, at: DateTime.toEpochMillis(message.createdAt) })),
+    ...(timelineSent?.messageId === undefined
+      ? []
+      : [
+          {
+            id: timelineSent.messageId,
+            runId: timelineSent.runId,
+            at: timelineAt === undefined ? Infinity : DateTime.toEpochMillis(timelineAt.createdAt),
+          },
+        ]),
+  ];
+  const sent =
+    input.optimistic.findLast(typed) ??
+    candidates.toSorted((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).at(-1);
+  if (sent === undefined) return false;
+  const status = input.runs.find((run) => run.id === sent.runId)?.status;
+  if (status !== undefined && ENDED_RUN_STATUSES.has(status)) return false;
+  return snapshot.lastTypedMessageRead !== sent.id;
+};
+
 export const resolvedQuestions = (snapshot: ThreadDecisionsSnapshot | null) =>
   (snapshot?.questions ?? [])
     .filter((question) => question.state !== "open")
@@ -426,6 +511,14 @@ export const rowFocusAfter = <Id>(
   const still = (id: Id) => shown.includes(id);
   return order.slice(index + 1).find(still) ?? order.slice(0, index).reverse().find(still) ?? null;
 };
+
+/** The neighbour that takes focus when `leaving` goes and the rest of `order` stays. */
+export const neighbourOf = <Id>(order: ReadonlyArray<Id>, leaving: Id) =>
+  rowFocusAfter(
+    order,
+    leaving,
+    order.filter((id) => id !== leaving),
+  );
 
 /**
  * The Artifacts surface's groups, each in the snapshot's order (latest first). Not found comes first

@@ -62,6 +62,7 @@ const setup = (artifacts: ReadonlyArray<ThreadArtifact>) => {
     parkedOpenCount: 0,
     artifacts,
     artifactCount: artifacts.length,
+    lastTypedMessageRead: null,
   };
   state.command.mockReset().mockResolvedValue({ _tag: "Success" });
   state.unlink.mockReset().mockResolvedValue({ _tag: "Success" });

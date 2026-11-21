@@ -358,12 +358,13 @@ import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/Compos
 import {
   type ThreadDecisionActions,
   threadDecisionsBannerItem,
+  useDismissWithUndo,
   useDraftActions,
   useParkedDraft,
   useReopenWithUndo,
   useThreadDecisions,
 } from "./chat/ThreadDecisions";
-import { asDraftLine, questionsClosedByDraft } from "./chat/threadDecisions.logic";
+import { asDraftLine, questionsClosedByDraft, questionsHeld } from "./chat/threadDecisions.logic";
 import { OLDER_KIND_WORD, type ParkCommand } from "@t3tools/shared/sessionKit/parks";
 import { modelFallbackBannerItem } from "./chat/ComposerUsageLimits";
 import { ComposerSurface } from "./chat/ComposerSurface";
@@ -2134,6 +2135,14 @@ export default function ChatView(props: ChatViewProps) {
     ),
     parked: parkedDraft.actions,
     reopen: useReopenWithUndo(),
+    dismiss: useDismissWithUndo(),
+    questionsHeld: questionsHeld({
+      snapshot: threadDecisions,
+      timeline: serverVisibleTurnItems,
+      projected: serverProjection?.messages ?? [],
+      optimistic: optimisticUserMessages,
+      runs: serverProjection?.runs ?? [],
+    }),
   };
   const queuedRunsControlRef = useRef<QueuedRunsControlHandle>(null);
 
