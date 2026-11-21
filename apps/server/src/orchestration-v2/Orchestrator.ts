@@ -4960,6 +4960,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       markUnreadVisitedAt = DateTime.subtract(latestRunCompletedAt, { milliseconds: 1 });
+      // Fork (Mark unread from here): from a message's time, clamped to the latest run's end so
+      // a later or future time marks from that run.
+      if (command.from !== undefined) {
+        const from = DateTime.make(command.from);
+        if (Option.isNone(from)) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Thread ${command.threadId} unread time ${command.from} is not a valid timestamp.`,
+          });
+        }
+        markUnreadVisitedAt = DateTime.subtract(DateTime.min(from.value, latestRunCompletedAt), {
+          milliseconds: 1,
+        });
+      }
     }
     const updatedThread: OrchestrationV2AppThread = (() => {
       switch (command.type) {
