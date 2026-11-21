@@ -48,6 +48,16 @@ const seedScript = `${repoRoot}scripts/fork/seed-runtime.sh`;
 const skipOnWindows = HostProcess.Platform.defaultValue() === "win32";
 const printsVersion = (version: string) => `#!/bin/sh\necho "t3 v${version}"\n`;
 
+// What a stand-in appended to a log, one entry per line; none when it never ran.
+const lines = (file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    return yield* fs.readFileString(file).pipe(
+      Effect.map((text) => text.split("\n").filter((line) => line !== "")),
+      Effect.orElseSucceed((): Array<string> => []),
+    );
+  });
+
 const fakeResult = (stdout = "", code = 0) => ({
   stdout,
   stderr: "",
@@ -372,20 +382,20 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
 
 it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
   const appName = "T3 Code (Fork).app";
-  const plist = (version: string) =>
+  const plistOf = (entries: string) =>
     [
       '<?xml version="1.0" encoding="UTF-8"?>',
       '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-      '<plist version="1.0"><dict>',
-      `<key>CFBundleShortVersionString</key><string>${version}</string>`,
-      "</dict></plist>",
+      `<plist version="1.0"><dict>${entries}</dict></plist>`,
       "",
     ].join("\n");
+  const plist = (version: string) =>
+    plistOf(`<key>CFBundleShortVersionString</key><string>${version}</string>`);
 
-  // A repo with the two scripts and a release/, a HOME with ~/.t3 and a database but no service unit,
-  // an Applications folder, and stand-ins for what would touch the machine: pgrep (no app runs),
-  // launchctl (the service runs when SERVICE_RUNNING=1), mise (runs the rest with this node), and mv
-  // (KILL_AFTER_ASIDE=1 kills install.sh right after it moves the old app to the trash).
+  // The two scripts and a release/, a HOME with a database, and stand-ins: pgrep (an app runs while
+  // $HOME/app-running exists), launchctl (loaded while $HOME/service-loaded exists; logged), mise
+  // (runs the rest with this node; APP_STARTS=seed starts an app first), open (logged to events.log,
+  // fails with OPEN_FAILS=1), mv (KILL_AFTER_ASIDE=1 kills install.sh once the old app is trashed).
   const machine = Effect.fn(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -423,9 +433,26 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
       fs
         .writeFileString(path.join(bin, name), `#!/bin/bash\n${body}\n`)
         .pipe(Effect.andThen(fs.chmod(path.join(bin, name), 0o755)));
-    yield* tool("pgrep", "exit 1");
-    yield* tool("launchctl", '[ "$1" = print ] && [ "${SERVICE_RUNNING:-}" = 1 ]');
-    yield* tool("mise", 'shift 3; exec "$@"');
+    yield* tool(
+      "pgrep",
+      '[ -e "$HOME/app-running" ] || exit 1\n[ "$1" != -fl ] || echo "1 /Applications/T3 Code.app/Contents/MacOS/T3 Code"',
+    );
+    yield* tool("open", 'echo "open $*" >>"$HOME/events.log"\n[ "${OPEN_FAILS:-}" != 1 ]');
+    yield* tool(
+      "launchctl",
+      [
+        'echo "$*" >>"$HOME/launchctl.log"',
+        'case "$1" in',
+        '  print) [ -e "$HOME/service-loaded" ] ;;',
+        '  bootout) rm "$HOME/service-loaded" ;;',
+        '  bootstrap) touch "$HOME/service-loaded" ;;',
+        "esac",
+      ].join("\n"),
+    );
+    yield* tool(
+      "mise",
+      '[ "${APP_STARTS:-}" != seed ] || touch "$HOME/app-running"\nshift 3\nexec "$@"',
+    );
     yield* tool(
       "mv",
       '/bin/mv "$@" || exit\ncase "$2" in *"/trash/T3 Code (Fork)_"*) [ "${KILL_AFTER_ASIDE:-}" != 1 ] || kill -TERM $PPID ;; esac',
@@ -438,11 +465,20 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
 
     // A runtime whose `t3 install` writes its launcher as upstream's does: staged in
     // T3CODE_INSTALL_BIN_DIR, renamed into place, and recorded by its real path in runtime/launchers,
-    // unless UNRECORDED=1 (upstream then only warns).
+    // unless UNRECORDED=1 (upstream then only warns; APP_STARTS=install starts an app first). Its
+    // `t3 service` logs who ran it and starts the service on its own version, unless SERVICE_FAILS=1.
     const runtime = (version: string) =>
       [
         "#!/bin/sh",
+        'if [ "$1" = service ]; then',
+        '  echo "$0 $*" >>"$HOME/service.log"',
+        '  [ "${SERVICE_FAILS:-}" != 1 ] || { echo "service failed" >&2; exit 1; }',
+        '  touch "$HOME/service-loaded"',
+        `  printf '{"protocol":4,"activeVersion":"${version}"}' >"$HOME/.t3/runtime/service-state.json"`,
+        "  exit",
+        "fi",
         'if [ "$1" = install ]; then',
+        '  [ "${APP_STARTS:-}" != install ] || touch "$HOME/app-running"',
         '  d="$T3CODE_INSTALL_BIN_DIR" && mkdir -p "$d" && printf \'#!/bin/sh\\nexec %s "$@"\\n\' "$0" >"$d/.t3-$$" &&',
         '    /bin/mv "$d/.t3-$$" "$d/t3" || exit',
         '  [ "${UNRECORDED:-}" = 1 ] || printf \'\\n%s/t3\\n\' "$(cd "$d" && pwd -P)" >>"$(dirname "$(dirname "$(dirname "$0")")")/launchers"',
@@ -488,10 +524,10 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         });
       });
 
-    const install = (env: Record<string, string> = {}) =>
+    const install = (env: Record<string, string> = {}, args: ReadonlyArray<string> = []) =>
       runner.run({
         command: path.join(repo, "scripts", "fork", "install.sh"),
-        args: [],
+        args: [...args],
         env: {
           HOME: home,
           T3CODE_HOME: undefined,
@@ -524,23 +560,57 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
       Effect.map((entries) => entries.filter((entry) => entry.startsWith("statev2.sqlite_"))),
       Effect.orElseSucceed((): Array<string> => []),
     );
-    // `t3 service install` leaves its unit, and the service state naming the runtime it runs.
-    const service = (activeVersion?: string) =>
+    const runtimeT3 = (version: string) => path.join(runtimeDir, "versions", version, "t3");
+    // `t3 service install` leaves its unit, and the service state, both naming the runtime it runs.
+    const service = (activeVersion: string) =>
       Effect.gen(function* () {
         yield* fs.writeFileString(
           path.join(home, "Library", "LaunchAgents", "com.t3tools.t3code.service.plist"),
-          "",
+          plistOf(
+            `<key>ProgramArguments</key><array><string>${runtimeT3(activeVersion)}</string></array>`,
+          ),
         );
-        if (activeVersion === undefined) return;
         yield* fs.writeFileString(
           path.join(runtimeDir, "service-state.json"),
           JSON.stringify({ protocol: 4, activeVersion }),
         );
       });
+    const loaded = (on: boolean) =>
+      on
+        ? fs.writeFileString(path.join(home, "service-loaded"), "")
+        : fs.remove(path.join(home, "service-loaded"), { force: true });
+    // ~/.config as a link into a dotfiles checkout whose doctor prints three steps.
+    const dotfiles = Effect.gen(function* () {
+      const checkout = path.join(root, "dotfiles");
+      yield* fs.makeDirectory(path.join(checkout, ".config"), { recursive: true });
+      yield* fs.writeFileString(
+        path.join(checkout, "doctor.sh"),
+        [
+          "#!/bin/sh",
+          'echo doctor >>"$HOME/events.log"',
+          "echo '✓ Machine file            2'",
+          "echo '✗ T3 Code                 3  ✗ 1'",
+          "echo '    ✗ T3 Code background service is installed but not running'",
+          "echo '✓ Editors                 2'",
+          "exit 2",
+          "",
+        ].join("\n"),
+      );
+      yield* fs.chmod(path.join(checkout, "doctor.sh"), 0o755);
+      yield* fs.symlink(path.join(checkout, ".config"), path.join(home, ".config"));
+    });
     return {
       home,
       apps,
       forkBin,
+      runtimeT3,
+      launchctlLog: lines(path.join(home, "launchctl.log")),
+      serviceLog: lines(path.join(home, "service.log")),
+      events: lines(path.join(home, "events.log")),
+      appQuits: fs.remove(path.join(home, "app-running"), { force: true }),
+      loaded,
+      isLoaded: fs.exists(path.join(home, "service-loaded")),
+      dotfiles,
       shimPath: path.join(t3Home, "bin", "t3"),
       shim,
       service,
@@ -554,13 +624,30 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
   });
 
   it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
-    "seeds before it moves the app, puts the previous app back on failure, and says which t3 to run",
+    "seeds before it moves the app, puts the previous app and service back on failure, and moves the service through the new runtime",
     () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const path = yield* Path.Path;
         const m = yield* machine();
         const restart = `run: "${m.shimPath}" service restart`;
+        // The version service-state.json names, which the unit's launcher runs.
+        const startedAgain = (version: string) =>
+          `started the background service again; it runs t3 ${version}.`;
+        const dest = path.join(m.apps, appName);
+        // What launchctl was asked to do since `from` entries, its reads left out.
+        const launchctlSince = (from: number) =>
+          m.launchctlLog.pipe(
+            Effect.map((log) =>
+              log
+                .slice(from)
+                .filter((line) => !line.startsWith("print"))
+                .map((line) => line.split(" ")[0]),
+            ),
+          );
+
+        // Only its one flag.
+        assert.equal((yield* m.install({}, ["--service-stopped", "x"])).code, 2);
 
         // The earlier build, with `t3` already its CLI. Its `t3 install` cannot record the launcher
         // (upstream only warns): refused, and the app is taken back out.
@@ -571,13 +658,18 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.include(unrecorded.stderr, "did not record");
         assert.isUndefined(yield* m.installedVersion);
 
-        // Seeded, its launcher written and recorded, installed; no service yet, so install one.
+        // Seeded, its launcher written and recorded, installed; no service yet, so none is started,
+        // and it says how to start one through this build's runtime. No dotfiles: no doctor.
         const first = yield* m.install();
         assert.equal(first.code, 0, first.stderr);
         assert.equal(yield* m.installedVersion, versions.earlier);
         assert.equal(yield* m.linked, versions.earlier);
-        assert.include(first.stdout, `on this build, run: "${m.shimPath}" service install`);
-        assert.notInclude(first.stdout, "stopped");
+        assert.include(first.stdout, "turn Local environment off");
+        assert.include(first.stdout, `run: "${m.runtimeT3(versions.earlier)}" service install`);
+        assert.include(first.stdout, "doctor's T3 Code step not run");
+        assert.deepEqual(yield* m.serviceLog, []);
+        // It opens the app it installed; the failed run above opened nothing.
+        assert.deepEqual(yield* m.events, [`open ${dest}`]);
         const backups = (yield* m.backups).length;
 
         // A T3CODE_HOME other than ~/.t3, which an app opened from Finder never sees: refused
@@ -589,28 +681,47 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.lengthOf(yield* m.backups, backups);
         assert.deepEqual(yield* m.seededVersions, [versions.earlier]);
 
-        // The service runs on the earlier build: refused before the backup, nothing changes.
+        // The service runs on the earlier build. Refused before the stop: it keeps running.
         yield* m.service(versions.earlier);
-        const busy = yield* m.install({ SERVICE_RUNNING: "1" });
-        assert.notEqual(busy.code, 0);
-        assert.include(busy.stderr, "launchctl bootout gui/");
-        assert.include(busy.stderr, `"${m.shimPath}" service restart starts it again`);
-        assert.notInclude(busy.stderr, restart);
-        assert.lengthOf(yield* m.backups, backups);
-        assert.deepEqual(yield* m.seededVersions, [versions.earlier]);
+        yield* m.loaded(true);
+        const busyElsewhere = yield* m.install({ T3CODE_HOME: path.join(m.home, "other") });
+        assert.notEqual(busyElsewhere.code, 0);
+        assert.isTrue(yield* m.isLoaded);
+        assert.notInclude((yield* m.launchctlLog).join("\n"), "bootout");
 
-        // Stopped for this run, then refused for its T3CODE_HOME: it still says how to start it again.
+        // Stopped by the owner, then refused: it says how to start it again, and leaves it stopped.
+        yield* m.loaded(false);
         const stoppedElsewhere = yield* m.install({ T3CODE_HOME: path.join(m.home, "other") });
         assert.notEqual(stoppedElsewhere.code, 0);
         assert.include(stoppedElsewhere.stderr, restart);
+        assert.isFalse(yield* m.isLoaded);
 
-        // No runtime archive: refused, the app stays, and the stopped service gets its command.
+        // Running, and no runtime archive: this run stops the service, is refused, and starts the
+        // service it stopped again; the app stays.
+        yield* m.loaded(true);
         yield* m.release(versions.current, { runtime: "missing" });
         const missing = yield* m.install();
         assert.notEqual(missing.code, 0);
         assert.include(missing.stderr, "no runtime archive");
-        assert.include(missing.stderr, restart);
+        assert.include(missing.stderr, startedAgain(versions.earlier));
+        assert.notInclude(missing.stderr, restart);
+        assert.isTrue(yield* m.isLoaded);
+        assert.deepEqual(yield* launchctlSince(0), ["bootout", "bootstrap"]);
         assert.equal(yield* m.installedVersion, versions.earlier);
+        assert.deepEqual(yield* m.serviceLog, []);
+
+        // Stopped by its caller (--service-stopped, auto-install.sh): started again as if this run
+        // had stopped it, and this run stops nothing itself.
+        yield* m.loaded(false);
+        const callerStopped = (yield* m.launchctlLog).length;
+        const missingStopped = yield* m.install({}, ["--service-stopped"]);
+        assert.notEqual(missingStopped.code, 0);
+        assert.include(missingStopped.stderr, startedAgain(versions.earlier));
+        assert.isTrue(yield* m.isLoaded);
+        assert.deepEqual(yield* launchctlSince(callerStopped), ["bootstrap"]);
+
+        // The failures below run with the service stopped by the owner.
+        yield* m.loaded(false);
 
         // The seed fails: it comes first, so the app is never moved.
         yield* m.release(versions.current, { runtime: "corrupt" });
@@ -618,6 +729,15 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.notEqual(unseeded.code, 0);
         assert.equal(yield* m.installedVersion, versions.earlier);
         assert.deepEqual(yield* m.seededVersions, [versions.earlier]);
+
+        // An app starts while the seed runs: refused before the app is replaced.
+        yield* m.release(versions.current);
+        const raced = yield* m.install({ APP_STARTS: "seed" });
+        yield* m.appQuits;
+        assert.notEqual(raced.code, 0);
+        assert.include(raced.stderr, "a T3 Code app started during the install");
+        assert.equal(yield* m.installedVersion, versions.earlier);
+        assert.include(raced.stderr, "put the previous fork app back");
 
         // The app cannot be replaced: the launcher stays on the installed app's runtime, and the
         // new runtime is left unnamed, for the prune.
@@ -646,31 +766,554 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.equal(yield* m.installedVersion, versions.earlier);
         assert.equal(yield* m.linked, versions.earlier);
         assert.include(unlinked.stderr, "put the previous fork app back");
+        assert.lengthOf(yield* m.events, 1);
 
-        // Installed, but `t3` is another app's CLI: open the fork app first.
+        // A service the owner stopped stays stopped after an install, which says how to start it.
+        const left = yield* m.install();
+        assert.equal(left.code, 0, left.stderr);
+        assert.equal(yield* m.installedVersion, versions.current);
+        assert.include(
+          left.stdout,
+          `left so. To run it on this build, run: "${m.runtimeT3(versions.current)}" service install`,
+        );
+        assert.deepEqual(yield* m.serviceLog, []);
+        assert.isFalse(yield* m.isLoaded);
+        assert.deepEqual(yield* m.events, [`open ${dest}`, `open ${dest}`]);
+
+        // Installed while the service runs on the earlier build and `t3` is another app's CLI: the
+        // service moves to this build through this build's own runtime, and doctor's T3 Code step
+        // shows, alone.
+        yield* m.release(versions.current);
+        yield* m.service(versions.earlier);
+        yield* m.loaded(true);
         yield* m.shim("0.1.11-nightly.20261119.4900");
+        yield* m.dotfiles;
         const installed = yield* m.install();
         assert.equal(installed.code, 0, installed.stderr);
         assert.equal(yield* m.installedVersion, versions.current);
         assert.equal(yield* m.linked, versions.current);
+        assert.deepEqual(yield* m.serviceLog, [`${m.runtimeT3(versions.current)} service install`]);
+        assert.isTrue(yield* m.isLoaded);
+        assert.include(installed.stdout, `runs on this build (${versions.current})`);
         assert.include(
           installed.stdout,
-          `Open T3 Code (Fork) once, then run: "${m.shimPath}" service install`,
+          "✗ T3 Code                 3  ✗ 1\n    ✗ T3 Code background service is installed but not running\n",
         );
-        assert.notInclude(installed.stdout, "on this build");
+        assert.notInclude(installed.stdout, "Machine file");
+        assert.notInclude(installed.stdout, "Editors");
+        // The app opens before the doctor runs.
+        assert.deepEqual((yield* m.events).slice(-2), [`open ${dest}`, "doctor"]);
         // Done: the previous app stays in the trash, and nothing is put back on the way out.
         const aside = /^Moved the previous fork app to (.+)\.$/m.exec(installed.stdout)?.[1] ?? "";
         assert.isTrue(yield* fs.exists(path.join(aside, "Contents", "Info.plist")), aside);
         assert.notInclude(installed.stderr, "install:");
 
         // The same build again, its service already on it, where `service install` would answer
-        // "already installed" and leave it stopped: restart it.
-        yield* m.shim(versions.current);
-        yield* m.service(versions.current);
-        const again = yield* m.install();
+        // "already installed" and leave it stopped: restart it. Its caller stopped it this time.
+        // The app does not open: said, and the install still succeeds.
+        yield* m.release(versions.current);
+        yield* m.loaded(false);
+        const again = yield* m.install({ OPEN_FAILS: "1" }, ["--service-stopped"]);
         assert.equal(again.code, 0, again.stderr);
-        assert.include(again.stdout, "The background service is stopped.");
-        assert.include(again.stdout, `on this build, run: "${m.shimPath}" service restart`);
+        assert.include(again.stderr, `could not open ${dest}; open it by hand.`);
+        assert.equal(
+          (yield* m.serviceLog).at(-1),
+          `${m.runtimeT3(versions.current)} service restart`,
+        );
+        assert.isTrue(yield* m.isLoaded);
+
+        // An app starts once the new app is in place: installed, but the service is neither moved
+        // nor started again while it runs (the app may host its own server); it says how to.
+        yield* m.release(versions.current);
+        const serviceRuns = (yield* m.serviceLog).length;
+        const lateApp = yield* m.install({ APP_STARTS: "install" });
+        yield* m.appQuits;
+        assert.notEqual(lateApp.code, 0);
+        assert.include(
+          lateApp.stderr,
+          `which is done; the background service stays stopped. Quit the app, then run: "${m.runtimeT3(versions.current)}" service restart`,
+        );
+        assert.notInclude(lateApp.stderr, "started the background service again");
+        assert.equal(yield* m.installedVersion, versions.current);
+        assert.lengthOf(yield* m.serviceLog, serviceRuns);
+        assert.isFalse(yield* m.isLoaded);
+
+        // The service step fails: said, the app stays installed, and the unit on disk starts again.
+        // Its plist still names the earlier runtime; the launcher runs service-state.json's.
+        yield* m.loaded(true);
+        yield* m.release(versions.current);
+        const opens = (yield* m.events).length;
+        const unstarted = yield* m.install({ SERVICE_FAILS: "1" });
+        assert.notEqual(unstarted.code, 0);
+        assert.include(unstarted.stderr, "service restart failed");
+        assert.include(unstarted.stderr, startedAgain(versions.current));
+        assert.isTrue(yield* m.isLoaded);
+        assert.equal(yield* m.installedVersion, versions.current);
+        assert.lengthOf(yield* m.events, opens);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+});
+
+it.layer(NodeServices.layer)("scripts/fork/auto-install.sh", (it) => {
+  const official = "com.t3tools.t3code";
+  const fork = "com.t3tools.t3code.fork";
+  const skip = HostProcess.Platform.defaultValue() !== "darwin";
+
+  // auto-install.sh, an install.sh that logs its arguments and what still runs (and runs INSTALL_HOOK),
+  // the tables it reads,
+  // and logged stand-ins: osascript ($HOME/running/<bundle id>; quit spares STUBBORN, runs QUIT_HOOK),
+  // pgrep ($HOME/helpers/<pid>), open, launchctl ($HOME/service-loaded) and sleep (runs SLEEP_HOOK).
+  const machine = Effect.fn(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const runner = yield* ProcessRunner.ProcessRunner;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-fork-auto-" });
+    const repo = path.join(root, "repo");
+    const home = path.join(root, "home");
+    const apps = path.join(root, "Applications");
+    const bin = path.join(root, "bin");
+    const forkApp = path.join(apps, "T3 Code (Fork).app");
+    const db = path.join(home, ".t3", "userdata", "statev2.sqlite");
+    for (const dir of [
+      path.join(repo, "scripts", "fork"),
+      path.join(forkApp, "Contents"),
+      path.join(home, ".t3", "userdata"),
+      path.join(home, "running"),
+      path.join(home, "helpers"),
+      bin,
+    ]) {
+      yield* fs.makeDirectory(dir, { recursive: true });
+    }
+    yield* fs.copyFile(
+      `${repoRoot}scripts/fork/auto-install.sh`,
+      path.join(repo, "scripts", "fork", "auto-install.sh"),
+    );
+    const script = (file: string, body: string) =>
+      fs
+        .writeFileString(file, `#!/bin/bash\n${body}\n`)
+        .pipe(Effect.andThen(fs.chmod(file, 0o755)));
+    yield* script(
+      path.join(repo, "scripts", "fork", "install.sh"),
+      [
+        'service=down; [ ! -e "$HOME/service-loaded" ] || service=up',
+        'echo "install.sh [$*]; apps running: [$(ls "$HOME/running" | tr "\\n" " ")]; service $service" >>"$HOME/install.log"',
+        'eval "${INSTALL_HOOK:-}"',
+        'exit "${INSTALL_EXIT:-0}"',
+      ].join("\n"),
+    );
+    yield* fs.writeFileString(
+      path.join(forkApp, "Contents", "Info.plist"),
+      `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${versions.current}</string></dict></plist>`,
+    );
+    yield* script(
+      path.join(bin, "osascript"),
+      [
+        'id="${2#*application id \\"}"; id="${id%%\\"*}"',
+        'case "$2" in',
+        '  *"is running") [ -e "$HOME/running/$id" ] && echo true || echo false ;;',
+        '  *"to quit") echo "quit $id" >>"$HOME/osascript.log"; [ "$id" = "${STUBBORN:-}" ] || rm -f "$HOME/running/$id"; eval "${QUIT_HOOK:-}" ;;',
+        "  *) exit 1 ;;",
+        "esac",
+      ].join("\n"),
+    );
+    yield* script(path.join(bin, "pgrep"), 'ls "$HOME/helpers" | grep .');
+    yield* script(path.join(bin, "open"), 'echo "$*" >>"$HOME/open.log"');
+    yield* script(
+      path.join(bin, "launchctl"),
+      [
+        'echo "$*" >>"$HOME/launchctl.log"',
+        'case "$1 $2" in',
+        '  "print "*.service) [ -e "$HOME/service-loaded" ] ;;',
+        '  "print "*) exit 1 ;;',
+        '  "bootout "*.service) rm "$HOME/service-loaded" ;;',
+        "esac",
+      ].join("\n"),
+    );
+    yield* script(
+      path.join(bin, "sleep"),
+      'echo "$*" >>"$HOME/sleep.log"\n[ -z "${SLEEP_HOOK:-}" ] || eval "$SLEEP_HOOK"',
+    );
+    // The columns the script reads, named as upstream's migrations name them.
+    yield* runner.run({
+      command: "sqlite3",
+      args: [
+        db,
+        "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT, title TEXT NOT NULL DEFAULT '', archived_at TEXT, deleted_at TEXT, active_provider_thread_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}');" +
+          "CREATE TABLE orchestration_v2_projection_runs (run_id TEXT, thread_id TEXT, status TEXT);" +
+          "CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT, thread_id TEXT, payload_json TEXT);" +
+          "CREATE TABLE orchestration_v2_projection_turn_items (thread_id TEXT, run_id TEXT, type TEXT, status TEXT, payload_json TEXT);",
+      ],
+    });
+    const sql = (statement: string) =>
+      runner.run({ command: "sqlite3", args: [db, statement] }).pipe(Effect.asVoid);
+    const running = (...ids: ReadonlyArray<string>) =>
+      Effect.forEach(ids, (id) => fs.writeFileString(path.join(home, "running", id), ""), {
+        discard: true,
+      });
+    const logs = path.join(home, "Library", "Logs", "T3 Code (Fork)");
+    const lock = path.join(logs, "auto-install.lock");
+    const holdLock = (pid: number) =>
+      fs
+        .makeDirectory(logs, { recursive: true })
+        .pipe(Effect.andThen(fs.symlink(String(pid), lock)));
+    const run = (args: ReadonlyArray<string>, env: Record<string, string | undefined> = {}) =>
+      runner.run({
+        command: path.join(repo, "scripts", "fork", "auto-install.sh"),
+        args: [...args],
+        env: {
+          HOME: home,
+          PATH: `${bin}:/usr/bin:/bin:/usr/sbin`,
+          T3_FORK_APPLICATIONS_DIR: apps,
+          T3_FORK_AUTO_INSTALL_POLL: "1",
+          T3_FORK_AUTO_INSTALL_WAIT: "5",
+          ...env,
+        },
+        timeout: Duration.seconds(60),
+      });
+    const lastLine = (stdout: string) => stdout.trimEnd().split("\n").at(-1) ?? "";
+    return {
+      home,
+      repo,
+      forkApp,
+      logs,
+      lock,
+      holdLock,
+      sql,
+      running,
+      helper: (pid: number) => fs.writeFileString(path.join(home, "helpers", String(pid)), ""),
+      serviceLoaded: fs.writeFileString(path.join(home, "service-loaded"), ""),
+      run,
+      lastLine,
+      osascript: lines(path.join(home, "osascript.log")),
+      opened: lines(path.join(home, "open.log")),
+      installs: lines(path.join(home, "install.log")),
+      launchctl: lines(path.join(home, "launchctl.log")),
+      sleeps: lines(path.join(home, "sleep.log")),
+      lockHolders: lines(path.join(home, "lock.log")),
+      // The link, not what it names (a pid, no file).
+      lockHeld: fs.readLink(lock).pipe(
+        Effect.as(true),
+        Effect.orElseSucceed(() => false),
+      ),
+    };
+  });
+
+  it.effect.skipIf(skip)(
+    "hands the run to a one-shot launchd job, and refuses while one runs or for another T3 home",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const runner = yield* ProcessRunner.ProcessRunner;
+        const m = yield* machine();
+        // Another home holds other runs and another database: refused, and no job.
+        const elsewhere = yield* m.run([], { T3CODE_HOME: "/elsewhere" });
+        assert.notEqual(elsewhere.code, 0);
+        assert.include(elsewhere.stderr, "unset T3CODE_HOME (it is /elsewhere)");
+        assert.deepEqual(yield* m.launchctl, []);
+
+        // T3's own variables, as an agent shell inside T3 has them, stay out of the job.
+        const started = yield* m.run([], {
+          T3CODE_HOME: `${m.home}/.t3`,
+          T3CODE_PORT: "3773",
+        });
+        assert.equal(started.code, 0, started.stderr);
+        const [bootstrap = ""] = yield* m.launchctl;
+        const plist = /^bootstrap gui\/\d+ (.+\.plist)$/.exec(bootstrap)?.[1] ?? "";
+        assert.isTrue(yield* fs.exists(plist), bootstrap);
+        // plutil writes JSON for a container only, and `raw` for a single value.
+        const read = (key: string, format: "json" | "raw") =>
+          runner
+            .run({ command: "plutil", args: ["-extract", key, format, "-o", "-", plist] })
+            .pipe(Effect.map((result) => result.stdout.trim()));
+        const label = yield* read("Label", "raw");
+        assert.match(label, /^com\.t3tools\.t3code\.fork\.auto-install\./);
+        assert.equal(yield* read("KeepAlive", "raw"), "false");
+        assert.deepEqual(JSON.parse(yield* read("ProgramArguments", "json")), [
+          "/bin/bash",
+          `${m.repo}/scripts/fork/auto-install.sh`,
+          "--run",
+          label,
+        ]);
+        assert.deepEqual(
+          Object.keys(JSON.parse(yield* read("EnvironmentVariables", "json"))).toSorted(),
+          ["HOME", "LANG", "PATH"],
+        );
+        assert.include(started.stdout, `Log: ${m.logs}/auto-install_`);
+
+        // A run holds the lock (a link naming its pid): refused, and no second job.
+        yield* m.holdLock(process.pid);
+        const second = yield* m.run([]);
+        assert.notEqual(second.code, 0);
+        assert.include(
+          second.stderr,
+          `another one runs (pid ${process.pid}, holding ${m.lock}); its log is in ${m.logs}. If pid ${process.pid} is not an auto-install, remove ${m.lock}.`,
+        );
+        assert.lengthOf(yield* m.launchctl, 1);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  it.effect.skipIf(skip)(
+    "waits until no run is active, quits every T3 Code app, and installs; opens the fork itself only after a failure",
+    () =>
+      Effect.gen(function* () {
+        const m = yield* machine();
+        yield* m.sql(
+          "INSERT INTO orchestration_v2_projection_threads (thread_id, deleted_at) VALUES ('a', NULL), ('gone', '2026-01-01');" +
+            "INSERT INTO orchestration_v2_projection_runs VALUES ('r1', 'a', 'running'), ('r0', 'a', 'completed'), ('r9', 'gone', 'running');",
+        );
+        yield* m.running(official, fork);
+        // A lock left by a run that no longer exists is taken over.
+        yield* m.holdLock(99_999_999);
+        // The run ends while it waits; a run on a deleted thread never counts. The lock names this
+        // job's pid whenever it is read.
+        const done = yield* m.run(["--run", "job.label"], {
+          SLEEP_HOOK: `sqlite3 "$HOME/.t3/userdata/statev2.sqlite" "UPDATE orchestration_v2_projection_runs SET status = 'completed' WHERE run_id = 'r1'"; readlink "$HOME/Library/Logs/T3 Code (Fork)/auto-install.lock" >>"$HOME/lock.log"`,
+        });
+        assert.equal(done.code, 0, done.stderr);
+        assert.equal(m.lastLine(done.stdout), "auto-install: SUCCESS: install.sh finished");
+        // Busy once, then idle on two reads in a row.
+        assert.deepEqual(yield* m.sleeps, ["1", "1"]);
+        const holders = yield* m.lockHolders;
+        assert.lengthOf(holders, 2);
+        assert.match(holders[0] ?? "", /^\d+$/);
+        assert.notEqual(holders[0], "99999999");
+        assert.equal(holders[1], holders[0]);
+        assert.deepEqual(yield* m.osascript, [`quit ${official}`, `quit ${fork}`]);
+        // No service ran, so none was stopped for it.
+        assert.deepEqual(yield* m.installs, ["install.sh []; apps running: []; service down"]);
+        // install.sh opened the fork itself.
+        assert.deepEqual(yield* m.opened, []);
+        assert.include(yield* m.launchctl, `bootout gui/${process.getuid?.()}/job.label`);
+        assert.isFalse(yield* m.lockHeld);
+
+        // A failed install: the fork opens again on whatever is installed, and the line says so.
+        const failed = yield* m.run(["--run", "job.label"], { INSTALL_EXIT: "1" });
+        assert.equal(
+          m.lastLine(failed.stdout),
+          `auto-install: FAILED: install.sh exited 1; read its lines above; opened T3 Code (Fork).app ${versions.current}`,
+        );
+        assert.deepEqual(yield* m.opened, [m.forkApp]);
+
+        // A failed install while an app started meanwhile: a second app would be a second writer.
+        const late = yield* m.run(["--run", "job.label"], {
+          INSTALL_EXIT: "1",
+          INSTALL_HOOK: `touch "$HOME/running/${official}"`,
+        });
+        assert.equal(
+          m.lastLine(late.stdout),
+          `auto-install: FAILED: install.sh exited 1; read its lines above; did not open T3 Code (Fork).app, as a T3 Code app runs: ${official}`,
+        );
+        assert.deepEqual(yield* m.opened, [m.forkApp]);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  it.effect.skipIf(skip)(
+    "reads once more after the apps quit, waits again if a run started, then stops the service for install.sh",
+    () =>
+      Effect.gen(function* () {
+        const m = yield* machine();
+        const db = `"$HOME/.t3/userdata/statev2.sqlite"`;
+        yield* m.sql(
+          "INSERT INTO orchestration_v2_projection_threads (thread_id, deleted_at) VALUES ('a', NULL);",
+        );
+        yield* m.running(fork);
+        yield* m.serviceLoaded;
+        // A run starts on the service as the app quits, and ends while it waits again.
+        const late = yield* m.run(["--run", "job.label"], {
+          QUIT_HOOK: `sqlite3 ${db} "INSERT INTO orchestration_v2_projection_runs VALUES ('late', 'a', 'running')"`,
+          SLEEP_HOOK: `sqlite3 ${db} "UPDATE orchestration_v2_projection_runs SET status = 'completed'"`,
+        });
+        assert.equal(late.code, 0, late.stderr);
+        assert.include(late.stdout, "A run started while the apps quit; waiting again.");
+        // Idle twice, the read after the quit, then idle twice again.
+        assert.deepEqual(yield* m.sleeps, ["1", "1", "1"]);
+        assert.deepEqual(yield* m.osascript, [`quit ${fork}`]);
+        // Stopped after that read, by the job, and install.sh told so.
+        assert.deepEqual(yield* m.installs, [
+          "install.sh [--service-stopped]; apps running: []; service down",
+        ]);
+        assert.include(
+          yield* m.launchctl,
+          `bootout gui/${process.getuid?.()}/com.t3tools.t3code.service`,
+        );
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // A waiting run is a turn whose checkpoint is not captured yet. Background work outlives its run
+  // and a restart cancels it; work that lets the run complete anyway does not count
+  // (backgroundWorkHoldsCompletion).
+  it.effect.skipIf(skip)(
+    "counts a waiting run, and background work that holds, whatever its run's status",
+    () =>
+      Effect.gen(function* () {
+        const task = (fields: object) => JSON.stringify({ taskId: "t1", ...fields });
+        const provider = (id: string, ...tasks: ReadonlyArray<string>) =>
+          `INSERT INTO orchestration_v2_projection_provider_threads VALUES ('${id}', 'a', '{"pendingBackgroundTasks":[${tasks.join(",")}]}');`;
+        const item = (type: string, status: string, payload: object = {}, run = "r1") =>
+          `INSERT INTO orchestration_v2_projection_turn_items VALUES ('a', '${run}', '${type}', '${status}', '${JSON.stringify(payload)}');`;
+        // The thread's pull request watch, its checks still running: upstream marks it awaited.
+        const watch = `UPDATE orchestration_v2_projection_threads SET payload_json = '${JSON.stringify(
+          {
+            pullRequests: [
+              { host: "github.com", repository: "o/r", number: 1, watch: { checksPending: true } },
+            ],
+          },
+        )}';`;
+        // Name, r1's status, its thread's work, and whether that reads as active.
+        const cases: ReadonlyArray<readonly [string, string, string, boolean]> = [
+          ["a waiting run and no work", "waiting", "", true],
+          ["a completed run and no work", "completed", "", false],
+          [
+            "an awaited command",
+            "completed",
+            provider("p1", task({ kind: "command", awaited: true })),
+            true,
+          ],
+          ["a background subagent", "completed", provider("p1", task({ kind: "subagent" })), true],
+          [
+            "a task of a kind this does not know",
+            "completed",
+            provider("p1", task({ kind: "x" })),
+            true,
+          ],
+          ["a task with no kind", "completed", provider("p1", task({})), true],
+          [
+            "a monitor not awaited, and a pull request watch",
+            "completed",
+            provider("p1", task({ kind: "monitor" })) + watch,
+            false,
+          ],
+          [
+            "an awaited command on a provider thread no longer active",
+            "completed",
+            provider("p0", task({ kind: "command", awaited: true })),
+            false,
+          ],
+          ["a running subagent item", "completed", item("subagent", "running"), true],
+          [
+            "a pending dynamic tool",
+            "completed",
+            item("dynamic_tool", "pending", { input: {} }),
+            true,
+          ],
+          [
+            "a persistent dynamic tool",
+            "completed",
+            item("dynamic_tool", "running", { input: { persistent: true } }),
+            false,
+          ],
+          ["a running command item", "completed", item("command_execution", "running"), false],
+          [
+            "a subagent item of a rolled-back run",
+            "completed",
+            item("subagent", "running", {}, "r0") +
+              "INSERT INTO orchestration_v2_projection_runs VALUES ('r0', 'a', 'rolled_back');",
+            false,
+          ],
+        ];
+        for (const [name, status, work, busy] of cases) {
+          const m = yield* machine();
+          // The service runs, so the database is read.
+          yield* m.serviceLoaded;
+          yield* m.sql(
+            "INSERT INTO orchestration_v2_projection_threads (thread_id, title, deleted_at, active_provider_thread_id) VALUES ('a', 'A', NULL, 'p1');" +
+              `INSERT INTO orchestration_v2_projection_runs VALUES ('r1', 'a', '${status}');` +
+              work,
+          );
+          const result = yield* m.run(["--run", "job.label"], { T3_FORK_AUTO_INSTALL_WAIT: "1" });
+          assert.equal(
+            m.lastLine(result.stdout),
+            busy
+              ? 'auto-install: FAILED: threads/background work still active after 1s: a "A"; nothing was installed'
+              : "auto-install: SUCCESS: install.sh finished",
+            name,
+          );
+        }
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  it.effect.skipIf(skip)(
+    "changes nothing while runs stay active past its bound, or another run holds the lock",
+    () =>
+      Effect.gen(function* () {
+        const m = yield* machine();
+        yield* m.sql(
+          "INSERT INTO orchestration_v2_projection_threads (thread_id, title, archived_at, deleted_at) VALUES ('a', 'Stuck', '2026-01-01', NULL), ('b', 'Done', NULL, NULL);" +
+            "INSERT INTO orchestration_v2_projection_runs VALUES ('r1', 'a', 'queued'), ('r2', 'b', 'completed');",
+        );
+        yield* m.running(fork);
+        const busy = yield* m.run(["--run", "job.label"], { T3_FORK_AUTO_INSTALL_WAIT: "3" });
+        // The thread that holds it, by name, archived or not, logged once while the set stays.
+        assert.equal(
+          m.lastLine(busy.stdout),
+          'auto-install: FAILED: threads/background work still active after 3s: a "Stuck" (archived); nothing was installed',
+        );
+        assert.lengthOf(busy.stdout.split('Active: a "Stuck" (archived).'), 2);
+        assert.lengthOf(yield* m.sleeps, 3);
+        assert.deepEqual(yield* m.osascript, []);
+        assert.deepEqual(yield* m.installs, []);
+        assert.deepEqual(yield* m.opened, []);
+        assert.isFalse(yield* m.lockHeld);
+
+        yield* m.holdLock(process.pid);
+        const second = yield* m.run(["--run", "job.label"]);
+        assert.equal(
+          m.lastLine(second.stdout),
+          `auto-install: FAILED: another auto-install runs (pid ${process.pid}, holding ${m.lock}); this one changed nothing. If pid ${process.pid} is not an auto-install, remove ${m.lock}`,
+        );
+        assert.isTrue(yield* m.lockHeld);
+        assert.deepEqual(yield* m.installs, []);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  it.effect.skipIf(skip)(
+    "installs nothing while an app or its helper outlives the quit, and opens no second app beside it",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const m = yield* machine();
+        yield* m.running(official, fork);
+        const stuck = yield* m.run(["--run", "job.label"], { STUBBORN: official });
+        assert.match(
+          m.lastLine(stuck.stdout),
+          new RegExp(
+            `^auto-install: FAILED: still running after 60s: ${official.replaceAll(".", "\\.")}; nothing was installed; did not open T3 Code \\(Fork\\)\\.app, as a T3 Code app runs: ${official.replaceAll(".", "\\.")}$`,
+          ),
+        );
+        assert.deepEqual(yield* m.installs, []);
+        assert.deepEqual(yield* m.opened, []);
+
+        // The app quits, and a helper of it does not.
+        yield* fs.remove(path.join(m.home, "running", official));
+        yield* m.running(fork);
+        yield* m.helper(4242);
+        const helper = yield* m.run(["--run", "job.label"]);
+        assert.match(
+          m.lastLine(helper.stdout),
+          /^auto-install: FAILED: still running after 60s: pids 4242; nothing was installed; did not open T3 Code \(Fork\)\.app, as a T3 Code app runs: pids 4242$/,
+        );
+        assert.deepEqual(yield* m.installs, []);
+        yield* fs.remove(path.join(m.home, "helpers", "4242"));
+
+        // A run a crash left `running`, and no app or service that could run it: idle at once, with
+        // no second read (no sleep) to wait for a run to hand over.
+        const sleeps = (yield* m.sleeps).length;
+        yield* m.sql(
+          "INSERT INTO orchestration_v2_projection_threads (thread_id, deleted_at) VALUES ('a', NULL);" +
+            "INSERT INTO orchestration_v2_projection_runs VALUES ('r1', 'a', 'running');",
+        );
+        const stale = yield* m.run(["--run", "job.label"]);
+        assert.match(m.lastLine(stale.stdout), /^auto-install: SUCCESS/);
+        assert.include(stale.stdout, "No T3 Code app or service runs, so no run is active.");
+        assert.lengthOf(yield* m.sleeps, sleeps);
+        assert.lengthOf(yield* m.installs, 1);
+
+        // No app, no service, and no database to read: nothing can be running, so it goes ahead.
+        yield* fs.remove(path.join(m.home, ".t3"), { recursive: true });
+        const quiet = yield* m.run(["--run", "job.label"]);
+        assert.match(m.lastLine(quiet.stdout), /^auto-install: SUCCESS/);
+        assert.lengthOf(yield* m.installs, 2);
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 });

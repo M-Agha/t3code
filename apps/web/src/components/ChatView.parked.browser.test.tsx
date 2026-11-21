@@ -364,33 +364,37 @@ it("leaves no parked chip without its record after a stash restore or a paste", 
   expect(view.chips()).toHaveLength(1);
 });
 
-// Opus on #12 (r1 C4, r2, r3): ChatView's side chat wiring, in the parent's pane and at its own URL (not
-// embedded there). Older settled, as in upstream's side chat tab test (ChatView.browser.test.tsx), it
-// loads in any place but the file's first. Run alone (-t or .only), it is first and fails falsely.
+// Opus on #12 (r1 C4, r2, r3) and MAIN-105: a side chat (in its parent's pane, and at its own URL)
+// and a delegate_task subagent park nowhere. The side chat is older settled, as upstream's tab test
+// has it, so it loads in any place but the file's first: run alone (-t or .only), it fails falsely.
 it.each([
-  ["in its parent's pane", "parent"],
-  ["opened at its own URL", "side"],
-] as const)("refuses /park in a side chat %s, whose menu offers no /park", async (_name, route) => {
-  const parent = threadWithHistory(`parked-side-parent-${route}`, 1);
-  const side = {
-    ...threadWithHistory(`parked-side-${route}`, 1),
-    sideChatOf: parent.id,
-    olderSettled: true as const,
-  };
+  ["side chat in its parent's pane", "parent"],
+  ["side chat opened at its own URL", "side"],
+  ["subagent opened at its own URL", "subagent"],
+] as const)("refuses /park in a %s, whose menu offers no /park", async (_name, route) => {
+  const parent = threadWithHistory(`parked-${route}-parent`, 1);
+  const child =
+    route === "subagent"
+      ? { ...threadWithHistory("parked-subagent", 1), delegateOf: parent.id }
+      : {
+          ...threadWithHistory(`parked-side-${route}`, 1),
+          sideChatOf: parent.id,
+          olderSettled: true as const,
+        };
   const parks: unknown[] = [];
   using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
     parks.push(input);
     return Effect.void;
   });
   await page.viewport(1400, 900);
-  using _environment = installFakeEnvironment([parent, side]);
+  using _environment = installFakeEnvironment([parent, child]);
   __setClientSettingsForTests({ ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt: AT });
   if (route === "parent") {
-    useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, parent.id), side.id);
+    useRightPanelStore.getState().openThread(scopeThreadRef(ENVIRONMENT_ID, parent.id), child.id);
   } else {
-    useRightPanelStore.getState().show(scopeThreadRef(ENVIRONMENT_ID, side.id));
+    useRightPanelStore.getState().show(scopeThreadRef(ENVIRONMENT_ID, child.id));
   }
-  const shown = route === "parent" ? parent : side;
+  const shown = route === "parent" ? parent : child;
   const router = getRouter(
     createMemoryHistory({ initialEntries: [`/${ENVIRONMENT_ID}/${shown.id}`] }),
   );
@@ -399,8 +403,8 @@ it.each([
     // AppRoot brings its own router.
     router: false,
   });
-  const sideEditor = page.getByRole("textbox", { name: `Message ${side.title}`, exact: true });
-  await userEvent.click(sideEditor);
+  const childEditor = page.getByRole("textbox", { name: `Message ${child.title}`, exact: true });
+  await userEvent.click(childEditor);
   await userEvent.keyboard("/");
   const menuItem = (id: string) => document.querySelector(`[data-composer-item-id="${id}"]`);
   await vi.waitFor(() => expect(menuItem("slash:model")).not.toBeNull());
@@ -408,9 +412,13 @@ it.each([
 
   await userEvent.keyboard("park me fix the flaky test");
   await userEvent.keyboard("{Enter}");
-  await expect.element(page.getByText("A side chat can't park")).toBeVisible();
+  await expect
+    .element(
+      page.getByText(route === "subagent" ? "A subagent can't park" : "A side chat can't park"),
+    )
+    .toBeVisible();
   expect(parks).toEqual([]);
-  if (route === "side") {
+  if (route !== "parent") {
     // Its own panel offers Tracker (Q) but no Parked (K), which the server would refuse.
     const launcher = page.getByLabelText("Open a surface", { exact: true });
     await expect
