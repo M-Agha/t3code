@@ -608,7 +608,11 @@ export function applyOrchestrationV2ThreadVisit<Thread extends OrchestrationV2Ap
 
 /** A thread another agent drives: a local subagent or a task delegated from a linked environment. */
 export const isDelegatedAppThread = (
-  thread: Pick<OrchestrationV2AppThread, "lineage" | "delegatedFrom">,
+  // Fork-only: the null too, so client-runtime's EnvironmentThreadShell (none is null there) passes
+  // as it is (FORK.md).
+  thread: Pick<OrchestrationV2AppThread, "lineage"> & {
+    readonly delegatedFrom?: OrchestrationV2DelegatedFrom | null | undefined;
+  },
 ): boolean =>
   // MCP-launched threads store `delegatedFrom: null` at runtime, so check both absent shapes.
   thread.lineage.relationshipToParent === "subagent" || thread.delegatedFrom != null;
