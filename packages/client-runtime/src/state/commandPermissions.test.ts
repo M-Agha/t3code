@@ -228,6 +228,7 @@ describe("command permissions", () => {
   it.effect.each([
     WS_METHODS.scheduledTasksDelete,
     WS_METHODS.threadDecisionsReopen,
+    WS_METHODS.threadDecisionsDismiss,
     WS_METHODS.threadDecisionsPark,
     WS_METHODS.threadDecisionsUpdateParked,
     WS_METHODS.threadDecisionsLinkArtifact,

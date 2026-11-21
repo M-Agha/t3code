@@ -5,6 +5,7 @@ import {
   type ThreadDecisionQuestion,
   type ThreadParkedItem,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import { describe, expect, it } from "vite-plus/test";
 
 import { parkedContextRecord, parkedContextReference } from "../../lib/composerContextRecords";
@@ -32,6 +33,7 @@ import {
   parkedStatus,
   parkedTime,
   questionsClosedByDraft,
+  questionsHeld,
   rowFocusAfter,
   unfinishedLabels,
   withoutLine,
@@ -68,7 +70,88 @@ const snapshot = {
   parkedOpenCount: 0,
   artifacts: [],
   artifactCount: 0,
+  lastTypedMessageRead: null,
 };
+
+describe("holding questions back while a sent message is judged", () => {
+  const user = (messageId: string, runId: string | null, extra: object = {}) => ({
+    item: { type: "user_message", messageId, runId, createdBy: "user", ...extra },
+  });
+  const reply = (messageId: string, runId: string) => ({
+    item: { type: "assistant_message", messageId, runId },
+  });
+  const message = (id: string, runId: string | null, second = 0) => ({
+    id,
+    runId,
+    role: "user",
+    createdAt: DateTime.makeUnsafe(Date.UTC(2026, 0, 1, 0, 0, second)),
+  });
+  const timeline = [user("m1", "r1"), reply("a1", "r1"), user("m2", "r2")];
+  const runs = [
+    { id: "r1", status: "completed" },
+    { id: "r2", status: "running" },
+  ];
+  const read = (messageId: string | null) => ({
+    ...snapshot,
+    lastTypedMessageRead: messageId === null ? null : MessageId.make(messageId),
+  });
+  const held = (input: Partial<Parameters<typeof questionsHeld>[0]>) =>
+    questionsHeld({
+      snapshot: read("m1"),
+      timeline,
+      projected: [],
+      optimistic: [],
+      runs,
+      ...input,
+    });
+
+  it("holds open questions from the send until the server has read the message", () => {
+    expect(held({})).toBe(true);
+    expect(held({ snapshot: read("m2") })).toBe(false);
+    expect(held({ snapshot: read(null) })).toBe(true);
+  });
+
+  it("shows them once the message's run ends, though the judge has not read it", () => {
+    expect(held({ runs: [{ id: "r2", status: "waiting" }] })).toBe(false);
+    expect(held({ runs: [{ id: "r2", status: "queued" }] })).toBe(true);
+  });
+
+  it("holds from the moment of sending", () => {
+    const optimistic = message("m9", null);
+    expect(held({ snapshot: read("m2"), optimistic: [optimistic] })).toBe(true);
+    expect(held({ snapshot: read("m9"), optimistic: [optimistic] })).toBe(false);
+    // One the timeline already shows is not counted twice.
+    expect(held({ projected: [message("m1", "r1")], snapshot: read("m2") })).toBe(false);
+  });
+
+  it("takes the newest typed message in the server's order, queued or steered", () => {
+    // Queued behind r2, outside the timeline (ThreadDecisions.test.ts "names the newest typed message read, …").
+    const queued = {
+      runs: [...runs, { id: "r3", status: "queued" }],
+      projected: [message("m1", "r1", 1), message("m2", "r2", 2), message("m3", "r3", 3)],
+    };
+    expect(held({ ...queued, snapshot: read("m2") })).toBe(true);
+    expect(held({ ...queued, snapshot: read("m3") })).toBe(false);
+    // Then a steer into the running r2, typed after the queued m3: the server names it once r2 ends.
+    const steered = {
+      ...queued,
+      timeline: [...timeline, user("m4", "r2")],
+      projected: [...queued.projected, message("m4", "r2", 4)],
+    };
+    expect(held({ ...steered, snapshot: read("m4") })).toBe(false);
+    expect(held({ ...steered, snapshot: read("m3") })).toBe(true);
+    // A timeline message the projection lacks counts as newest: the hold waits for it.
+    expect(held({ ...steered, projected: queued.projected, snapshot: read("m3") })).toBe(true);
+  });
+
+  it("holds nothing with no open question, or for a message no person typed", () => {
+    expect(held({ snapshot: { ...read("m1"), openCount: 0 } })).toBe(false);
+    const relayed = user("m3", "r2", { senderThreadId: "other" });
+    const agents = user("m4", "r2", { createdBy: "agent" });
+    expect(held({ timeline: [user("m1", "r1"), reply("a1", "r1"), relayed, agents] })).toBe(false);
+    expect(held({ timeline: [] })).toBe(false);
+  });
+});
 
 describe("thread decisions grouping", () => {
   it("shows the open questions of the reply that asked the newest open one in the strip", () => {
