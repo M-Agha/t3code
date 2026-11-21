@@ -59,7 +59,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.12-nightly.20261121.5024`, whose last upstream migration is 102.
+`v0.1.12-nightly.20261121.5038`, whose last upstream migration is 105.
 
 ### Questions and decisions
 
@@ -940,7 +940,7 @@ it fails instead. The steps below are what the script encodes and what stays a p
    without needing a fresh `upstream/main`.
    - Node comes from the **target's** `package.json` `engines.node` and may change between releases:
      `mise install node@<v>`, run git through `mise exec node@<v> -- git …` (the pre-commit hook
-     runs `vp staged`), and `vp i` once the rebase is done.
+     runs `vp staged`), and `node_modules/.bin/vp i` once the rebase is done.
 3. `git diff --name-status <tag> fork/main` lists every upstream file the fork modifies (`M`) and every
    file it adds (`A`). The modified ones are where conflicts happen.
    - Every upstream file the fork modifies, by its seam. `plan` looks for these full paths: a file
@@ -1169,7 +1169,8 @@ it fails instead. The steps below are what the script encodes and what stays a p
    target's Node (step 2):
    ```
    git worktree add --detach /tmp/t3-<n> <tag>
-   cd /tmp/t3-<n> && vp i && node <fork checkout>/scripts/fork/upstream-sync.ts suite
+   cd /tmp/t3-<n> && <fork checkout>/node_modules/.bin/vp i &&
+     node <fork checkout>/scripts/fork/upstream-sync.ts suite
    ```
    `suite` keeps the baseline at `<git common dir>/upstream-sync/baseline-<commit>.txt`, which every
    worktree of the checkout shares, and `verify` reads the target's from there unless
@@ -1276,15 +1277,16 @@ uninstall`, then reopen it.
 - `check:changed`'s "unused patches" step has failed intermittently on a pnpm peer-dependency warning
   (`@tiptap/core`), also on clean branches.
 - `apps/web/src/components/ChatView.browser.test.tsx` "a shortcut conditioned on rightPanelOpen sees
-  the thread's open right panel" times out when the whole file runs on this Mac, and passes alone. It
-  fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
-  tags, and on `fork/main` at 7c371b246e (5024).
-- `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"); use
-  the repo's `node_modules/.bin/vp`.
-- `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when
-  its real directory in a symlinked home …" fails on this Mac on the plain
-  `v0.1.12-nightly.20261121.5024` tag too (it returns no removed runtime), so `check:changed` fails
-  on it whenever the fork changes `pinnedRuntime.ts`.
+  the thread's open right panel" times out when the whole file runs on this Mac, and passes alone.
+  It fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
+  tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038` tag.
+- `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"), and
+  mise's `vp` shim now has no version set at all ("No version is set for shim: vp"); use the repo's
+  `node_modules/.bin/vp`, which upstream-sync puts on its children's PATH.
+- `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
+  real directory in a symlinked home …" fails on this Mac on the plain
+  `v0.1.12-nightly.20261121.5024` and `…5038` tags too (it returns no removed runtime), so
+  `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
   themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
 - Run tests by hand from a shell T3 Code started (an agent's terminal) with
