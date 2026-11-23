@@ -616,6 +616,28 @@ export const isDelegatedAppThread = (
   // MCP-launched threads store `delegatedFrom: null` at runtime, so check both absent shapes.
   thread.lineage.relationshipToParent === "subagent" || thread.delegatedFrom != null;
 
+/**
+ * Fork-only (MAIN-114): whether a thread holds parks. A side chat, a subagent, a delegated task and
+ * a workflow run's agent step never do; ThreadDecisions.park's SQL is held to this by its test.
+ */
+export const threadParks = (thread: Parameters<typeof isDelegatedAppThread>[0]): boolean =>
+  isListedThreadLineage(thread.lineage) && !isDelegatedAppThread(thread);
+
+/**
+ * Fork-only (MAIN-114): why `thread` holds no parks, for each refusal's own words; null when
+ * threadParks says it does.
+ */
+export const parkRefusal = (
+  thread: Parameters<typeof threadParks>[0],
+): "sideChat" | "subagent" | "workflowStep" | null => {
+  if (threadParks(thread)) return null;
+  if (thread.lineage.sideChat === true) return "sideChat";
+  if (isDelegatedAppThread(thread)) return "subagent";
+  // Limit: the last exclusion isListedThreadLineage names. One upstream adds there reads as a
+  // workflow step until it gets its own case here and in ThreadDecisions.park's SQL (FORK.md).
+  return "workflowStep";
+};
+
 /** Provider-native children cannot receive messages; T3 delegate_task children can. */
 export function isProviderNativeSubagentThread(
   thread: Pick<OrchestrationV2AppThread, "lineage" | "creationSource">,

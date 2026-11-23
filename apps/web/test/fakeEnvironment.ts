@@ -236,6 +236,8 @@ export interface FakeThread {
   readonly providerSubagentOf?: ThreadId;
   /** Fork (Parked): makes this a subagent T3 started under that thread (delegate_task), which takes messages. */
   readonly delegateOf?: ThreadId;
+  /** Fork (Parked): makes this a workflow run's agent step (MAIN-114). */
+  readonly workflowStep?: true;
   /** Makes this an older settled thread the shell leaves out; only its family read returns it. */
   readonly olderSettled?: true;
   readonly id: ThreadId;
@@ -341,6 +343,7 @@ function shellOf(thread: FakeThread): OrchestrationV2ThreadShell {
       parentThreadId: parentOf(thread) ?? null,
       relationshipToParent: thread.providerSubagentOf || thread.delegateOf ? "subagent" : null,
       ...(thread.sideChatOf ? { sideChat: true } : {}),
+      ...(thread.workflowStep ? { workflowStep: true } : {}),
     },
     forkedFrom: null,
     createdBy: thread.providerSubagentOf || thread.delegateOf ? "agent" : "user",

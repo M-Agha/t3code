@@ -5,6 +5,7 @@ import {
   MessageId,
   type OrchestrationV2Run,
   type OrchestrationV2StoredEvent,
+  parkRefusal,
   ProviderInstanceId,
   RunId,
   THREAD_ARTIFACTS_LIMIT,
@@ -1546,15 +1547,17 @@ it.effect("parks, edits, moves and resolves a thread's items", () =>
   }).pipe(Effect.provide(withDecisions)),
 );
 
-// park reads isDelegatedAppThread in SQL, from the stored payload: they must agree on every shape.
-it.effect("refuses to park exactly the threads isDelegatedAppThread names", () =>
+// park reads threadParks in SQL, from the stored payload: they must agree on every shape, and on
+// parkRefusal's reason (a side chat, a thread another agent drives, a workflow step: MAIN-114).
+it.effect("refuses to park exactly the threads threadParks rules out", () =>
   Effect.gen(function* () {
     const decisions = yield* ThreadDecisions.ThreadDecisions;
     const root = ThreadId.make("thread-root");
-    const lineage = (relationshipToParent: "fork" | "subagent" | null) => ({
+    const lineage = (relationshipToParent: "fork" | "subagent" | null, workflowStep?: boolean) => ({
       parentThreadId: relationshipToParent === null ? null : root,
       relationshipToParent,
       rootThreadId: root,
+      ...(workflowStep === undefined ? {} : { workflowStep }),
     });
     const delegatedFrom = {
       environmentId: EnvironmentId.make("linked"),
@@ -1569,7 +1572,17 @@ it.effect("refuses to park exactly the threads isDelegatedAppThread names", () =
       { lineage: lineage("subagent") },
       { lineage: lineage(null), delegatedFrom },
       { lineage: lineage("fork"), delegatedFrom },
+      // As the orchestrator stores an agent step's thread (Orchestrator.ts, `workflowRun`).
+      { lineage: lineage(null, true) },
+      { lineage: lineage(null, false) },
+      { lineage: lineage("subagent", true) },
+      { lineage: { ...lineage("fork"), sideChat: true } },
     ];
+    const MESSAGES = {
+      sideChat: ThreadDecisions.SIDE_CHAT_PARK_MESSAGE,
+      subagent: ThreadDecisions.SUBAGENT_PARK_MESSAGE,
+      workflowStep: ThreadDecisions.WORKFLOW_STEP_PARK_MESSAGE,
+    };
     const park = (id: ThreadId) =>
       decisions
         .park({ threadId: id, parkedBy: "user", items: [{ kind: "me", text: "real" }] })
@@ -1577,9 +1590,10 @@ it.effect("refuses to park exactly the threads isDelegatedAppThread names", () =
     for (const [index, shape] of shapes.entries()) {
       const id = ThreadId.make(`thread-shape-${index}`);
       yield* seed(null, id, shape);
+      const refusal = parkRefusal(shape);
       assert.equal(
         yield* park(id),
-        isDelegatedAppThread(shape) ? ThreadDecisions.SUBAGENT_PARK_MESSAGE : null,
+        refusal === null ? null : MESSAGES[refusal],
         JSON.stringify(shape),
       );
     }
