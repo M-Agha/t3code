@@ -840,6 +840,11 @@ stops before the install".
   place (a differing copy, an edit in the Workflows page, goes to `~/.claude/trash` first), so a
   branch switched in the checkout never changes what runs. A body changed while a run is unfinished
   is a new `version`, the old one kept until its runs end (the workflow skill's rule 3).
+- **Notifications** (the owner's Q75, MAIN-116; T3 raises none for a workflow question): every
+  question goes through `askAnnounced` in the file, which shows one on macOS in a
+  `notify-<question>` step before the `ask`; one that fails is noted on its step and the run still
+  asks. macOS credits them to Script Editor, which must be allowed in System Settings →
+  Notifications: osascript exits 0 even when nothing is shown.
 - **The install's idle check:** a workflow run holds an install only while code of it runs, never
   while it only waits; `active_runs` in `scripts/fork/auto-install.sh` says why.
 - **Where it lives:** in `evals/`, so `check:changed` typechecks it (evals' own typecheck, under the
