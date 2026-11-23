@@ -180,8 +180,7 @@ describe("composerParkDecision", () => {
     parkInFlight: false,
     hasNonPromptContent: false,
     threadStarted: true,
-    sideChat: false,
-    subagent: false,
+    parkRefusal: null,
   };
 
   it("parks the command's items", () => {
@@ -198,13 +197,14 @@ describe("composerParkDecision", () => {
     expect(composerParkDecision({ ...send, ...change })).toEqual({ kind: "pass" });
   });
 
-  it.each([
+  it.each<[string, Partial<Parameters<typeof composerParkDecision>[0]>]>([
     ["while editing a queued message", { editingQueuedRun: true }],
     ["while a park is in flight", { parkInFlight: true }],
     ["with attachments or context", { hasNonPromptContent: true }],
     ["before the thread started", { threadStarted: false }],
-    ["in a side chat, even a bare /park", { sideChat: true, prompt: "/park" }],
-    ["in a subagent, even a bare /park", { subagent: true, prompt: "/park" }],
+    ["in a side chat, even a bare /park", { parkRefusal: "sideChat", prompt: "/park" }],
+    ["in a subagent, even a bare /park", { parkRefusal: "subagent", prompt: "/park" }],
+    ["in a workflow step, even a bare /park", { parkRefusal: "workflowStep", prompt: "/park" }],
     ["when every item is a placeholder", { prompt: "/park tbd" }],
     ["when an item is too long", { prompt: `/park ${"x".repeat(4_001)}` }],
   ])("refuses %s", (_name, change) => {
