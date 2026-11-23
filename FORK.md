@@ -59,7 +59,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.12-nightly.20261121.5038`, whose last upstream migration is 105.
+`v0.1.12-nightly.20261123.5124`, whose last upstream migration is 110.
 
 ### Questions and decisions
 
@@ -1087,11 +1087,12 @@ it fails instead. The steps below are what the script encodes and what stays a p
      (`composerDraftStore.ts`, `composerContextRecords.ts`'s `buildMessageContext`,
      `composerContextPresentation.tsx`, `contextPresentationRegistry.ts`, `UserMessageContextChips.tsx`,
      `CollapsedComposerPromptPreview.tsx`, `ContextChip.tsx` and `contextChipAccents.ts`,
-     `ChatComposer.tsx`'s send context, pruning and copy, `useComposerSend.ts`, `ChatView.logic.ts`'s
-     send snapshot, `chatViewSend.ts`, `useQueuedRunEdit.ts`, `composerContextUndo.ts`,
-     `composerSend.logic.ts`, `useComposerStash.ts` and `composerInlineTokenPaste.ts`, which drop the
-     chip). Most hunks are a
-     `parked` line beside its `environment` twin; the rest carry a `Fork (Parked)` comment.
+     `apps/web/src/components/chat/ChatComposer.tsx`'s send context, pruning, copy and its detached
+     dictation send, `apps/web/src/components/chat/useComposerSend.ts` (with the send context it
+     re-reads after an image hold), `ChatView.logic.ts`'s send snapshot, `chatViewSend.ts`,
+     `useQueuedRunEdit.ts`, `composerContextUndo.ts`, `composerSend.logic.ts`, `useComposerStash.ts`
+     and `composerInlineTokenPaste.ts`, which drop the chip). Most hunks are a `parked` line beside
+     its `environment` twin; the rest carry a `Fork (Parked)` comment.
      `chatViewSend.ts` restores a refused send's parked chips through upstream's `withRestored`,
      keyed on `contextId`, as it restores the other kinds. Since 5024 a `/side` command starts its
      side chat with the draft's context (upstream refuses context only while answering a pending
@@ -1279,14 +1280,15 @@ uninstall`, then reopen it.
 - `apps/web/src/components/ChatView.browser.test.tsx` "a shortcut conditioned on rightPanelOpen sees
   the thread's open right panel" times out when the whole file runs on this Mac, and passes alone.
   It fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
-  tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038` tag.
+  tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038` and
+  `v0.1.12-nightly.20261123.5124` tags.
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"), and
   mise's `vp` shim now has no version set at all ("No version is set for shim: vp"); use the repo's
   `node_modules/.bin/vp`, which upstream-sync puts on its children's PATH.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
   real directory in a symlinked home …" fails on this Mac on the plain
-  `v0.1.12-nightly.20261121.5024` and `…5038` tags too (it returns no removed runtime), so
-  `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
+  `v0.1.12-nightly.20261121.5024`, `…5038` and `v0.1.12-nightly.20261123.5124` tags too (it returns
+  no removed runtime), so `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
   themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
 - Run tests by hand from a shell T3 Code started (an agent's terminal) with
