@@ -59,14 +59,16 @@ const write = (path: string, text: string) => {
 
 /**
  * Upstream with Nightly tags (`NEWER` adds migrations 111-112), fork/main on `BASE`, the checkout,
- * and a stand-in auto-install.sh that logs each launch. `installed`: the Fork app's version;
- * `release`: the build in release/; `hang`: upstream is reached over an ssh that never answers.
+ * a stand-in auto-install.sh that logs each launch, and a stand-in osascript that logs each
+ * notification. `installed`: the Fork app's version; `release`: the build in release/; `hang`:
+ * upstream is reached over an ssh that never answers; `notifyFails`: osascript exits 1.
  */
 const machine = (options: {
   readonly newer: boolean;
   readonly installed?: string;
   readonly release?: string;
   readonly hang?: boolean;
+  readonly notifyFails?: boolean;
 }) => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-upgrade-"));
   const upstream = NodePath.join(root, "upstream");
@@ -118,13 +120,23 @@ const machine = (options: {
       `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>${options.installed}</string></dict></plist>`,
     );
   }
+  const bin = NodePath.join(root, "bin");
+  const tool = (name: string, script: string) => {
+    write(NodePath.join(bin, name), `#!/bin/sh\n${script}`);
+    NodeFS.chmodSync(NodePath.join(bin, name), 0o755);
+  };
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+  // Every test, so none shows a real notification: the title and the text, the last two arguments.
+  const notifications = NodePath.join(root, "notifications.log");
+  tool(
+    "osascript",
+    `printf '%s|%s\\n' "$7" "$8" >>"${notifications}"\n${options.notifyFails === true ? 'echo "not allowed" >&2\nexit 1\n' : ""}`,
+  );
   const ssh = NodePath.join(root, "ssh.log");
   if (options.hang === true) {
     git(checkout, "remote", "set-url", "upstream", "ssh://example.invalid/upstream.git");
     // Found on PATH through the workflow's GIT_SSH_COMMAND; it outlives the fetch by a few seconds.
-    write(NodePath.join(root, "bin", "ssh"), `#!/bin/sh\necho "$@" >>"${ssh}"\nexec sleep 5\n`);
-    NodeFS.chmodSync(NodePath.join(root, "bin", "ssh"), 0o755);
-    process.env.PATH = `${NodePath.join(root, "bin")}:${process.env.PATH}`;
+    tool("ssh", `echo "$@" >>"${ssh}"\nexec sleep 5\n`);
     process.env.T3_FORK_FETCH_TIMEOUT_MS = "1000";
   }
   Object.assign(process.env, gitEnv, {
@@ -137,8 +149,44 @@ const machine = (options: {
     launches: () =>
       NodeFS.existsSync(launches) ? NodeFS.readFileSync(launches, "utf8").trim().split("\n") : [],
     ssh: () => (NodeFS.existsSync(ssh) ? NodeFS.readFileSync(ssh, "utf8") : ""),
+    notifications: () =>
+      NodeFS.existsSync(notifications)
+        ? NodeFS.readFileSync(notifications, "utf8").trim().split("\n")
+        : [],
   };
 };
+
+/**
+ * Q75: each question in `asks` (name → its notification's text) is announced by the step just
+ * before it, which the stand-in osascript showed.
+ */
+const announced = Effect.fn(function* (
+  workflows: Workflows.Workflows["Service"],
+  runId: string,
+  shownBy: ReadonlyArray<string>,
+  asks: Readonly<Record<string, string>>,
+) {
+  const { steps } = yield* workflows.get(runId);
+  const problems: Array<string> = [];
+  for (const [name, text] of Object.entries(asks)) {
+    const at = steps.findIndex((one) => one.kind === "ask" && one.name === name);
+    const before = steps[at - 1];
+    if (
+      at < 1 ||
+      before?.name !== `notify-${name}` ||
+      JSON.stringify(before.result) !== JSON.stringify({ outcome: "done", value: text })
+    ) {
+      problems.push(`${name} came after ${before?.name}: ${JSON.stringify(before?.result)}`);
+    }
+  }
+  const expected = Object.values(asks).map(
+    (question) => `T3 Code (Fork)|${question} ⌘K → Open workflows`,
+  );
+  if (JSON.stringify(shownBy) !== JSON.stringify(expected)) {
+    problems.push(`osascript showed ${JSON.stringify(shownBy)}, not ${JSON.stringify(expected)}`);
+  }
+  return problems;
+});
 
 /** The question the run asks under `name`, once it asks it, or nothing after ten seconds. */
 const asked = (workflows: Workflows.Workflows["Service"], runId: string, name: string) =>
@@ -200,7 +248,22 @@ const upgradeThenInstall = Effect.fn(function* (
 const clean = (turn: AgentTurnInput) =>
   step(turn) === "upgrade" ? { output: built("aaa111") } : { output: { findings: [] } };
 
-/** One test: the workflow in a server of its own, with `agent` for its agents; `body`'s problems. */
+/** One test: the workflow with `agent` for its agents; `check`'s problems. */
+const gradeIt = (
+  title: string,
+  agent: Case["scenarios"][number]["agent"],
+  check: Case["scenarios"][number]["check"],
+) =>
+  it.skipIf(macOnly)(title, async () => {
+    const problems = await grade(file, {
+      id: "fork-upstream-upgrade",
+      source: "evals/fork/upstream-upgrade.ts",
+      task: "",
+      scenarios: [{ name: title, agent, check }],
+    });
+    expect(problems).toEqual([]);
+  });
+/** One test: the workflow in one server lifetime, with `agent` for its agents; `body`'s problems. */
 const upgradeIt = (
   title: string,
   agent: Case["scenarios"][number]["agent"],
@@ -208,16 +271,7 @@ const upgradeIt = (
     workflows: Workflows.Workflows["Service"],
     world: World,
   ) => Effect.Effect<ReadonlyArray<string>, Workflows.WorkflowError>,
-) =>
-  it.skipIf(macOnly)(title, async () => {
-    const problems = await grade(file, {
-      id: "fork-upstream-upgrade",
-      source: "evals/fork/upstream-upgrade.ts",
-      task: "",
-      scenarios: [{ name: title, agent, check: (world) => world.server((w) => body(w, world)) }],
-    });
-    expect(problems).toEqual([]);
-  });
+) => gradeIt(title, agent, (world) => world.server((w) => body(w, world)));
 
 upgradeIt(
   "skips quietly when no Nightly is newer and fork/main's build is installed",
@@ -384,6 +438,73 @@ upgradeIt(
   }),
 );
 
+// Q75: a notification that cannot be shown is noted on its step; the run still asks.
+upgradeIt(
+  "asks even when the notification fails, and notes why on its step",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: true, notifyFails: true });
+    const runId = yield* start(workflows, "a");
+    if (Option.isNone(yield* asked(workflows, runId, "approve"))) {
+      return [`It never asked: ${JSON.stringify(yield* workflows.get(runId))}`];
+    }
+    const { steps } = yield* workflows.get(runId);
+    const result = steps.find((one) => one.name === "notify-approve")?.result as
+      | { outcome?: string; reason?: string }
+      | null
+      | undefined;
+    yield* answer(workflows, runId, "approve", { choice: "Not now" });
+    const ended = Option.getOrUndefined(
+      yield* world.reaches(workflows, runId, "stopped", "completed", "paused"),
+    );
+    return [
+      ...(result?.outcome === "failed" && result.reason?.includes("not allowed") === true
+        ? []
+        : [`notify-approve recorded ${JSON.stringify(result)}`]),
+      ...(m.notifications().length === 1
+        ? []
+        : [`osascript ran ${m.notifications().length} times.`]),
+      ...(ended?.status === "stopped" && ended.detail === `not upgraded to ${NEWER}`
+        ? []
+        : [`It ended ${ended?.status}: ${ended?.detail}`]),
+    ];
+  }),
+);
+
+// Q75: a notify step's result is kept, so a server restart that replays the run shows none again.
+gradeIt(
+  "shows a question's notification once, across a restart while it waits",
+  () => ({}),
+  Effect.fn(function* (world) {
+    const m = machine({ newer: false, installed: BASE_OLDER, release: BASE_BUILD });
+    const runId = yield* world.server(
+      Effect.fn(function* (workflows) {
+        const runId = yield* start(workflows, "a");
+        yield* asked(workflows, runId, "install");
+        return runId;
+      }),
+    );
+    const before = m.notifications();
+    return yield* world.server(
+      Effect.fn(function* (workflows) {
+        yield* answer(workflows, runId, "install", { choice: "Not now" });
+        const ended = Option.getOrUndefined(
+          yield* world.reaches(workflows, runId, "stopped", "completed", "paused"),
+        );
+        return [
+          ...(before.length === 1 ? [] : [`osascript ran ${before.length} times before.`]),
+          ...(JSON.stringify(m.notifications()) === JSON.stringify(before)
+            ? []
+            : [`After the restart osascript showed ${JSON.stringify(m.notifications())}.`]),
+          ...(ended?.status === "stopped" && ended.detail?.includes("not installed") === true
+            ? []
+            : [`It ended ${ended?.status}: ${ended?.detail}`]),
+        ];
+      }),
+    );
+  }),
+);
+
 upgradeIt(
   "upgrades, asks the agent's question, reviews, fixes, asks about a P1 left, then launches the install",
   (turn) => {
@@ -514,6 +635,14 @@ upgradeIt(
     if (m.launches().length !== 1) {
       problems.push(`auto-install.sh ran ${m.launches().length} times.`);
     }
+    problems.push(
+      ...(yield* announced(workflows, runId, m.notifications(), {
+        approve: `Upgrade the fork to ${NEWER}?`,
+        "owner-1": `The upgrade to ${NEWER} has a question for you.`,
+        blockers: `The fork on ${NEWER} has 1 blocker(s) left: go on anyway?`,
+        install: `Install the fork build ${FIXED_VERSION}?`,
+      })),
+    );
     return problems;
   }),
 );
