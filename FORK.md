@@ -55,6 +55,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: an answer sent mid-run stays answered when that run's reply asks again`            | Questions and decisions       |
 | `(fork) decisions: Dismiss closes a question without a message, and a send hides questions till read` | Questions and decisions       |
 | `(fork) timeline: Mark unread from here on agent messages, with a New divider and a jump on open`     | Mark unread from here         |
+| `(fork) workflows: a daily upstream-upgrade workflow, and workflow steps never park`                  | The daily upgrade workflow    |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -380,9 +381,19 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `/park` would open the parent's). The menu leaves `/park` out there too, and at its own URL the
   panel offers no Parked tab. A subagent (one T3 or a linked machine delegated: the contracts'
   `isDelegatedAppThread`) is refused the same way (MAIN-105): only the main thread parks on the
-  owner's list. The composer's refusal only saves a round trip: `ThreadDecisions.park` refuses a
-  side chat and a subagent for every caller (the Parked tab's field, `t3_park`, any client). A bare
-  `/park` opens the Parked surface.
+  owner's list. So is a workflow run's agent step (`lineage.workflowStep`, MAIN-114, 2026-11-23),
+  with its own words ("A workflow step can't park", `WORKFLOW_STEP_PARK_MESSAGE`): its thread is
+  read through its run, where no Parked tab is shown. One helper decides it on the client:
+  `threadParks` beside `isDelegatedAppThread` in `packages/contracts/src/orchestrationV2.ts`
+  (upstream's `isListedThreadLineage` and not delegated); `isDelegatedAppThread` stays upstream's
+  (its other callers decide prompt suggestions and thread lists by it). The composer's refusal only
+  saves a round trip: `ThreadDecisions.park` refuses the same threads in SQL for every caller (the
+  Parked tab's field, `t3_park`, any client), held equal to `threadParks` by "refuses to park
+  exactly the threads threadParks rules out" in `ThreadDecisions.test.ts`, and to `parkRefusal`
+  beside it (why not, for each refusal's words). The Command Palette offers no "Show parked items"
+  where `threadParks` says no. A bare `/park` opens the Parked surface. On conflict: if upstream's
+  `isListedThreadLineage` gains an exclusion, `ThreadDecisions.park`'s SQL and `parkRefusal` must
+  follow it (until then `parkRefusal` reads the new kind as a workflow step).
 - `t3_park` in the thread MCP toolkit, for every provider: its `kind` takes `agent` or `me`, and the
   old words, which `ThreadDecisions.ts` maps when it stores the row (`PARK_KIND_OF_WORD` in
   `packages/shared/src/sessionKit/parks.ts`, a total record that `parks.test.ts` holds equal to
@@ -393,7 +404,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   `agent-context-increase` label. It refuses delegated child threads itself, and passes on
   `ThreadDecisions.park`'s refusals as `invalid_request`: a side chat (`SIDE_CHAT_PARK_MESSAGE`, the
   one rule, as `/park`), a subagent (`SUBAGENT_PARK_MESSAGE`, for a caller other than `t3_park`,
-  which refuses one first) and placeholder text. Its eval cases
+  which refuses one first), a workflow step (`WORKFLOW_STEP_PARK_MESSAGE`) and placeholder text.
+  Its eval cases
   (`evals/mcp-tool-use/cases/parked.ndjson`) have only run with `--dry-run`; a real run is owed.
 - **Add to draft and Sent** (MAIN-75, the owner's Q55 design, 2026-11-20):
   - **A chip.** Add to draft (an open item for the agent) puts the item in the composer as a chip of
@@ -798,6 +810,61 @@ menu item" and answered Q64 "yes, with the divider" (2026-11-21; _rejected:_ the
   tool group's row ids or stops giving folds their `runId`, `rowHoldingEntry` and its tests go
   first. If upstream ships its own unread divider, stop and ask the owner (step 4).
 
+### The daily upgrade workflow
+
+The owner's Q73 (2026-11-23, MAIN-113): "once the fork is on 5124, build a small workflow that
+checks upstream daily, asks you whether to upgrade, and runs the upgrade and both reviews, then
+stops before the install".
+
+- **What runs:** `evals/fork/upstream-upgrade.ts`, a T3 workflow (upstream's Labs feature,
+  `docs/user/workflows.md`; it does nothing while Settings → Labs → Workflows is off). Its header
+  says what it does each morning; its steps, questions and briefs are in the file. The install
+  question and its launch (the owner's Q74, pending) are the `install` function, the run's last
+  steps, easy to take out.
+- **Decisions:** a run owns the checkout only once `approve` is answered Upgrade (its title then
+  starts with `Upgrading the fork`), until it ends: a run that only asks holds nothing, and every
+  question times out within the day. Its `claim` step records it as the owner in the workflow
+  store (`upstream-upgrade/checkout`), in a transaction, so of two runs answered Upgrade only the
+  first answered goes on. _Rejected:_ the earlier-started run wins (the review's first pick): a
+  run started earlier and answered later would upgrade beside the one already upgrading. A build
+  whose install the owner answered Not now (`upstream-upgrade/declined-build`) is not offered
+  again; a newer build is, and an unanswered question is asked again the next morning. A step that can fail on the outside world (`upstream`,
+  `launch-install`) ends the run with its reason instead of pausing it, and fetches run with a
+  timeout and ssh in batch mode, so a hung network never leaves a run holding the checkout. The
+  launch installs only the build it asked about (`release/` must hold that version) and nothing
+  when the Fork app already has it; a second launch while the first waits is refused by
+  `auto-install.sh`'s lock, and the run stops with that reason. With no newer Nightly the next
+  morning's run offers fork/main's build when the Fork app is older (an install that was launched
+  and failed).
+- **Installed as a copy:** `install.sh` copies the file into `~/.t3/workflows` once the app is in
+  place (a differing copy, an edit in the Workflows page, goes to `~/.claude/trash` first), so a
+  branch switched in the checkout never changes what runs. A body changed while a run is unfinished
+  is a new `version`, the old one kept until its runs end (the workflow skill's rule 3).
+- **The install's idle check:** a workflow run holds an install only while code of it runs, never
+  while it only waits; `active_runs` in `scripts/fork/auto-install.sh` says why.
+- **Where it lives:** in `evals/`, so `check:changed` typechecks it (evals' own typecheck, under the
+  globals `evals/workflow-authoring/fixtures/globals.d.ts` declares) and runs the test beside it
+  whenever it changes. `scripts/` is a composite project, which cannot take the server files those
+  globals come from. `knip.jsonc` lists it as an entry of `evals`, since only the server loads it.
+- _Rejected:_ `git ls-remote` instead of the fetch (the count of commits needs the objects);
+  reviewing again after the fix (one round); worktrees for the reviews (they only read, and the
+  upgrade is done by then); retrying the fetch within a run (the next morning's run is the retry).
+- **Tests:** `evals/fork/upstream-upgrade.test.ts` loads the file with the server's loader and
+  drives it in the real engine on a throwaway database through `evals/workflow-authoring/grade.ts`,
+  with stand-in agents, a checkout whose remotes are local repositories, a stand-in
+  `auto-install.sh` and an ssh that never answers (macOS only: it reads the app's version with
+  PlistBuddy). `apps/server/src/cloud/forkServiceRuntime.test.ts`: "counts a workflow run only
+  while code of it runs, …" (auto-install.sh) and "copies the upgrade workflow into the T3 home …"
+  (install.sh).
+- **Live check** (2026-11-23, of the first version): a server from the checkout on an isolated home
+  with workflows on registered `upstream-upgrade@1` and its daily trigger (next due 08:00 local).
+  Against a fake upstream, a run skipped with no newer Nightly; with one, it asked, and Not now
+  stopped it. Its agent steps have run only under the test's stand-ins.
+- **Conflict guidance:** a change to upstream's workflow API reaches the file only when it loads
+  (each call refuses an option it does not take), so the test fails first; follow it. If upstream
+  changes `workflow_runs`' or `workflow_steps`' statuses, kinds or columns, follow them in
+  `active_runs`.
+
 ### Translation
 
 Upstream translates the app with `gt-react` (present at 4825; the app-wide rollout and the lint rule
@@ -984,10 +1051,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/chat/RightPanelSurfaceContent.tsx`,
        `apps/web/src/components/chat/useRightPanelActions.ts`, and the palette's Show Tracker,
        parked and Artifacts actions in `apps/web/src/components/CommandPalette.tsx`, no parked one
-       in a side chat (its case and the `activeThread` mock in
-       `apps/web/src/components/CommandPalette.browser.test.tsx`, which falls back to the hook's
-       own thread: the palette's thread actions test `activeThread !== null`, and upstream's mock
-       passes `undefined`). Since 5024 upstream's thread surfaces are `thread` and
+       in a side chat, a subagent or a workflow step (MAIN-114; its cases and the `activeThread`
+       mock in `apps/web/src/components/CommandPalette.browser.test.tsx`, which falls back to the
+       hook's own thread: the palette's thread actions test `activeThread !== null`, and upstream's
+       mock passes `undefined`). Since 5024 upstream's thread surfaces are `thread` and
        `linked-thread` (7c6e889ddb renamed `side-chat`, and `decodeThreadSurface` still reads a
        saved `side-chat`). The fork's kinds `decisions`, `parked` and `artifacts` sit right after
        `issue` (before `thread`) in `RIGHT_PANEL_KINDS`, the surface union and the tab switches, and
@@ -1043,8 +1110,8 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/web/src/components/Sidebar.logic.ts`,
        `apps/web/src/components/chat/TimelineAssistantRows.tsx`,
        `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/ChatView.tsx`.
-     - Tooling: `vite.config.ts` and `knip.jsonc` (rule 4's exemptions), and `AGENTS.md` (the pointer
-       to this file).
+     - Tooling: `vite.config.ts` and `knip.jsonc` (rule 4's exemptions; `knip.jsonc` also lists the
+       upgrade workflow as an entry of `evals`), and `AGENTS.md` (the pointer to this file).
    - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a
      stack item, drawn in place of the notice row inside the same card (the decisions panel uses it
      so it keeps its place in the stack with no notice header; upstream's row is split out as
@@ -1115,11 +1182,13 @@ it fails instead. The steps below are what the script encodes and what stays a p
      `dismiss`, so their toasts outlive the panel), and `questionsHeld` (from `threadDecisions`,
      `serverVisibleTurnItems`, `serverProjection`'s messages and runs, and `optimisticUserMessages`;
      "Hidden while a send is judged"), and keys the composer menu's `parkAvailable` and the panel's
-     `onAddParked` on the thread's `lineage.sideChat` (not `embedded`, which a side chat at its own URL
-     is not) and on upstream's `isSubagentThread` beside it; `useComposerSend.ts` passes the same two
-     flags to `composerParkDecision`, which refuses `/park` on either, the second through
-     `isDelegatedAppThread`, whose parameter `packages/contracts/src/orchestrationV2.ts` widens to
-     take the null `delegatedFrom` of client-runtime's `EnvironmentThreadShell`.
+     `onAddParked` on `parkOffered`, which is `threadParks` (contracts) of the thread; `threadParks`
+     reads `isDelegatedAppThread`, whose parameter `packages/contracts/src/orchestrationV2.ts`
+     widens to take the null `delegatedFrom` of client-runtime's `EnvironmentThreadShell`.
+     `useComposerSend.ts` passes `parkRefusal` (contracts: why `threadParks` says no, for the
+     refusal's words) to `composerParkDecision` (`composerSend.logic.ts`), which refuses `/park` on
+     any.
+     `apps/web/test/fakeEnvironment.ts` gives a thread `workflowStep` for the step's cases.
      `packages/shared/package.json` exports the fork's `./parkedReferences` beside its `sessionKit`
      entries; web (`useComposerStash.ts`, `composerInlineTokenPaste.ts`, the editor's paste) and mobile
      strip pasted chips through it. On mobile: `composerContextClipboard.ts`'s import and
@@ -1239,8 +1308,9 @@ push and the build, the agent runs `scripts/fork/auto-install.sh` and tells the 
 and reopen. It returns at once, having handed the work to a one-shot launchd job that waits until no
 run is active, quits every T3 Code app, stops the service, and runs install.sh, opening the fork
 again itself only when something failed and no T3 Code app runs. Its header says what counts as
-active, how long it waits, where it logs and how its last line reads, and why a launchd job rather
-than `nohup`.
+active (a workflow run only while code of it runs: `active_runs`), how long it waits, where it
+logs and how its last line reads, and why a launchd job rather than `nohup`.
+install.sh also copies the daily upgrade workflow into `~/.t3/workflows`.
 
 Whether macOS asks before osascript, run by the job, may quit an app (Automation consent) is
 _unverified_; a refusal ends the run with `FAILED` and nothing installed.

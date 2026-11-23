@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type parkRefusal,
   THREAD_PARKED_TEXT_MAX_LENGTH,
   type ThreadContextRecord,
 } from "@t3tools/contracts";
@@ -141,31 +142,37 @@ export function composerParkDecision(
     readonly parkInFlight: boolean;
     readonly hasNonPromptContent: boolean;
     readonly threadStarted: boolean;
-    /**
-     * A side chat, in its pane or at its own URL: it never holds parks, as t3_park and the server
-     * refuse it.
-     */
-    readonly sideChat: boolean;
-    /** A thread another agent drives (a subagent or a delegated task): the server refuses it too. */
-    readonly subagent: boolean;
+    /** Why the thread holds no parks (parkRefusal), as t3_park and the server refuse it too. */
+    readonly parkRefusal: ReturnType<typeof parkRefusal>;
   },
   resolve: MessageResolver = m,
 ): ComposerParkDecision {
   if (input.directAnnotation) return { kind: "pass" };
   const command = readParkCommand(input.prompt);
   if (command === null) return { kind: "pass" };
-  if (input.sideChat) {
+  if (input.parkRefusal === "sideChat") {
     return {
       kind: "refuse",
       title: resolve(msg("A side chat can't park")),
       description: resolve(msg("Park in the main thread, whose Parked tab lists it.")),
     };
   }
-  if (input.subagent) {
+  if (input.parkRefusal === "subagent") {
     return {
       kind: "refuse",
       title: resolve(msg("A subagent can't park")),
       description: resolve(msg("Park in the main thread, whose Parked tab lists it.")),
+    };
+  }
+  if (input.parkRefusal === "workflowStep") {
+    // For the owner typing in the step's thread; ThreadDecisions' WORKFLOW_STEP_PARK_MESSAGE is
+    // for the step's agent calling t3_park.
+    return {
+      kind: "refuse",
+      title: resolve(msg("A workflow step can't park")),
+      description: resolve(
+        msg("Its thread belongs to the workflow run; park in a thread of your own."),
+      ),
     };
   }
   if (input.editingQueuedRun) {
