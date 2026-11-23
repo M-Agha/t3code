@@ -90,6 +90,7 @@ import {
   ProviderInteractionMode,
   resolveIdleCompaction,
   RuntimeMode,
+  threadParks,
 } from "@t3tools/contracts";
 import {
   canResumeThread,
@@ -3152,9 +3153,8 @@ export default function ChatView(props: ChatViewProps) {
     activeThread?.lineage.sideChat !== true &&
     !isSubagentThread &&
     serverConfig?.environment.capabilities.sideChats === true;
-  // A side chat or a subagent never parks (ThreadDecisions.park refuses both).
-  const parkOffered =
-    isServerThread && activeThread?.lineage.sideChat !== true && !isSubagentThread;
+  // ThreadDecisions.park refuses every thread threadParks rules out.
+  const parkOffered = isServerThread && activeThread != null && threadParks(activeThread);
   const sideChat = useSideChat({
     threadRef: sideChatsOffered && isServerThread ? activeThreadRef : null,
     readSettings: () => ({
