@@ -8,7 +8,8 @@
 # checks the copy, and only then installs.
 # It never overwrites an app: an existing "T3 Code (Fork).app" is moved to ~/.claude/trash first, and
 # put back if the new one cannot be put in place; a service it stopped is started again then.
-# Installed, it moves a service it stopped to this build through this build's own runtime (a failure
+# Installed, it copies the daily upgrade workflow into ~/.t3/workflows (a differing copy goes to the
+# trash first), moves a service it stopped to this build through this build's own runtime (a failure
 # there starts the unit on disk again; an app started meanwhile leaves it stopped), opens T3 Code
 # (Fork), and runs the dotfiles doctor's T3 Code step when ~/.config is a dotfiles checkout.
 #
@@ -170,6 +171,21 @@ trap restart_service EXIT
 rmdir "$staging" 2>/dev/null || true
 echo "Installed $dest from $(basename "$zip")."
 echo "Run one T3 Code app at a time: they share ~/.t3."
+
+# The daily upgrade workflow, as a copy, so switching the checkout's branch never changes what runs
+# (FORK.md, "The daily upgrade workflow"). A copy that differs (an edit in the Workflows page) goes
+# to the trash first. The server reloads it by itself, once Settings → Labs → Workflows is on.
+flow="$repo/evals/fork/upstream-upgrade.ts"
+flows="$t3_home/workflows"
+if cmp -s "$flow" "$flows/upstream-upgrade.ts"; then
+  :
+elif mkdir -p "$flows" &&
+  { [ ! -e "$flows/upstream-upgrade.ts" ] || cp -p "$flows/upstream-upgrade.ts" "$trash/upstream-upgrade.ts_$stamp"; } &&
+  cp "$flow" "$flows/upstream-upgrade.ts"; then
+  echo "Copied the upgrade workflow to $flows."
+else
+  echo "install: could not copy the upgrade workflow; copy it by hand: cp \"$flow\" \"$flows/\"" >&2
+fi
 
 # The service this run stopped moves to this build, through this build's own CLI: ~/.t3/bin/t3 is
 # whichever packaged app started last, and upstream's would move the service off the fork with no

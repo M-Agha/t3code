@@ -19,7 +19,9 @@
     },
     "evals": {
       // The grader loads these answers by path, as the server loads a definitions file.
-      "entry": ["workflow-authoring/fixtures/*.ts"],
+      // Fork-only: scripts/fork/install.sh copies the upgrade workflow into the T3 home, whose
+      // server loads it by path.
+      "entry": ["workflow-authoring/fixtures/*.ts", "fork/upstream-upgrade.ts"],
     },
     "scripts": {
       // Knip loads its preprocessor through a CLI option; native verification and
