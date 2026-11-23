@@ -92,6 +92,38 @@ const gitFetch = (checkout: string, ...args: ReadonlyArray<string>) =>
     env: FETCH_ENV,
   });
 
+// Q75 (MAIN-116): T3 raises no notification or badge when a workflow asks, so each question is
+// announced on macOS first. The words go in as argv, never into the AppleScript source. A
+// notification that fails is noted on its step and the run goes on to ask anyway.
+const notify = (name: string, question: string) =>
+  step.try(
+    `notify-${name}`,
+    { returns: Schema.String },
+    Effect.as(
+      exec(
+        "osascript",
+        [
+          "-e",
+          "on run argv",
+          "-e",
+          "display notification (item 2 of argv) with title (item 1 of argv)",
+          "-e",
+          "end run",
+          "T3 Code (Fork)",
+          `${question} ⌘K → Open workflows`,
+        ],
+        { cwd: NodeOS.homedir(), timeoutMs: 10_000 },
+      ),
+      question,
+    ),
+  );
+/** `ask`, announced first by a notification that says `short`. */
+const askAnnounced = <const Choices extends ReadonlyArray<string>>(
+  name: string,
+  short: string,
+  options: Parameters<typeof ask<Choices>>[1],
+) => Effect.andThen(notify(name, short), ask(name, options));
+
 // The highest numbered migration at `ref`: upstream's own head, as FORK.md's step 1 reads it.
 const migrationHead = (checkout: string, ref: string) =>
   Effect.map(exec("git", ["ls-tree", "--name-only", ref, MIGRATIONS], { cwd: checkout }), (out) =>
@@ -351,7 +383,7 @@ const AFTER_INSTALL = [
 // Q74 (pending): the install question and the launch, the run's last steps. Without it the run
 // ends with the build, and scripts/fork/auto-install.sh installs it by hand.
 const install = Effect.fn("install")(function* (checkout: string, build: string, why?: string) {
-  const answer = yield* ask("install", {
+  const answer = yield* askAnnounced("install", `Install the fork build ${build}?`, {
     title: [
       `Install the fork build ${build} now?`,
       ...(why === undefined ? [] : [why]),
@@ -394,9 +426,10 @@ const install = Effect.fn("install")(function* (checkout: string, build: string,
   return launched.value;
 });
 
+// Version 2 (Q75's notifications): version 1 never had a run, and a version names one body.
 export default workflow(
   NAME,
-  { version: 1, payload: Tick, triggers: [daily("08:00")] },
+  { version: 2, payload: Tick, triggers: [daily("08:00")] },
   Effect.fn(function* (_tick, self) {
     // Another run that owns the checkout, or null.
     const otherOwner = Effect.gen(function* () {
@@ -433,7 +466,7 @@ export default workflow(
     }
     yield* title(`Upgrade the fork to ${target}?`);
 
-    const approved = yield* ask("approve", {
+    const approved = yield* askAnnounced("approve", `Upgrade the fork to ${target}?`, {
       title: upgradeQuestion(upstream, target),
       choices: ["Upgrade", "Not now"],
       data: upstream,
@@ -472,11 +505,15 @@ export default workflow(
           `the upgrade still asks after ${OWNER_ROUNDS} answers: ${upgrade.value.question}`,
         );
       }
-      const answer = yield* ask(`owner-${round}`, {
-        title: `The upgrade to ${target} asks: ${upgrade.value.question} (Go on takes its pick; a reason is your answer.)`,
-        choices: ["Go on", "Stop"],
-        timeout: ANSWER_WITHIN,
-      });
+      const answer = yield* askAnnounced(
+        `owner-${round}`,
+        `The upgrade to ${target} has a question for you.`,
+        {
+          title: `The upgrade to ${target} asks: ${upgrade.value.question} (Go on takes its pick; a reason is your answer.)`,
+          choices: ["Go on", "Stop"],
+          timeout: ANSWER_WITHIN,
+        },
+      );
       if (Option.isNone(answer) || answer.value.choice !== "Go on") {
         return yield* stop(
           `the upgrade to ${target} stopped at: ${upgrade.value.question} (the checkout is as thread ${upgrade.thread.threadId} left it)`,
@@ -542,12 +579,16 @@ export default workflow(
         ),
     ];
     if (blockers.length > 0) {
-      const goOn = yield* ask("blockers", {
-        title: `The fork on ${target} (build ${shipped.buildVersion}) still has ${blockers.length} blocker(s) after the fix round: ${blockers.join("; ")}. Go on anyway?`,
-        choices: ["Go on", "Stop"],
-        data: { blockers },
-        timeout: ANSWER_WITHIN,
-      });
+      const goOn = yield* askAnnounced(
+        "blockers",
+        `The fork on ${target} has ${blockers.length} blocker(s) left: go on anyway?`,
+        {
+          title: `The fork on ${target} (build ${shipped.buildVersion}) still has ${blockers.length} blocker(s) after the fix round: ${blockers.join("; ")}. Go on anyway?`,
+          choices: ["Go on", "Stop"],
+          data: { blockers },
+          timeout: ANSWER_WITHIN,
+        },
+      );
       if (Option.isNone(goOn) || goOn.value.choice !== "Go on") {
         return yield* stop(
           `not installed: ${blockers.length} blocker(s) left on ${shipped.pushedSha}`,
