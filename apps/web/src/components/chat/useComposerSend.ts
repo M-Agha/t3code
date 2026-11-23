@@ -25,8 +25,8 @@ import {
   AuthOrchestrationOperateScope,
   DEFAULT_MODEL,
   type EnvironmentId,
-  isDelegatedAppThread,
   type ModelSelection,
+  parkRefusal,
   type PreviewAnnotationPayload,
   type ResponseContextRecord,
   type ScopedThreadRef,
@@ -467,8 +467,7 @@ export function useComposerSend(input: ComposerSendInput) {
         draftHasNonPromptContent(composerDraftTarget) ||
         countPreparingComposerImages(composerTargetKey(composerDraftTarget)) > 0,
       threadStarted: isServerThread,
-      sideChat: activeThread?.lineage.sideChat === true,
-      subagent: activeThread !== undefined && isDelegatedAppThread(activeThread),
+      parkRefusal: activeThread === undefined ? null : parkRefusal(activeThread),
     });
     if (parkDecision.kind === "refuse") {
       toastManager.add(

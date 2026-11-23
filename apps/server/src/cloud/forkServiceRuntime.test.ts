@@ -412,11 +412,13 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
     yield* fs.makeDirectory(path.join(t3Home, "userdata"), { recursive: true });
     yield* fs.makeDirectory(path.join(t3Home, "bin"));
     yield* fs.makeDirectory(path.join(home, "Library", "LaunchAgents"), { recursive: true });
-    for (const script of ["install.sh", "seed-runtime.sh"]) {
-      yield* fs.copyFile(
-        `${repoRoot}scripts/fork/${script}`,
-        path.join(repo, "scripts", "fork", script),
-      );
+    for (const file of [
+      "scripts/fork/install.sh",
+      "scripts/fork/seed-runtime.sh",
+      "evals/fork/upstream-upgrade.ts",
+    ]) {
+      yield* fs.makeDirectory(path.dirname(path.join(repo, file)), { recursive: true });
+      yield* fs.copyFile(`${repoRoot}${file}`, path.join(repo, file));
     }
     yield* fs.writeFileString(
       path.join(repo, "package.json"),
@@ -601,6 +603,8 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
     });
     return {
       home,
+      repo,
+      t3Home,
       apps,
       forkBin,
       runtimeT3,
@@ -850,6 +854,56 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.isTrue(yield* m.isLoaded);
         assert.equal(yield* m.installedVersion, versions.current);
         assert.lengthOf(yield* m.events, opens);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // MAIN-113: a copy, so a branch switched in the checkout never changes what runs.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
+    "copies the upgrade workflow into the T3 home once installed, a differing copy to the trash first",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const m = yield* machine();
+        const source = path.join(m.repo, "evals", "fork", "upstream-upgrade.ts");
+        const copy = path.join(m.t3Home, "workflows", "upstream-upgrade.ts");
+        const trashed = fs
+          .readDirectory(path.join(m.home, ".claude", "trash"))
+          .pipe(
+            Effect.map((entries) =>
+              entries.filter((entry) => entry.startsWith("upstream-upgrade.ts_")),
+            ),
+          );
+        yield* m.release(versions.earlier);
+        yield* m.shim(versions.earlier);
+
+        // Not installed: nothing copied.
+        assert.notEqual((yield* m.install({ UNRECORDED: "1" })).code, 0);
+        assert.isFalse(yield* fs.exists(copy));
+
+        const first = yield* m.install();
+        assert.equal(first.code, 0, first.stderr);
+        assert.equal(yield* fs.readFileString(copy), yield* fs.readFileString(source));
+        assert.include(first.stdout, `Copied the upgrade workflow to ${path.dirname(copy)}.`);
+
+        // Edited in the Workflows page: kept in the trash, then replaced.
+        yield* fs.writeFileString(copy, "// edited\n");
+        yield* m.release(versions.current);
+        assert.equal((yield* m.install()).code, 0);
+        assert.equal(yield* fs.readFileString(copy), yield* fs.readFileString(source));
+        const [kept, ...more] = yield* trashed;
+        assert.deepEqual(more, []);
+        assert.equal(
+          yield* fs.readFileString(path.join(m.home, ".claude", "trash", kept!)),
+          "// edited\n",
+        );
+
+        // The same copy: left alone, nothing trashed.
+        yield* m.release(versions.current);
+        const again = yield* m.install();
+        assert.equal(again.code, 0, again.stderr);
+        assert.notInclude(again.stdout, "Copied the upgrade workflow");
+        assert.lengthOf(yield* trashed, 1);
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 });
@@ -1229,6 +1283,85 @@ it.layer(NodeServices.layer)("scripts/fork/auto-install.sh", (it) => {
             name,
           );
         }
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // A workflow run holds the install only while code of it runs, and only while workflows are on;
+  // the upgrade workflow's own launch step ends its run soon after it starts this (MAIN-113).
+  it.effect.skipIf(skip)(
+    "counts a workflow run only while code of it runs, with workflows on, and lets a launching run end",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const runs =
+          "CREATE TABLE workflow_runs (run_id TEXT, workflow TEXT, title TEXT, status TEXT, ended_at TEXT);" +
+          "CREATE TABLE workflow_steps (run_id TEXT, name TEXT, kind TEXT, status TEXT);";
+        const run = (status: string, endedAt = "NULL") =>
+          `INSERT INTO workflow_runs VALUES ('w1', 'upstream-upgrade', 'Fork upgrade', '${status}', ${endedAt});`;
+        const stepOf = (kind: string) =>
+          `INSERT INTO workflow_steps VALUES ('w1', 'x', '${kind}', 'running');`;
+        const held =
+          'auto-install: FAILED: threads/background work still active after 1s: workflow upstream-upgrade run w1 "Fork upgrade"; nothing was installed';
+        // Name, settings.json (undefined: none), the tables and rows, the last line when it holds.
+        const on = JSON.stringify({ workflowsEnabled: true });
+        const cases: ReadonlyArray<
+          readonly [string, string | undefined, string, string | undefined]
+        > = [
+          ["a step running", on, runs + run("running"), held],
+          ["a step running beside an agent", on, runs + run("waiting") + stepOf("step"), held],
+          [
+            "a run waiting on an agent, a question or a sleep",
+            on,
+            runs + run("waiting") + stepOf("agent"),
+            undefined,
+          ],
+          ["a paused run", on, runs + run("paused"), undefined],
+          ["an ended run", on, runs + run("completed", "'2026-11-23'"), undefined],
+          [
+            "a step running with workflows off",
+            JSON.stringify({ workflowsEnabled: false }),
+            runs + run("running"),
+            undefined,
+          ],
+          ["a step running with no settings file", undefined, runs + run("running"), undefined],
+          // A half-written file: unreadable is busy, whatever the runs.
+          [
+            "a settings file jq cannot read",
+            '{"workflowsEnabled": tr',
+            runs,
+            "auto-install: FAILED",
+          ],
+          ["a database from before migration 110", on, "", undefined],
+        ];
+        for (const [name, settings, rows, holds] of cases) {
+          const m = yield* machine();
+          yield* m.serviceLoaded;
+          if (settings !== undefined) {
+            yield* fs.writeFileString(`${m.home}/.t3/userdata/settings.json`, settings);
+          }
+          if (rows !== "") yield* m.sql(rows);
+          const result = yield* m.run(["--run", "job.label"], { T3_FORK_AUTO_INSTALL_WAIT: "1" });
+          const last = m.lastLine(result.stdout);
+          if (holds === undefined) {
+            assert.equal(last, "auto-install: SUCCESS: install.sh finished", name);
+          } else {
+            assert.isTrue(last.startsWith(holds), `${name}: ${last}`);
+          }
+        }
+
+        // The launching run's step returns and the run completes while this waits.
+        const m = yield* machine();
+        yield* m.serviceLoaded;
+        yield* fs.writeFileString(
+          `${m.home}/.t3/userdata/settings.json`,
+          JSON.stringify({ workflowsEnabled: true }),
+        );
+        yield* m.sql(runs + run("running"));
+        const launched = yield* m.run(["--run", "job.label"], {
+          SLEEP_HOOK: `sqlite3 "$HOME/.t3/userdata/statev2.sqlite" "UPDATE workflow_runs SET status = 'completed', ended_at = '2026-11-23'"`,
+        });
+        assert.equal(m.lastLine(launched.stdout), "auto-install: SUCCESS: install.sh finished");
+        assert.include(launched.stdout, 'Active: workflow upstream-upgrade run w1 "Fork upgrade".');
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 

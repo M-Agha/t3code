@@ -33,6 +33,7 @@ logs="$HOME/Library/Logs/T3 Code (Fork)"
 # lock left by a crash whose pid was reused by a live process refuses until removed by hand.
 lock="$logs/auto-install.lock"
 db="$HOME/.t3/userdata/statev2.sqlite"
+settings="$HOME/.t3/userdata/settings.json"
 poll="${T3_FORK_AUTO_INSTALL_POLL:-15}"
 wait_max="${T3_FORK_AUTO_INSTALL_WAIT:-3600}"
 # The official builds (T3 Code, T3 Code (Nightly)) share one bundle ID; the fork has its own.
@@ -186,24 +187,50 @@ active_threads() {
             AND (i.run_id IS NULL OR ir.status <> 'rolled_back')))
       ORDER BY t.thread_id)"
 }
-# One read: true while a thread is active, and `last` holds what it read (`none` when nothing runs).
+# The workflow runs a quit would cut off mid-step, read-only, as `workflow <name> run <id>
+# "<title>"` joined by ", "; empty when none. A run counts only while code of it runs: the run is
+# `running`, or a plain `step` of it runs beside an agent or a question (the run then shows
+# `waiting`). One that only waits on an agent, a question, a signal or a sleep is resumed by the
+# next server as it is (its agent's thread counts above), and counting it would let one daily run
+# hold the install forever. So the upgrade workflow's own launch step
+# (evals/fork/upstream-upgrade.ts), which starts this, holds it only until it returns and its run
+# ends. While workflows are off no run executes, whatever its row says; only a missing settings.json
+# means off, and one that cannot be read (no jq, a file half written) counts as busy. A database
+# from before upstream's migration 110 has no runs.
+active_runs() {
+  local enabled tables
+  [ -e "$settings" ] || return 0
+  enabled="$(jq -r '.workflowsEnabled == true' "$settings" 2>&1)" || { echo "$settings: $enabled"; return 1; }
+  [ "$enabled" = true ] || return 0
+  tables="$(sqlite3 -readonly -cmd ".timeout 5000" "$db" "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'workflow_runs'")" || return 1
+  [ "$tables" = 1 ] || return 0
+  sqlite3 -readonly -cmd ".timeout 5000" "$db" "SELECT group_concat(name, ', ') FROM (
+    SELECT 'workflow ' || r.workflow || ' run ' || r.run_id || ' \"' || replace(r.title, char(10), ' ') || '\"' AS name
+      FROM workflow_runs r
+      WHERE r.ended_at IS NULL AND (r.status = 'running' OR EXISTS (SELECT 1 FROM workflow_steps s
+        WHERE s.run_id = r.run_id AND s.status = 'running' AND s.kind = 'step'))
+      ORDER BY r.run_id)"
+}
+# One read: true while a thread or a workflow run is active, and `last` holds what it read (`none`
+# when nothing runs).
 # With no app and no service nothing can run, whatever the database says (a run a crash left
 # `running`, or no -shm file for a read-only connection, which SQLite removes with the last writer).
 # Unreadable while T3 runs counts as active.
 last=""
 busy() {
-  local threads
+  local threads runs
   if ! t3_running; then
     [ "$last" = none ] || say "No T3 Code app or service runs, so no run is active."
     last=none
     return 1
   fi
-  if threads="$(active_threads 2>&1)"; then
+  if threads="$(active_threads 2>&1)" && runs="$(active_runs 2>&1)"; then
+    [ -z "$runs" ] || threads="${threads:+$threads, }$runs"
     [ -z "$threads" ] || [ "$threads" = "$last" ] || say "Active: $threads."
     last="$threads"
     [ -n "$threads" ]
   else
-    say "Could not read $db while T3 runs: $threads"
+    say "Could not read $db or $settings while T3 runs: ${runs:-$threads}"
     last=""
   fi
 }

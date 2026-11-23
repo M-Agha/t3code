@@ -57,6 +57,7 @@ import {
   SourceControlProviderKind,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
   resolveEnvironmentMachineKind,
+  threadParks,
 } from "@t3tools/contracts";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import {
@@ -1568,8 +1569,8 @@ function OpenCommandPaletteDialog(props: {
         useRightPanelStore.getState().open(threadRef, "decisions");
       },
     });
-    // A side chat never parks (ThreadDecisions.park), so it has no Parked tab to open.
-    if (activeThread.lineage.sideChat !== true) {
+    // A thread that never parks (ThreadDecisions.park) has no Parked tab to open.
+    if (threadParks(activeThread)) {
       actionItems.push({
         kind: "action",
         value: "action:open-thread-parked",
