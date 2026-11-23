@@ -420,23 +420,26 @@ it("leaves no parked chip without its record after a stash restore or a paste", 
   expect(view.chips()).toHaveLength(1);
 });
 
-// Opus on #12 (r1 C4, r2, r3) and MAIN-105: a side chat (in its parent's pane, and at its own URL)
-// and a delegate_task subagent park nowhere. The side chat is older settled, as upstream's tab test
+// Opus on #12 (r1 C4, r2, r3), MAIN-105 and MAIN-114: a side chat (in its parent's pane, and at its
+// own URL), a delegate_task subagent and a workflow run's agent step park nowhere. The side chat is older settled, as upstream's tab test
 // has it, so it loads in any place but the file's first: run alone (-t or .only), it fails falsely.
 it.each([
   ["side chat in its parent's pane", "parent"],
   ["side chat opened at its own URL", "side"],
   ["subagent opened at its own URL", "subagent"],
+  ["workflow step opened at its own URL", "workflowStep"],
 ] as const)("refuses /park in a %s, whose menu offers no /park", async (_name, route) => {
   const parent = threadWithHistory(`parked-${route}-parent`, 1);
   const child =
     route === "subagent"
       ? { ...threadWithHistory("parked-subagent", 1), delegateOf: parent.id }
-      : {
-          ...threadWithHistory(`parked-side-${route}`, 1),
-          sideChatOf: parent.id,
-          olderSettled: true as const,
-        };
+      : route === "workflowStep"
+        ? { ...threadWithHistory("parked-workflow-step", 1), workflowStep: true as const }
+        : {
+            ...threadWithHistory(`parked-side-${route}`, 1),
+            sideChatOf: parent.id,
+            olderSettled: true as const,
+          };
   const parks: unknown[] = [];
   using _park = answerRpc(WS_METHODS.threadDecisionsPark, (input: never) => {
     parks.push(input);
@@ -470,7 +473,14 @@ it.each([
   await userEvent.keyboard("{Enter}");
   await expect
     .element(
-      page.getByText(route === "subagent" ? "A subagent can't park" : "A side chat can't park"),
+      page.getByText(
+        {
+          subagent: "A subagent can't park",
+          workflowStep: "A workflow step can't park",
+          parent: "A side chat can't park",
+          side: "A side chat can't park",
+        }[route],
+      ),
     )
     .toBeVisible();
   expect(parks).toEqual([]);

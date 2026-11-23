@@ -243,6 +243,13 @@ export const SIDE_CHAT_PARK_MESSAGE =
 export const SUBAGENT_PARK_MESSAGE =
   "not parked: a subagent has no Parked tab; park it in the main thread.";
 
+/**
+ * Nor does a workflow run's agent step (MAIN-114): its thread is read through the run. For the
+ * step's agent calling t3_park; the composer's refusal (composerParkDecision) is for the owner.
+ */
+export const WORKFLOW_STEP_PARK_MESSAGE =
+  "not parked: a workflow step's thread has no Parked tab; put follow-ups in the step's result.";
+
 const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped" } as const;
 
 export class ThreadDecisions extends Context.Service<
@@ -1281,10 +1288,12 @@ export const layer = Layer.effect(
         const [thread] = yield* sql<{
           readonly side_chat: number | null;
           readonly delegated: number;
+          readonly workflow_step: number | null;
         }>`
           SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat,
             (json_extract(payload_json, '$.lineage.relationshipToParent') IS 'subagent'
-              OR json_extract(payload_json, '$.delegatedFrom') IS NOT NULL) AS delegated
+              OR json_extract(payload_json, '$.delegatedFrom') IS NOT NULL) AS delegated,
+            json_extract(payload_json, '$.lineage.workflowStep') AS workflow_step
           FROM orchestration_v2_projection_threads
           WHERE thread_id = ${input.threadId} AND deleted_at IS NULL
         `;
@@ -1292,6 +1301,7 @@ export const layer = Layer.effect(
         // Every park passes here (the Parked tab's field, t3_park, any client), not only `/park`'s.
         if (thread.side_chat === 1) return "sideChat";
         if (thread.delegated === 1) return "subagent";
+        if (thread.workflow_step === 1) return "workflowStep";
         for (const item of input.items) {
           yield* sql`
             INSERT INTO fork_thread_parked_items (
@@ -1313,6 +1323,9 @@ export const layer = Layer.effect(
       }
       if (parked === "subagent") {
         return yield* new ThreadDecisionsError({ message: SUBAGENT_PARK_MESSAGE });
+      }
+      if (parked === "workflowStep") {
+        return yield* new ThreadDecisionsError({ message: WORKFLOW_STEP_PARK_MESSAGE });
       }
       yield* PubSub.publish(changes, input.threadId);
     });

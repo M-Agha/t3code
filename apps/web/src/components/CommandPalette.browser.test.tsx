@@ -294,23 +294,49 @@ describe("CommandPalette open intents", () => {
     );
   });
 
+  // MAIN-105, MAIN-114: nor does a subagent or a workflow run's agent step.
+  const parentId = ThreadId.make("palette-parent");
   it.each([
-    ["the main thread", false],
-    ["a side chat", true],
-  ] as const)("offers Show parked items for %s only if it can park", async (_name, sideChat) => {
-    const parentId = ThreadId.make("palette-parent");
+    ["the main thread", {}, true],
+    [
+      "a side chat",
+      {
+        lineage: {
+          rootThreadId: parentId,
+          parentThreadId: parentId,
+          relationshipToParent: "fork" as const,
+          sideChat: true,
+        },
+      },
+      false,
+    ],
+    [
+      "a subagent",
+      {
+        lineage: {
+          rootThreadId: parentId,
+          parentThreadId: parentId,
+          relationshipToParent: "subagent" as const,
+        },
+      },
+      false,
+    ],
+    [
+      "a workflow step",
+      {
+        lineage: {
+          rootThreadId: ThreadId.make("palette-step"),
+          parentThreadId: null,
+          relationshipToParent: null,
+          workflowStep: true,
+        },
+      },
+      false,
+    ],
+  ] as const)("offers Show parked items for %s only if it can park", async (name, shape, parks) => {
     const thread = makeThreadFixture({
-      id: ThreadId.make(sideChat ? "palette-side-chat" : "palette-main"),
-      ...(sideChat
-        ? {
-            lineage: {
-              rootThreadId: parentId,
-              parentThreadId: parentId,
-              relationshipToParent: "fork" as const,
-              sideChat: true,
-            },
-          }
-        : {}),
+      id: ThreadId.make(`palette-${name.replaceAll(" ", "-")}`),
+      ...shape,
     });
     setup({ threads: [thread], activeThread: thread });
     await using _screen = await render(<CommandPalette>{null}</CommandPalette>);
@@ -319,8 +345,8 @@ describe("CommandPalette open intents", () => {
     // The thread's other panel actions are offered either way.
     await expect.element(page.getByRole("option", { name: /Show artifacts/ })).toBeVisible();
     const parked = page.getByRole("option", { name: /Show parked items/ });
-    if (sideChat) await expect.element(parked).not.toBeInTheDocument();
-    else await expect.element(parked).toBeVisible();
+    if (parks) await expect.element(parked).toBeVisible();
+    else await expect.element(parked).not.toBeInTheDocument();
   });
 
   it("numbers filtered New thread in... rows from 1 and jumps to them", async () => {
