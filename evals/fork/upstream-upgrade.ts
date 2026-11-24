@@ -14,7 +14,8 @@
 // file until its runs end.
 //
 // T3_FORK_CHECKOUT (the fork checkout, ~/repos/t3code by default), T3_FORK_APPLICATIONS_DIR
-// (install.sh's) and T3_FORK_FETCH_TIMEOUT_MS are for that test and a live check.
+// (install.sh's), T3_FORK_FETCH_TIMEOUT_MS and T3_FORK_UPSTREAM_RETRY_AFTER_MS are for that test
+// and a live check.
 //
 // A workflow file may not import effect (the workflow skill, rule 4), so Node is its only way to
 // run a process or read the environment and the disk.
@@ -26,7 +27,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeUtil from "node:util";
 
-const { workflow, step, agent, ask, skip, stop, title, runs, store, daily, Tick } = T3;
+const { workflow, step, agent, ask, sleep, skip, stop, title, runs, store, daily, Tick } = T3;
 
 const NAME = "upstream-upgrade";
 const NIGHTLY = "v*-nightly.*";
@@ -43,16 +44,28 @@ const OPUS = {
   model: "claude-opus-5-5",
   options: [{ id: "effort", value: "high" }],
 };
-// Under a day, so a question nobody answered ends before the next morning's run looks.
+// How long a question after the claim waits. The stored owner already makes the next morning's run
+// skip, so this only ends a run nobody answers.
 const ANSWER_WITHIN = "23 hours";
+// A question before the claim ends this long after the run was due: an hour before the next
+// morning's run, however late the upstream fetch's tries let it be asked, so that run never finds
+// the same question still open.
+const ASK_BEFORE_NEXT_RUN_MS = 23 * 60 * 60 * 1000;
 // Questions the upgrade agent may put to the owner before the run gives up on it.
 const OWNER_ROUNDS = 5;
-// A fetch over ssh that stops answering is cut off, so the run ends instead of holding the checkout
-// (and, while its step runs, every install: auto-install.sh's idle check) for good.
+// A fetch over ssh that stops answering is cut off, so the run waits and tries again instead of
+// holding the checkout (and, while its step runs, every install: auto-install.sh's idle check).
 const FETCH_ENV = {
   GIT_SSH_COMMAND:
     "ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4",
 };
+// The 08:00 run can start in a dark wake (v1's only run, 2026-11-24, stopped on a fetch that hung),
+// so a failed fetch sleeps an hour and tries again, through a morning of sleep. Not step.try's
+// `retry:`: its wait is in memory with the step `running`, which auto-install.sh counts as busy,
+// and a restart starts it over. A `sleep` holds no step running.
+const UPSTREAM_TRIES = 8;
+const upstreamRetryAfter = () =>
+  Duration.millis(Number(process.env.T3_FORK_UPSTREAM_RETRY_AFTER_MS ?? 60 * 60_000));
 // build.sh's version: the upstream tag's with "nightly" swapped for "fork", plus a build number.
 const FORK_VERSION = /^(\d+)\.(\d+)\.(\d+)-fork\.(\d+)\.(\d+)\.(\d+)$/;
 
@@ -88,7 +101,7 @@ const exec = (
 const gitFetch = (checkout: string, ...args: ReadonlyArray<string>) =>
   exec("git", ["fetch", "--quiet", ...args], {
     cwd: checkout,
-    timeoutMs: Number(process.env.T3_FORK_FETCH_TIMEOUT_MS ?? 10 * 60_000),
+    timeoutMs: Number(process.env.T3_FORK_FETCH_TIMEOUT_MS ?? 2 * 60_000),
     env: FETCH_ENV,
   });
 
@@ -202,13 +215,26 @@ const Upstream = Schema.Struct({
 });
 type Upstream = typeof Upstream.Type;
 
-// Read-only for the checkout's branches and files: fetches move only tags and remote refs.
-const readUpstream = Effect.gen(function* () {
+// The checkout, once git finds it: a local failure, so the run stops at once rather than retry.
+const findCheckout = Effect.suspend(() => {
   const checkout =
     process.env.T3_FORK_CHECKOUT ?? NodePath.join(NodeOS.homedir(), "repos", "t3code");
+  return Effect.as(exec("git", ["rev-parse", "--git-dir"], { cwd: checkout }), checkout);
+});
+// The only part that reaches the network, and so the only part tried again. Fetches move only tags
+// and remote refs, never the checkout's branches or files.
+const fetchUpstream = (checkout: string) =>
+  Effect.as(
+    Effect.andThen(
+      gitFetch(checkout, "upstream", "--tags"),
+      gitFetch(checkout, "origin", "fork/main"),
+    ),
+    null,
+  );
+
+// Local and read-only: what the fetches brought.
+const readUpstream = Effect.fn("readUpstream")(function* (checkout: string) {
   const git = (...args: ReadonlyArray<string>) => exec("git", args, { cwd: checkout });
-  yield* gitFetch(checkout, "upstream", "--tags");
-  yield* gitFetch(checkout, "origin", "fork/main");
   const base = yield* git(
     "describe",
     "--tags",
@@ -382,7 +408,12 @@ const AFTER_INSTALL = [
 
 // Q74 (pending): the install question and the launch, the run's last steps. Without it the run
 // ends with the build, and scripts/fork/auto-install.sh installs it by hand.
-const install = Effect.fn("install")(function* (checkout: string, build: string, why?: string) {
+const install = Effect.fn("install")(function* (
+  checkout: string,
+  build: string,
+  within: Parameters<typeof Duration.toMillis>[0],
+  why?: string,
+) {
   const answer = yield* askAnnounced("install", `Install the fork build ${build}?`, {
     title: [
       `Install the fork build ${build} now?`,
@@ -391,7 +422,7 @@ const install = Effect.fn("install")(function* (checkout: string, build: string,
     ].join(" "),
     choices: ["Install", "Not now"],
     data: { afterInstall: AFTER_INSTALL },
-    timeout: ANSWER_WITHIN,
+    timeout: within,
   });
   if (Option.isNone(answer) || answer.value.choice !== "Install") {
     // An unanswered question is asked again the next morning; a Not now is not.
@@ -426,11 +457,12 @@ const install = Effect.fn("install")(function* (checkout: string, build: string,
   return launched.value;
 });
 
-// Version 2 (Q75's notifications): version 1 never had a run, and a version names one body.
+// Version 3 (the upstream fetch's tries): version 1's one run has ended and version 2 never ran, and
+// a version names one body.
 export default workflow(
   NAME,
-  { version: 2, payload: Tick, triggers: [daily("08:00")] },
-  Effect.fn(function* (_tick, self) {
+  { version: 3, payload: Tick, triggers: [daily("08:00")] },
+  Effect.fn(function* (tick, self) {
     // Another run that owns the checkout, or null.
     const otherOwner = Effect.gen(function* () {
       const owner = Option.getOrNull(yield* OWNER.get);
@@ -445,10 +477,45 @@ export default workflow(
     );
     if (earlier !== null) return yield* skip(`run ${earlier} of ${NAME} is upgrading the fork`);
 
-    const read = yield* step.try("upstream", { returns: Upstream }, readUpstream);
+    const found = yield* step.try("checkout", { returns: Schema.String }, findCheckout);
+    if (found.outcome === "failed") return yield* stop(`no fork checkout: ${found.reason}`);
+    const fetchTry = (tried: number) =>
+      step.try(`upstream-${tried}`, { returns: Schema.Null }, fetchUpstream(found.value));
+    let fetched = yield* fetchTry(1);
+    for (let tried = 1; fetched.outcome === "failed" && tried < UPSTREAM_TRIES; tried++) {
+      yield* sleep(`upstream-wait-${tried}`, upstreamRetryAfter());
+      fetched = yield* fetchTry(tried + 1);
+    }
+    if (fetched.outcome === "failed") {
+      return yield* stop(
+        `could not fetch upstream in ${UPSTREAM_TRIES} tries, ${Duration.format(upstreamRetryAfter())} apart: ${fetched.reason}`,
+      );
+    }
+    const read = yield* step.try("read", { returns: Upstream }, readUpstream(found.value));
     if (read.outcome === "failed") return yield* stop(`could not read upstream: ${read.reason}`);
     const upstream = read.value;
     const target = upstream.target;
+    // The timeout of a question before the claim, read off the clock in a step so a replay gets
+    // the same one. A run already past it (or whose payload's `scheduledAt` is no time: NaN) leaves
+    // the question to the next morning's.
+    const beforeNextRun = Effect.gen(function* () {
+      const left = yield* step(
+        "ask-within",
+        { returns: Schema.Number },
+        Effect.clockWith((clock) =>
+          Effect.map(
+            clock.currentTimeMillis,
+            (now) => Date.parse(tick.scheduledAt) + ASK_BEFORE_NEXT_RUN_MS - now,
+          ),
+        ),
+      );
+      if (!(left > 0)) {
+        return yield* stop(
+          `too late to ask: due at ${tick.scheduledAt}, so the next morning's run asks`,
+        );
+      }
+      return Duration.millis(left);
+    });
     if (target === null) {
       if (upstream.uninstalled === null) {
         return yield* skip(`the fork is on the newest Nightly, ${upstream.base}`);
@@ -460,6 +527,7 @@ export default workflow(
         install: yield* install(
           upstream.checkout,
           build,
+          yield* beforeNextRun,
           `It is fork/main's build; T3 Code (Fork) is still ${installed}.`,
         ),
       };
@@ -470,7 +538,7 @@ export default workflow(
       title: upgradeQuestion(upstream, target),
       choices: ["Upgrade", "Not now"],
       data: upstream,
-      timeout: ANSWER_WITHIN,
+      timeout: yield* beforeNextRun,
     });
     if (Option.isNone(approved) || approved.value.choice !== "Upgrade") {
       return yield* stop(`not upgraded to ${target}`);
@@ -602,7 +670,7 @@ export default workflow(
       pushedSha,
       buildVersion,
       verify,
-      install: yield* install(upstream.checkout, buildVersion),
+      install: yield* install(upstream.checkout, buildVersion, ANSWER_WITHIN),
     };
   }),
 );
