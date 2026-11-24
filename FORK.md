@@ -830,14 +830,17 @@ stops before the install".
   first answered goes on. _Rejected:_ the earlier-started run wins (the review's first pick): a
   run started earlier and answered later would upgrade beside the one already upgrading. A build
   whose install the owner answered Not now (`upstream-upgrade/declined-build`) is not offered
-  again; a newer build is, and an unanswered question is asked again the next morning. A step that can fail on the outside world (`upstream`,
-  `launch-install`) ends the run with its reason instead of pausing it, and fetches run with a
-  timeout and ssh in batch mode, so a hung network never leaves a run holding the checkout. The
-  launch installs only the build it asked about (`release/` must hold that version) and nothing
-  when the Fork app already has it; a second launch while the first waits is refused by
-  `auto-install.sh`'s lock, and the run stops with that reason. With no newer Nightly the next
-  morning's run offers fork/main's build when the Fork app is older (an install that was launched
-  and failed).
+  again; a newer build is, and an unanswered question is asked again the next morning: a
+  question before the claim ends an hour before that run (`ASK_BEFORE_NEXT_RUN_MS`). A step that
+  can fail on the outside world ends the run with its reason instead of pausing it:
+  `launch-install` and the local reads at once, the upstream fetch only after its last try
+  (`UPSTREAM_TRIES`, `upstreamRetryAfter` apart, for a Mac asleep at 08:00; a sleeping run holds no
+  install). Fetches run with a timeout and ssh in batch mode, so a hung network never leaves a run
+  holding the checkout. The launch installs only the build it asked about (`release/` must hold
+  that version) and nothing when the Fork app already has it; a second launch while the first
+  waits is refused by `auto-install.sh`'s lock, and the run stops with that reason. With no newer
+  Nightly the next morning's run offers fork/main's build when the Fork app is older (an install
+  that was launched and failed).
 - **Installed as a copy:** `install.sh` copies the file into `~/.t3/workflows` once the app is in
   place (a differing copy, an edit in the Workflows page, goes to `~/.claude/trash` first), so a
   branch switched in the checkout never changes what runs. A body changed while a run is unfinished
@@ -855,14 +858,16 @@ stops before the install".
   globals come from. `knip.jsonc` lists it as an entry of `evals`, since only the server loads it.
 - _Rejected:_ `git ls-remote` instead of the fetch (the count of commits needs the objects);
   reviewing again after the fix (one round); worktrees for the reviews (they only read, and the
-  upgrade is done by then); retrying the fetch within a run (the next morning's run is the retry).
+  upgrade is done by then); retrying the fetch within a run (the next morning's run is the retry),
+  superseded 2026-11-24: v1's only run stopped on a fetch made while the Mac slept (see
+  `UPSTREAM_TRIES`).
 - **Tests:** `evals/fork/upstream-upgrade.test.ts` loads the file with the server's loader and
   drives it in the real engine on a throwaway database through `evals/workflow-authoring/grade.ts`,
   with stand-in agents, a checkout whose remotes are local repositories, a stand-in
-  `auto-install.sh` and an ssh that never answers (macOS only: it reads the app's version with
-  PlistBuddy). `apps/server/src/cloud/forkServiceRuntime.test.ts`: "counts a workflow run only
-  while code of it runs, …" (auto-install.sh) and "copies the upgrade workflow into the T3 home …"
-  (install.sh).
+  `auto-install.sh` and an ssh that fails or hangs on its first N connections (macOS only: it reads
+  the app's version with PlistBuddy). `apps/server/src/cloud/forkServiceRuntime.test.ts`: "counts
+  a workflow run only while code of it runs, …" (auto-install.sh) and "copies the upgrade workflow
+  into the T3 home …" (install.sh).
 - **Live check** (2026-11-23, of the first version): a server from the checkout on an isolated home
   with workflows on registered `upstream-upgrade@1` and its daily trigger (next due 08:00 local).
   Against a fake upstream, a run skipped with no newer Nightly; with one, it asked, and Not now
