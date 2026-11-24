@@ -8,14 +8,15 @@
 // Nightly it offers fork/main's build when the installed Fork app is older (an install that was
 // launched and failed), unless the owner answered Not now to that build.
 //
+// That is the upgrader role; the installer role, and why there are two, are FORK.md's "Roles".
+//
 // The server loads this with type stripping and does not type-check it; evals' typecheck does, and
 // upstream-upgrade.test.ts beside it drives it in the real engine. Rule 3 of the workflow skill
-// holds: once a run is unfinished, a changed body is a new `version`, with the old one kept in this
-// file until its runs end.
+// holds: once a run is unfinished, a changed body is a new `version` (the note at `version:` below).
 //
 // T3_FORK_CHECKOUT (the fork checkout, ~/repos/t3code by default), T3_FORK_APPLICATIONS_DIR
-// (install.sh's), T3_FORK_FETCH_TIMEOUT_MS and T3_FORK_UPSTREAM_RETRY_AFTER_MS are for that test
-// and a live check.
+// (install.sh's), T3_FORK_ROLE_FILE, T3_FORK_FETCH_TIMEOUT_MS and T3_FORK_UPSTREAM_RETRY_AFTER_MS
+// are for that test and a live check.
 //
 // A workflow file may not import effect (the workflow skill, rule 4), so Node is its only way to
 // run a process or read the environment and the disk.
@@ -25,7 +26,6 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeUtil from "node:util";
 
 const { workflow, step, agent, ask, sleep, skip, stop, title, runs, store, daily, Tick } = T3;
 
@@ -38,6 +38,14 @@ const MIGRATIONS = "apps/server/src/persistence/Migrations/";
 const OWNER = store.entry(`${NAME}/checkout`, Schema.String);
 // The build whose install the owner answered Not now: never offered again, a newer one is.
 const DECLINED = store.entry(`${NAME}/declined-build`, Schema.String);
+// The installer's: the fork/main commit the owner answered Not now to building.
+const DECLINED_COMMIT = store.entry(`${NAME}/declined-commit`, Schema.String);
+const Role = Schema.Literals(["upgrader", "installer"]);
+// install.sh's record of this machine's role (FORK.md, "Roles"). The server loads only .ts files
+// from this folder.
+const roleFile = () =>
+  process.env.T3_FORK_ROLE_FILE ??
+  NodePath.join(NodeOS.homedir(), ".t3", "workflows", `${NAME}.role`);
 // The owner's default model; MAIN-85 asks for Opus reviews, and the upgrade is the same model.
 const OPUS = {
   instanceId: "claudeAgent",
@@ -69,7 +77,15 @@ const upstreamRetryAfter = () =>
 // build.sh's version: the upstream tag's with "nightly" swapped for "fork", plus a build number.
 const FORK_VERSION = /^(\d+)\.(\d+)\.(\d+)-fork\.(\d+)\.(\d+)\.(\d+)$/;
 
-const run = NodeUtil.promisify(NodeChildProcess.execFile);
+// How long a process group asked to end (SIGTERM) has before it is killed (SIGKILL).
+const KILL_AFTER_MS = 5_000;
+// The lines of stderr a failure quotes.
+const STDERR_LINES = 20;
+
+// `command`'s stdout, run in a process group of its own (spawn's `detached`; execFile ignores it).
+// A timeout or interrupt SIGTERMs the whole group (build.sh's builds, git's ssh), and SIGKILLs it
+// KILL_AFTER_MS later if still there: `close` is no sign, as what ignores SIGTERM may have left our
+// pipes. Ceiling: a group id reused within those seconds is killed too (unlikely; inferred).
 const exec = (
   command: string,
   args: ReadonlyArray<string>,
@@ -80,23 +96,54 @@ const exec = (
   },
 ) => {
   const timeout = options.timeoutMs ?? 60_000;
+  const failed = (why: string) => new Error(`${command} ${args.join(" ")}: ${why}`);
   return Effect.tryPromise({
-    try: () =>
-      run(command, [...args], {
-        cwd: options.cwd,
-        env: { ...process.env, ...options.env },
-        timeout,
-        maxBuffer: 16 * 1024 * 1024,
-      }).then((out) => out.stdout.trim()),
-    catch: (error) =>
-      new Error(
-        `${command} ${args.join(" ")}: ${
-          error instanceof Error && "killed" in error && error.killed === true
-            ? `no answer within ${timeout / 1000}s`
-            : String(error)
-        }`,
-      ),
-  });
+    try: (abort) =>
+      new Promise<string>((resolve, reject) => {
+        const child = NodeChildProcess.spawn(command, [...args], {
+          cwd: options.cwd,
+          env: { ...process.env, ...options.env },
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: true,
+        });
+        let stdout = "";
+        // Its last STDERR_LINES lines only: execFile's 16 MiB cap went with execFile, and a build's
+        // stderr has no other bound. Ceiling: one line that never ends is kept whole.
+        let stderr = "";
+        child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+          stderr = (stderr + chunk).split("\n").slice(-STDERR_LINES).join("\n");
+        });
+        abort.addEventListener("abort", () => {
+          const group = child.pid;
+          if (group === undefined) return;
+          const signal = (name: NodeJS.Signals) => {
+            try {
+              process.kill(-group, name);
+            } catch {
+              // The group is already gone.
+            }
+          };
+          signal("SIGTERM");
+          // @effect-diagnostics-next-line globalTimers:off -- the fiber is interrupted by now; this outlives it.
+          setTimeout(() => signal("SIGKILL"), KILL_AFTER_MS);
+        });
+        child.on("error", reject);
+        child.on("close", (code, signal) =>
+          code === 0
+            ? resolve(stdout.trim())
+            : reject(new Error(`exited ${code ?? signal}: ${stderr.trim()}`)),
+        );
+      }),
+    catch: (error) => failed(error instanceof Error ? error.message : String(error)),
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: Duration.millis(timeout),
+      orElse: () => Effect.fail(failed(`no answer within ${timeout / 1000}s`)),
+    }),
+  );
 };
 const gitFetch = (checkout: string, ...args: ReadonlyArray<string>) =>
   exec("git", ["fetch", "--quiet", ...args], {
@@ -136,6 +183,23 @@ const askAnnounced = <const Choices extends ReadonlyArray<string>>(
   short: string,
   options: Parameters<typeof ask<Choices>>[1],
 ) => Effect.andThen(notify(name, short), ask(name, options));
+
+// The file's text, or "" without one.
+const readOrEmpty = (path: string) =>
+  Effect.tryPromise({
+    try: () => NodeFSP.readFile(path, "utf8"),
+    catch: (error) => new Error(String(error)),
+  }).pipe(Effect.orElseSucceed(() => ""));
+// build.sh's record of each build in the checkout's clone, `<version> <commit>` a line (build.sh
+// says why it is there), as [version, commit] pairs.
+const forkBuilds = (checkout: string) =>
+  Effect.flatMap(
+    exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: checkout }),
+    (dir) =>
+      Effect.map(readOrEmpty(NodePath.join(dir, "fork-builds")), (text) =>
+        text.split("\n").map((line) => line.split(" ")),
+      ),
+  );
 
 // The highest numbered migration at `ref`: upstream's own head, as FORK.md's step 1 reads it.
 const migrationHead = (checkout: string, ref: string) =>
@@ -232,17 +296,16 @@ const fetchUpstream = (checkout: string) =>
     null,
   );
 
+// The Nightly origin's fork/main sits on.
+const forkBase = (checkout: string) =>
+  exec("git", ["describe", "--tags", "--abbrev=0", "--match", NIGHTLY, "origin/fork/main"], {
+    cwd: checkout,
+  });
+
 // Local and read-only: what the fetches brought.
 const readUpstream = Effect.fn("readUpstream")(function* (checkout: string) {
   const git = (...args: ReadonlyArray<string>) => exec("git", args, { cwd: checkout });
-  const base = yield* git(
-    "describe",
-    "--tags",
-    "--abbrev=0",
-    "--match",
-    NIGHTLY,
-    "origin/fork/main",
-  );
+  const base = yield* forkBase(checkout);
   const newest = (yield* git("tag", "-l", NIGHTLY, "--sort=-version:refname")).split("\n")[0];
   if (newest === undefined || newest === "" || newest === base) {
     // Ceiling: the build in release/ is taken for fork/main's when it is of fork/main's base; one
@@ -278,6 +341,118 @@ const readUpstream = Effect.fn("readUpstream")(function* (checkout: string) {
     migrations: to >= from ? { from, to } : null,
     uninstalled: null,
   } satisfies Upstream;
+});
+
+// The recorded role. None, or anything else, stops the run: a guess is wrong on one of the machines,
+// and a wrong upgrader races the other to force-push fork/main.
+const readRole = Effect.tryPromise({
+  try: () => NodeFSP.readFile(roleFile(), "utf8"),
+  catch: (error) =>
+    new Error(
+      error instanceof Error && "code" in error && error.code === "ENOENT"
+        ? `none is recorded in ${roleFile()}: install with --role upgrader (the one machine that upgrades) or --role installer (every other), e.g. scripts/fork/auto-install.sh --role installer`
+        : String(error),
+    ),
+}).pipe(
+  Effect.map((text) => text.trim()),
+  Effect.filterOrFail(
+    Schema.is(Role),
+    (text) => new Error(`${roleFile()} holds "${text}", not upgrader or installer`),
+  ),
+);
+
+const ForkMain = Schema.Struct({
+  checkout: Schema.String,
+  /** origin/fork/main's commit, which a Build builds. */
+  sha: Schema.String,
+  /** The Nightly it sits on. */
+  base: Schema.String,
+  /** The Fork app's version, or null without one. */
+  installed: Schema.NullOr(Schema.String),
+  /** The commit that version was built from (build.sh's record), or null when none is recorded. */
+  installedCommit: Schema.NullOr(Schema.String),
+  /** Whether the owner answered Not now to building `sha`. */
+  declined: Schema.Boolean,
+});
+type ForkMain = typeof ForkMain.Type;
+
+// Local and read-only: fork/main as the fetches left it, and what the Fork app was built from. The
+// app's own version is the key into build.sh's record, so an install by hand or a release/ build.sh
+// cleared still answers.
+const readForkMain = Effect.fn("readForkMain")(function* (checkout: string) {
+  const sha = yield* exec("git", ["rev-parse", "origin/fork/main"], { cwd: checkout });
+  const base = yield* forkBase(checkout);
+  const installed = yield* installedVersion;
+  const builds = yield* forkBuilds(checkout);
+  const installedCommit =
+    installed === null
+      ? null
+      : (builds.findLast(([version]) => version === installed)?.[1] ?? null);
+  const declined = Option.getOrNull(yield* DECLINED_COMMIT.get) === sha;
+  return { checkout, sha, base, installed, installedCommit, declined } satisfies ForkMain;
+});
+
+// The checkout, on a clean fork/main whose head is not a local commit, moved to `sha` without
+// a checkout of anything else: a reset, which a fast-forward is one case of (fork/main is rebased, so
+// it seldom is). The old head stays in the reflog. Anything else stops the run rather than lose work.
+const moveCheckout = Effect.fn("moveCheckout")(function* (checkout: string, sha: string) {
+  const git = (...args: ReadonlyArray<string>) => exec("git", args, { cwd: checkout });
+  const branch = yield* git("symbolic-ref", "--quiet", "--short", "HEAD").pipe(
+    Effect.orElseSucceed(() => "(detached HEAD)"),
+  );
+  if (branch !== "fork/main") {
+    return yield* Effect.fail(new Error(`${checkout} is on ${branch}, not fork/main`));
+  }
+  const dirty = yield* git("status", "--porcelain");
+  if (dirty !== "") {
+    return yield* Effect.fail(
+      new Error(`${checkout} has changes: ${dirty.split("\n").slice(0, 5).join("; ")}`),
+    );
+  }
+  // A head is known when it is `sha`, a commit this clone built (an installer's is, once it has
+  // built), or one origin's fork/main held per its reflog (old and new values: a clone writes none).
+  // Not "on a remote branch", which no head is once fork/main is rebased; the reflog alone forgets
+  // a head after gc's 30 days. No reflog (reftable) leaves the first two.
+  const head = yield* git("rev-parse", "HEAD");
+  const built = yield* forkBuilds(checkout);
+  const reflog = yield* readOrEmpty(
+    yield* git(
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "logs/refs/remotes/origin/fork/main",
+    ),
+  );
+  const known = [
+    sha,
+    ...built.map(([, commit]) => commit),
+    ...reflog.split("\n").flatMap((line) => line.split(" ").slice(0, 2)),
+  ];
+  if (!known.includes(head)) {
+    return yield* Effect.fail(
+      new Error(
+        `${checkout}'s fork/main is at ${head.slice(0, 10)}, which neither this clone built nor origin's held; once nothing on it matters, run: git -C ${checkout} reset --hard origin/fork/main`,
+      ),
+    );
+  }
+  yield* git("reset", "--hard", "--quiet", sha);
+  return sha;
+});
+
+// build.sh in the checkout (its `vp i` included); the version it left in release/.
+const buildCheckout = Effect.fn("buildCheckout")(function* (checkout: string) {
+  // Two minutes as a rule; once (2026-11-23) it hung after signing, so a cut-off ends the run.
+  yield* exec(NodePath.join(checkout, "scripts", "fork", "build.sh"), [], {
+    cwd: checkout,
+    timeoutMs: 45 * 60_000,
+  });
+  const built = yield* releaseVersion(checkout);
+  // Checked here, not left to the step's `returns`: a value that fails it pauses the run for a
+  // person (workflow.ts, `unstorable`) instead of coming back as failed, and the run stops.
+  if (built === null || !FORK_VERSION.test(built)) {
+    return yield* Effect.fail(new Error(`build.sh left ${built ?? "no build"} in release/`));
+  }
+  return built;
 });
 
 const Verify = Schema.Struct({
@@ -406,6 +581,23 @@ const AFTER_INSTALL = [
   "In Nightly, ignore any update-server banner and never use Update track or Update everything.",
 ];
 
+// Another unfinished run than `self` that owns the checkout, or null.
+const otherOwner = Effect.fn("otherOwner")(function* (self: string) {
+  const owner = Option.getOrNull(yield* OWNER.get);
+  if (owner === null || owner === self) return null;
+  const all = yield* runs({ workflow: NAME });
+  return all.some((other) => other.id === owner && other.endedAt === null) ? owner : null;
+});
+// Two runs can both have asked (a run started by hand beside the morning's): one goes on.
+const claim = (self: string) =>
+  step(
+    "claim",
+    { returns: Schema.NullOr(Schema.String) },
+    store.transaction(
+      Effect.tap(otherOwner(self), (owner) => (owner === null ? OWNER.set(self) : Effect.void)),
+    ),
+  );
+
 // Q74 (pending): the install question and the launch, the run's last steps. Without it the run
 // ends with the build, and scripts/fork/auto-install.sh installs it by hand.
 const install = Effect.fn("install")(function* (
@@ -433,8 +625,71 @@ const install = Effect.fn("install")(function* (
       `built ${build}, not installed: run scripts/fork/auto-install.sh to install it`,
     );
   }
-  // auto-install.sh waits for this run to end (it counts a workflow run while a step runs), so
-  // its quit never lands mid-step. A second launch while the first waits is refused by its lock.
+  return yield* launchInstall(checkout, build);
+});
+
+// The installer's run once fork/main is not the commit the Fork app was built from: asks, then
+// moves the checkout to it, builds and launches the install. It never rebases, reviews or pushes.
+const buildForkMain = Effect.fn("buildForkMain")(function* (
+  self: string,
+  forkMain: ForkMain,
+  within: Parameters<typeof Duration.toMillis>[0],
+) {
+  const short = forkMain.sha.slice(0, 10);
+  const question = `Build and install fork/main ${short} (upstream ${forkMain.base})?`;
+  yield* title(question);
+  const built =
+    forkMain.installedCommit === null
+      ? "no recorded commit"
+      : forkMain.installedCommit.slice(0, 10);
+  const build = yield* askAnnounced("build", question, {
+    title: [
+      question,
+      forkMain.installed === null
+        ? "T3 Code (Fork) is not installed."
+        : `T3 Code (Fork) is ${forkMain.installed}, built from ${built}.`,
+      "Every T3 Code app closes and T3 Code (Fork) reopens once the build is done and no run is active.",
+    ].join(" "),
+    choices: ["Build", "Not now"],
+    data: { ...forkMain, afterInstall: AFTER_INSTALL },
+    timeout: within,
+  });
+  if (Option.isNone(build) || build.value.choice !== "Build") {
+    // As the upgrader's install question: unanswered is asked again, Not now is not.
+    if (Option.isSome(build)) {
+      yield* step(
+        "declined",
+        { returns: Schema.String },
+        Effect.as(DECLINED_COMMIT.set(forkMain.sha), forkMain.sha),
+      );
+    }
+    return yield* stop(`fork/main ${short} not built`);
+  }
+  yield* title(`Building fork/main ${short}`);
+  const taken = yield* claim(self);
+  if (taken !== null) return yield* stop(`run ${taken} took the checkout first`);
+  const moved = yield* step.try(
+    "move-checkout",
+    { returns: Schema.String },
+    moveCheckout(forkMain.checkout, forkMain.sha),
+  );
+  if (moved.outcome === "failed") return yield* stop(`not built: ${moved.reason}`);
+  const made = yield* step.try(
+    "make-build",
+    { returns: BuildVersion },
+    buildCheckout(forkMain.checkout),
+  );
+  if (made.outcome === "failed") return yield* stop(`not built: ${made.reason}`);
+  return {
+    forkMain: forkMain.sha,
+    buildVersion: made.value,
+    install: yield* launchInstall(forkMain.checkout, made.value),
+  };
+});
+
+// auto-install.sh waits for this run to end (it counts a workflow run while a step runs), so its
+// quit never lands mid-step. A second launch while the first waits is refused by its lock.
+const launchInstall = Effect.fn("launchInstall")(function* (checkout: string, build: string) {
   const launched = yield* step.try(
     "launch-install",
     { returns: Schema.String },
@@ -457,25 +712,25 @@ const install = Effect.fn("install")(function* (
   return launched.value;
 });
 
-// Version 3 (the upstream fetch's tries): version 1's one run has ended and version 2 never ran, and
-// a version names one body.
+// Version 4 (the installer role, Q77). Version 3 is not kept: the server holds a file back while it
+// drops a version with unfinished runs, and loads it once they end (WorkflowRuntime.ts, HELD_RETRY).
 export default workflow(
   NAME,
-  { version: 3, payload: Tick, triggers: [daily("08:00")] },
+  { version: 4, payload: Tick, triggers: [daily("08:00")] },
   Effect.fn(function* (tick, self) {
-    // Another run that owns the checkout, or null.
-    const otherOwner = Effect.gen(function* () {
-      const owner = Option.getOrNull(yield* OWNER.get);
-      if (owner === null || owner === self.id) return null;
-      const all = yield* runs({ workflow: NAME });
-      return all.some((other) => other.id === owner && other.endedAt === null) ? owner : null;
-    });
+    const role = yield* step.try("role", { returns: Role }, readRole);
+    if (role.outcome === "failed") return yield* stop(`no role: ${role.reason}`);
+    const installer = role.value === "installer";
     const earlier = yield* step(
       "earlier-run",
       { returns: Schema.NullOr(Schema.String) },
-      otherOwner,
+      otherOwner(self.id),
     );
-    if (earlier !== null) return yield* skip(`run ${earlier} of ${NAME} is upgrading the fork`);
+    if (earlier !== null) {
+      return yield* skip(
+        `run ${earlier} of ${NAME} is ${installer ? "building fork/main" : "upgrading the fork"}`,
+      );
+    }
 
     const found = yield* step.try("checkout", { returns: Schema.String }, findCheckout);
     if (found.outcome === "failed") return yield* stop(`no fork checkout: ${found.reason}`);
@@ -491,10 +746,6 @@ export default workflow(
         `could not fetch upstream in ${UPSTREAM_TRIES} tries, ${Duration.format(upstreamRetryAfter())} apart: ${fetched.reason}`,
       );
     }
-    const read = yield* step.try("read", { returns: Upstream }, readUpstream(found.value));
-    if (read.outcome === "failed") return yield* stop(`could not read upstream: ${read.reason}`);
-    const upstream = read.value;
-    const target = upstream.target;
     // The timeout of a question before the claim, read off the clock in a step so a replay gets
     // the same one. A run already past it (or whose payload's `scheduledAt` is no time: NaN) leaves
     // the question to the next morning's.
@@ -516,6 +767,26 @@ export default workflow(
       }
       return Duration.millis(left);
     });
+    if (installer) {
+      const read = yield* step.try(
+        "read-fork-main",
+        { returns: ForkMain },
+        readForkMain(found.value),
+      );
+      if (read.outcome === "failed") return yield* stop(`could not read fork/main: ${read.reason}`);
+      const forkMain = read.value;
+      const short = forkMain.sha.slice(0, 10);
+      if (forkMain.installedCommit === forkMain.sha) {
+        return yield* skip(`T3 Code (Fork) ${forkMain.installed} is fork/main's ${short}`);
+      }
+      if (forkMain.declined) return yield* skip(`fork/main ${short} was answered Not now`);
+      return yield* buildForkMain(self.id, forkMain, yield* beforeNextRun);
+    }
+
+    const read = yield* step.try("read", { returns: Upstream }, readUpstream(found.value));
+    if (read.outcome === "failed") return yield* stop(`could not read upstream: ${read.reason}`);
+    const upstream = read.value;
+    const target = upstream.target;
     if (target === null) {
       if (upstream.uninstalled === null) {
         return yield* skip(`the fork is on the newest Nightly, ${upstream.base}`);
@@ -544,14 +815,7 @@ export default workflow(
       return yield* stop(`not upgraded to ${target}`);
     }
     yield* title(`Upgrading the fork ${upstream.base} → ${target}`);
-    // Two runs can both have asked (a run started by hand beside the morning's): one upgrades.
-    const taken = yield* step(
-      "claim",
-      { returns: Schema.NullOr(Schema.String) },
-      store.transaction(
-        Effect.tap(otherOwner, (owner) => (owner === null ? OWNER.set(self.id) : Effect.void)),
-      ),
-    );
+    const taken = yield* claim(self.id);
     if (taken !== null) return yield* stop(`run ${taken} took the checkout first`);
 
     const working = {
