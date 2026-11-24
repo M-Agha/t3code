@@ -10,6 +10,8 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -22,7 +24,6 @@ import { type AgentTurnInput, type Case, grade, type World } from "../workflow-a
 const file = NodePath.join(import.meta.dirname, "upstream-upgrade.ts");
 const BASE = "v0.1.12-nightly.20261123.5124";
 const NEWER = "v0.1.12-nightly.20261125.5150";
-const TICK = { scheduledAt: "2026-11-25T08:00:00.000Z" };
 const VERSION = "0.1.12-fork.20261125.5150.1";
 const FIXED_VERSION = "0.1.12-fork.20261125.5150.2";
 // Builds of fork/main on BASE.
@@ -31,6 +32,9 @@ const BASE_OLDER = "0.1.12-fork.20261123.5124.1";
 const BASE_NEWEST = "0.1.12-fork.20261123.5124.3";
 
 const macOnly = HostProcess.Platform.defaultValue() !== "darwin";
+// A durable sleep wakes at the engine's next look at its messages, 10 seconds apart on a server;
+// the upstream fetch's retries sleep up to seven times.
+process.env.ENTITY_MESSAGE_POLL_INTERVAL = "200 millis";
 const saved = { ...process.env };
 afterEach(() => {
   process.env = { ...saved };
@@ -59,15 +63,18 @@ const write = (path: string, text: string) => {
 
 /**
  * Upstream with Nightly tags (`NEWER` adds migrations 111-112), fork/main on `BASE`, the checkout,
- * a stand-in auto-install.sh that logs each launch, and a stand-in osascript that logs each
- * notification. `installed`: the Fork app's version; `release`: the build in release/; `hang`:
- * upstream is reached over an ssh that never answers; `notifyFails`: osascript exits 1.
+ * logging stand-ins for auto-install.sh and osascript (`notifyFails`: it exits 1). `unreachable`:
+ * the first `tries` ssh connections fail (or `hang`); a failed fetch is tried again `retryAfterMs` on.
  */
 const machine = (options: {
   readonly newer: boolean;
   readonly installed?: string;
   readonly release?: string;
-  readonly hang?: boolean;
+  readonly unreachable?: {
+    readonly tries: number;
+    readonly hang?: boolean;
+    readonly retryAfterMs?: number;
+  };
   readonly notifyFails?: boolean;
 }) => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-upgrade-"));
@@ -133,22 +140,33 @@ const machine = (options: {
     `printf '%s|%s\\n' "$7" "$8" >>"${notifications}"\n${options.notifyFails === true ? 'echo "not allowed" >&2\nexit 1\n' : ""}`,
   );
   const ssh = NodePath.join(root, "ssh.log");
-  if (options.hang === true) {
+  if (options.unreachable !== undefined) {
+    const { tries, hang, retryAfterMs = 1000 } = options.unreachable;
     git(checkout, "remote", "set-url", "upstream", "ssh://example.invalid/upstream.git");
-    // Found on PATH through the workflow's GIT_SSH_COMMAND; it outlives the fetch by a few seconds.
-    tool("ssh", `echo "$@" >>"${ssh}"\nexec sleep 5\n`);
+    // Found on PATH through the workflow's GIT_SSH_COMMAND. A hang outlives the fetch by seconds.
+    tool(
+      "ssh",
+      `echo "$@" >>"${ssh}"\nif [ "$(wc -l <"${ssh}")" -le ${tries} ]; then\n${
+        hang === true
+          ? "  exec sleep 5\n"
+          : '  echo "ssh: Could not resolve hostname example.invalid" >&2\n  exit 255\n'
+      }fi\nexec git upload-pack "${upstream}"\n`,
+    );
     process.env.T3_FORK_FETCH_TIMEOUT_MS = "1000";
+    process.env.T3_FORK_UPSTREAM_RETRY_AFTER_MS = String(retryAfterMs);
   }
   Object.assign(process.env, gitEnv, {
     T3_FORK_CHECKOUT: checkout,
     T3_FORK_APPLICATIONS_DIR: apps,
   });
   return {
+    upstream,
+    origin,
     checkout,
     log,
     launches: () =>
       NodeFS.existsSync(launches) ? NodeFS.readFileSync(launches, "utf8").trim().split("\n") : [],
-    ssh: () => (NodeFS.existsSync(ssh) ? NodeFS.readFileSync(ssh, "utf8") : ""),
+    ssh: () => (NodeFS.existsSync(ssh) ? NodeFS.readFileSync(ssh, "utf8").trim().split("\n") : []),
     notifications: () =>
       NodeFS.existsSync(notifications)
         ? NodeFS.readFileSync(notifications, "utf8").trim().split("\n")
@@ -228,11 +246,14 @@ const finding = (severity: "P1" | "P3", file: string) => ({
   verified: true,
 });
 
-const start = (workflows: Workflows.Workflows["Service"], key: string) =>
-  Effect.map(
-    workflows.start("upstream-upgrade", TICK, { idempotencyKey: key }),
-    ({ runId }) => runId,
-  );
+/** A run of the 08:00 trigger, due `dueAgo` back: a question before the claim ends 23 hours on. */
+const start = (workflows: Workflows.Workflows["Service"], key: string, dueAgo = Duration.zero) =>
+  Effect.gen(function* () {
+    const due = DateTime.subtractDuration(yield* DateTime.now, dueAgo);
+    const tick = { scheduledAt: DateTime.formatIso(due) };
+    const { runId } = yield* workflows.start("upstream-upgrade", tick, { idempotencyKey: key });
+    return runId;
+  });
 /** Answers Upgrade, then Install once it is asked. */
 const upgradeThenInstall = Effect.fn(function* (
   workflows: Workflows.Workflows["Service"],
@@ -417,23 +438,193 @@ upgradeIt(
   }),
 );
 
-// W2(a), W3: a fetch that hangs is cut off, and the run ends rather than pausing for good.
+/** Until the run sleeps at `name` (or ends): what it is then, and its steps. */
+const asleepAt = Effect.fn(function* (
+  workflows: Workflows.Workflows["Service"],
+  runId: string,
+  name: string,
+) {
+  yield* workflows
+    .waitFor(runId, (run) => run.endedAt !== null || run.detail === `sleep ${name}`)
+    .pipe(Effect.timeoutOption("10 seconds"));
+  return yield* workflows.get(runId);
+});
+
+/**
+ * Each of the run's waits between upstream fetches, `waits` of them: asleep, the run holds no
+ * install (auto-install.sh's `active_runs` counts a run that is `running` or has a `step` running),
+ * and it sleeps `seconds`, durably, before it wakes.
+ */
+const sleepsThrough = Effect.fn(function* (
+  workflows: Workflows.Workflows["Service"],
+  runId: string,
+  waits: ReadonlyArray<number>,
+  seconds = 1,
+) {
+  const problems: Array<string> = [];
+  for (const wait of waits) {
+    const name = `upstream-wait-${wait}`;
+    const { run, steps } = yield* asleepAt(workflows, runId, name);
+    if (run.status !== "waiting" || run.detail !== `sleep ${name}`) {
+      return [...problems, `At ${name} it was ${run.status}: ${run.detail}`];
+    }
+    const busy = steps.filter((one) => one.status === "running" && one.kind === "step");
+    if (busy.length > 0) problems.push(`Asleep at ${name}, ${busy[0]?.name} was running.`);
+    const sleep = steps.find((one) => one.name === name);
+    const length = Date.parse(sleep?.detail ?? "") - Date.parse(sleep?.startedAt ?? "");
+    if (sleep?.kind !== "sleep" || Math.abs(length - seconds * 1000) > 500) {
+      problems.push(`${name} was ${sleep?.kind} until ${sleep?.detail}, from ${sleep?.startedAt}.`);
+    }
+    const woke = yield* workflows
+      .waitFor(runId, (run) => run.detail !== `sleep ${name}`)
+      .pipe(Effect.timeoutOption("10 seconds"));
+    if (Option.isNone(woke)) return [...problems, `It never woke from ${name}.`];
+  }
+  return problems;
+});
+
+// A Mac asleep at 08:00 (v1's only run, 2026-11-24): a fetch that fails waits and tries again, and
+// a server restart while it sleeps repeats no try that ended.
+gradeIt(
+  "tries upstream again after a fetch fails, across a restart while it sleeps, and then asks",
+  () => ({}),
+  Effect.fn(function* (world) {
+    // A wait long enough that the first server is gone before the run wakes.
+    const m = machine({ newer: true, unreachable: { tries: 2, retryAfterMs: 3000 } });
+    const runId = yield* world.server(
+      Effect.fn(function* (workflows) {
+        const runId = yield* start(workflows, "a");
+        yield* asleepAt(workflows, runId, "upstream-wait-1");
+        return runId;
+      }),
+    );
+    // The restart came while it slept: only the first try had run.
+    const before = m.ssh().length;
+    return yield* world.server(
+      Effect.fn(function* (workflows) {
+        const problems = [
+          ...(before === 1 ? [] : [`Before the restart ssh ran ${before} times.`]),
+          ...(yield* sleepsThrough(workflows, runId, [2], 3)),
+        ];
+        const question = titleOf(yield* asked(workflows, runId, "approve"));
+        if (question?.title.startsWith(`Upgrade the fork from ${BASE} to ${NEWER}?`) !== true) {
+          return [...problems, `It asked ${question?.title}`];
+        }
+        const { steps } = yield* workflows.get(runId);
+        const tries = steps
+          .filter((one) => one.name.startsWith("upstream-"))
+          .map(
+            (one) =>
+              `${one.name} ${one.kind === "sleep" ? one.status : (one.result as { outcome?: string } | null)?.outcome}`,
+          );
+        const expected = [
+          "upstream-1 failed",
+          "upstream-wait-1 completed",
+          "upstream-2 failed",
+          "upstream-wait-2 completed",
+          "upstream-3 done",
+        ];
+        if (JSON.stringify(tries) !== JSON.stringify(expected)) {
+          problems.push(`Its tries were ${JSON.stringify(tries)}.`);
+        }
+        // One connection a try: none of the three repeated.
+        if (m.ssh().length !== 3) problems.push(`ssh ran ${m.ssh().length} times.`);
+        yield* answer(workflows, runId, "approve", { choice: "Not now" });
+        return problems;
+      }),
+    );
+  }),
+);
+
+// R4: only the fetches reach the network; a local read that fails (here git describe, with no
+// Nightly tag) stops the run at once with its reason.
 upgradeIt(
-  "ends the run when a fetch over ssh stops answering",
+  "stops at once, without trying again, when a local read fails",
   () => ({}),
   Effect.fn(function* (workflows, world) {
-    const m = machine({ newer: true, hang: true });
+    const m = machine({ newer: false });
+    // The checkout too: a local `clone --no-tags -b` still copies the tag its branch is on.
+    for (const repository of [m.upstream, m.origin, m.checkout]) {
+      git(repository, "tag", "-d", BASE, "v0.1.12-nightly.20261122.5111");
+    }
     const runId = yield* start(workflows, "a");
+    const ended = Option.getOrUndefined(
+      yield* world.reaches(workflows, runId, "stopped", "waiting", "paused", "skipped"),
+    );
+    const { steps } = yield* workflows.get(runId);
+    return [
+      ...(ended?.status === "stopped" &&
+      ended.detail?.startsWith("could not read upstream: git describe") === true
+        ? []
+        : [`It ended ${ended?.status}: ${ended?.detail}`]),
+      ...(steps.some((one) => one.kind === "sleep") ? ["It slept to try again."] : []),
+    ];
+  }),
+);
+
+// R1: the reads can end late in the day; a question before the claim still ends before the next
+// morning's run asks it again, and a run already past that asks nothing.
+upgradeIt(
+  "ends a question before the claim an hour before the next morning's run",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: true, unreachable: { tries: 1 } });
+    // Due 23 hours less 6 seconds ago: its question has 6 seconds, less the retry, to be answered.
+    const late = yield* start(workflows, "late", Duration.millis(23 * 60 * 60 * 1000 - 6_000));
+    const problems: Array<string> = [];
+    if (Option.isNone(yield* asked(workflows, late, "approve"))) return ["It never asked."];
+    // The engine's sweep, every 15 seconds, delivers the timeout.
+    const ended = Option.getOrUndefined(
+      yield* workflows
+        .waitFor(late, (run) => run.endedAt !== null)
+        .pipe(Effect.timeoutOption("30 seconds")),
+    );
+    const approve = (yield* workflows.get(late)).steps.find((one) => one.name === "approve");
+    if (ended?.detail !== `not upgraded to ${NEWER}` || approve?.detail !== "timed out") {
+      problems.push(`It ended ${ended?.status}: ${ended?.detail}; approve: ${approve?.detail}`);
+    }
+
+    // Past that hour already: it leaves the question to the next morning's run.
+    const pastRun = yield* start(workflows, "past", Duration.hours(24));
+    const stopped = Option.getOrUndefined(
+      yield* world.reaches(workflows, pastRun, "stopped", "waiting", "paused"),
+    );
+    if (stopped?.status !== "stopped" || stopped.detail?.startsWith("too late to ask") !== true) {
+      problems.push(`Past the hour it ended ${stopped?.status}: ${stopped?.detail}`);
+    }
+    if (m.notifications().length !== 1) {
+      problems.push(`osascript ran ${m.notifications().length} times.`);
+    }
+    return problems;
+  }),
+);
+
+// W2(a), W3: a fetch that hangs is cut off, and after its last try the run ends with the reason
+// rather than pausing for good.
+upgradeIt(
+  "stops after its last try when a fetch over ssh never answers",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: true, unreachable: { tries: 99, hang: true } });
+    const runId = yield* start(workflows, "a");
+    const problems = yield* sleepsThrough(workflows, runId, [1, 2, 3, 4, 5, 6, 7]);
     const ended = Option.getOrUndefined(
       yield* world.reaches(workflows, runId, "stopped", "paused", "skipped"),
     );
+    const { steps } = yield* workflows.get(runId);
     return [
+      ...problems,
       ...(ended?.status === "stopped" &&
-      ended.detail?.startsWith("could not read upstream: ") === true &&
+      ended.detail?.startsWith("could not fetch upstream in 8 tries, 1s apart: ") === true &&
       ended.detail.includes("no answer within 1s")
         ? []
         : [`It ended ${ended?.status}: ${ended?.detail}`]),
-      ...(m.ssh().includes("BatchMode=yes") ? [] : [`ssh ran as: ${m.ssh()}`]),
+      ...(m.ssh().length === 8 && m.ssh().every((line) => line.includes("BatchMode=yes"))
+        ? []
+        : [`ssh ran as: ${JSON.stringify(m.ssh())}`]),
+      ...(steps.some((one) => one.name === "upstream-wait-8")
+        ? ["It slept after its last try."]
+        : []),
     ];
   }),
 );
