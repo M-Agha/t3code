@@ -13,12 +13,31 @@
 # there starts the unit on disk again; an app started meanwhile leaves it stopped), opens T3 Code
 # (Fork), and runs the dotfiles doctor's T3 Code step when ~/.config is a dotfiles checkout.
 #
-# Usage: install.sh [--service-stopped]   the flag: the caller (auto-install.sh) stopped the service,
-#                                        and this run treats it as one it stopped
+# Usage: install.sh [--service-stopped] [--role upgrader|installer]
+#   --service-stopped  the caller (auto-install.sh) stopped the service, and this run treats it as one
+#                      it stopped
+#   --role             this machine's part in the daily upgrade workflow (FORK.md, "Roles"), recorded
+#                      beside its copy and kept by every later install that does not name one; with
+#                      none ever named the workflow is not copied
 # T3_FORK_APPLICATIONS_DIR replaces /Applications, for forkServiceRuntime.test.ts.
 # macOS only. Written for /bin/bash 3.2.
 set -euo pipefail
-[ $# -eq 0 ] || [ "$*" = --service-stopped ] || { echo "usage: install.sh [--service-stopped]" >&2; exit 2; }
+usage="usage: install.sh [--service-stopped] [--role upgrader|installer]"
+# A failure starts again only a service this run (or its caller) stopped: one the owner stopped
+# stays stopped.
+stopped=""
+role=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --service-stopped) stopped=yes ;;
+    --role)
+      case "${2:-}" in upgrader | installer) role="$2" ;; *) echo "$usage" >&2; exit 2 ;; esac
+      shift
+      ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+  shift
+done
 
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 apps_dir="${T3_FORK_APPLICATIONS_DIR:-/Applications}"
@@ -42,10 +61,6 @@ plist="$HOME/Library/LaunchAgents/$service_label.plist"
 # ran; a new runtime that nothing names is pruned like any other unused runtime.
 aside=""
 moved_in=""
-# A failure starts again only a service this run (or its caller) stopped: one the owner stopped
-# stays stopped.
-stopped=""
-[ "${1:-}" = --service-stopped ] && stopped=yes
 # A failure starts a service it stopped again from the unit on disk, or says how to. The unit runs
 # the launcher, which runs service-state.json's activeVersion (serviceLauncher.ts).
 restart_service() {
@@ -174,10 +189,36 @@ echo "Run one T3 Code app at a time: they share ~/.t3."
 
 # The daily upgrade workflow, as a copy, so switching the checkout's branch never changes what runs
 # (FORK.md, "The daily upgrade workflow"). A copy that differs (an edit in the Workflows page) goes
-# to the trash first. The server reloads it by itself, once Settings → Labs → Workflows is on.
+# to the trash first. The server reloads it by itself, once Settings → Labs → Workflows is on; it
+# loads only .ts files there, so the role file beside it is the workflow's alone. The role goes in
+# first, and no role means no copy: a machine that upgraded by default would race the one upgrader
+# to force-push fork/main.
 flow="$repo/evals/fork/upstream-upgrade.ts"
 flows="$t3_home/workflows"
-if cmp -s "$flow" "$flows/upstream-upgrade.ts"; then
+role_file="$flows/upstream-upgrade.role"
+recorded="$(cat "$role_file" 2>/dev/null || true)"
+if [ -n "$role" ] && [ "$recorded" != "$role" ]; then
+  if mkdir -p "$flows" && printf '%s\n' "$role" >"$role_file"; then
+    echo "Recorded this machine's upgrade workflow role: $role."
+  else
+    echo "install: could not record the role $role in $role_file, so the upgrade workflow was not copied; run: mkdir -p \"$flows\" && echo $role >\"$role_file\" && cp \"$flow\" \"$flows/\"" >&2
+    flow=""
+  fi
+elif [ -z "$role" ] && [ -z "$recorded" ]; then
+  echo "install: this machine has no upgrade workflow role, so the workflow was not copied; install again with --role upgrader (the one machine that upgrades fork/main) or --role installer (every other): scripts/fork/auto-install.sh --role installer" >&2
+  flow=""
+  # A copy from before roles reads no role file and upgrades: it goes too.
+  if [ -e "$flows/upstream-upgrade.ts" ]; then
+    if mv "$flows/upstream-upgrade.ts" "$trash/upstream-upgrade.ts_$stamp"; then
+      echo "install: moved the workflow copy that has no role to $trash/upstream-upgrade.ts_$stamp." >&2
+    else
+      echo "install: could not move $flows/upstream-upgrade.ts, which upgrades with no role; remove it by hand." >&2
+    fi
+  fi
+fi
+if [ -z "$flow" ]; then
+  :
+elif cmp -s "$flow" "$flows/upstream-upgrade.ts"; then
   :
 elif mkdir -p "$flows" &&
   { [ ! -e "$flows/upstream-upgrade.ts" ] || cp -p "$flows/upstream-upgrade.ts" "$trash/upstream-upgrade.ts_$stamp"; } &&

@@ -9,8 +9,9 @@
 # and logs to $logs/auto-install_<stamp>.log, whose last line starts "auto-install: SUCCESS" or
 # "auto-install: FAILED".
 #
-# Usage: auto-install.sh                 hands the work to launchd (below) and returns at once
-#        auto-install.sh --run <label>   the work, as launchd runs it
+# Usage: auto-install.sh [--role <r>]                hands the work to launchd (below) and returns at once
+#        auto-install.sh --run <label> [--role <r>]  the work, as launchd runs it
+# --role (upgrader or installer) goes on to install.sh, which records it (its header says how).
 #
 # Why launchd: the agent that starts this runs inside T3, under the app or under the background
 # service's launchd job. Quitting the app ends what it started, and install.sh's `launchctl bootout`
@@ -46,8 +47,27 @@ service_target="gui/$uid/com.t3tools.t3code.service"
 holder() { readlink "$lock" 2>/dev/null || true; }
 alive() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
 
-if [ "${1:-}" != --run ]; then
-  [ $# -eq 0 ] || { echo "usage: auto-install.sh" >&2; exit 2; }
+# Checked here, so a bad role fails before launchd is involved.
+usage="usage: auto-install.sh [--run <label>] [--role upgrader|installer]"
+label=""
+role=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run)
+      [ -n "${2:-}" ] || { echo "$usage" >&2; exit 2; }
+      label="$2"
+      shift
+      ;;
+    --role)
+      case "${2:-}" in upgrader | installer) role="$2" ;; *) echo "$usage" >&2; exit 2 ;; esac
+      shift
+      ;;
+    *) echo "$usage" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [ -z "$label" ]; then
   [ "$(uname -s)" = Darwin ] || { echo "auto-install: macOS only." >&2; exit 1; }
   # The runs it waits on, and the database install.sh backs up, are ~/.t3's (install.sh says why).
   [ -z "${T3CODE_HOME:-}" ] || [ "$T3CODE_HOME" = "$HOME/.t3" ] || {
@@ -73,7 +93,7 @@ if [ "${1:-}" != --run ]; then
 <dict>
   <key>Label</key><string>$label</string>
   <key>ProgramArguments</key>
-  <array><string>/bin/bash</string><string>$repo/scripts/fork/auto-install.sh</string><string>--run</string><string>$label</string></array>
+  <array><string>/bin/bash</string><string>$repo/scripts/fork/auto-install.sh</string><string>--run</string><string>$label</string>${role:+<string>--role</string><string>$role</string>}</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><false/>
   <key>StandardOutPath</key><string>$log</string>
@@ -95,8 +115,6 @@ EOF
   exit 0
 fi
 
-[ $# -eq 2 ] || { echo "usage: auto-install.sh --run <label>" >&2; exit 2; }
-label="$2"
 say() { echo "[$(date '+%F %T')] $*"; }
 
 result="FAILED: stopped before it finished; read the lines above"
@@ -293,9 +311,12 @@ done
 
 say "Running install.sh."
 status=0
-"$repo/scripts/fork/install.sh" ${stopped:+--service-stopped} || status=$?
+"$repo/scripts/fork/install.sh" ${stopped:+--service-stopped} ${role:+--role "$role"} || status=$?
 if [ "$status" -eq 0 ]; then
   result="SUCCESS: install.sh finished"
+  # install.sh copies the workflow only once a role is recorded, and says so in the lines above.
+  [ -s "$HOME/.t3/workflows/upstream-upgrade.role" ] ||
+    result="$result; the upgrade workflow was not copied: no role (install again with --role upgrader|installer)"
   reopen=""
 else
   result="FAILED: install.sh exited $status; read its lines above"

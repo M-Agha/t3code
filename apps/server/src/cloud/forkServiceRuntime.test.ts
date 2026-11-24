@@ -273,6 +273,8 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
         "shift 3",
         'echo "desktop=${T3CODE_DESKTOP_VERSION-} app=${APP_VERSION-} $*" >>"$MISE_LOG"',
         'case "$*" in',
+        '  *"vp i"*) echo "CI=${CI-}" >>"$MISE_LOG"; [ -z "${VP_I_FAILS-}" ] || exit 1 ;;',
+        '  *dist:desktop*) [ -z "${MOVE_HEAD-}" ] || git -c user.name=t -c user.email=t@t commit -q --allow-empty -m moved ;;',
         "  *build-cli-archive.ts*)",
         '    while [ $# -gt 0 ]; do case "$1" in --version) v="$2" ;; --output-dir) o="$2" ;; esac; shift; done',
         '    mkdir -p "$o/t3-$v-darwin-arm64" && tar -czf "$o/t3-$v-darwin-arm64.tar.gz" -C "$o" "t3-$v-darwin-arm64" ;;',
@@ -296,7 +298,7 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
 
   const build = Effect.fn(function* (
     built: { root: string; repo: string; bin: string },
-    options: { utc?: string } = {},
+    options: { utc?: string; moveHead?: boolean; vpIFails?: boolean } = {},
   ) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -311,6 +313,9 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
         PATH: `${built.bin}:/usr/bin:/bin`,
         MISE_LOG: log,
         FAKE_UTC: options.utc ?? "20261120120000",
+        MOVE_HEAD: options.moveHead === true ? "1" : undefined,
+        VP_I_FAILS: options.vpIFails === true ? "1" : undefined,
+        CI: undefined,
         GIT_CONFIG_GLOBAL: "/dev/null",
         // The test runner sets APP_VERSION; a shell running build.sh does not.
         APP_VERSION: undefined,
@@ -327,13 +332,28 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
     "stamps every build with a newer version, the same for the app and its runtime",
     () =>
       Effect.gen(function* () {
-        const { result, release, version, log } = yield* build(yield* buildRepo());
+        const built = yield* buildRepo();
+        const runner = yield* ProcessRunner.ProcessRunner;
+        const headOf = runner
+          .run({ command: "git", args: ["rev-parse", "HEAD"], cwd: built.repo })
+          .pipe(Effect.map((out) => out.stdout.trim()));
+        const head = yield* headOf;
+        // HEAD moves during the build (a commit in another terminal).
+        const { result, release, version, log } = yield* build(built, { moveHead: true });
         assert.equal(result.code, 0, result.stderr);
+        assert.notEqual(yield* headOf, head);
         assert.deepEqual(release, [`t3-${version}-darwin-arm64.tar.gz`]);
         assert.equal(version, `${versions.tag}.20261120120000`);
         assert.isTrue(isExactServiceVersion(version));
         assert.equal(compareExactServiceVersions(version, versions.tag), 1);
         const steps = log.join("\n");
+        // The dependencies first, of the commit being built: pnpm install with no terminal and the
+        // lockfile as committed.
+        assert.deepEqual(
+          log.slice(0, 2),
+          ["desktop= app= node_modules/.bin/vp i --frozen-lockfile", "CI=true"],
+          steps,
+        );
         assert.isTrue(
           log.some((line) => line.startsWith(`desktop=${version} app= `)),
           steps,
@@ -349,6 +369,12 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
         assert.isTrue(
           log.some((line) => line.includes(`--expect-version ${version}`)),
           steps,
+        );
+        // The installer role's record: this version was built from the HEAD it started at.
+        const fs = yield* FileSystem.FileSystem;
+        assert.equal(
+          yield* fs.readFileString(`${built.repo}/.git/fork-builds`),
+          `${version} ${head}\n`,
         );
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
@@ -376,6 +402,70 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
         const blocked = yield* build(repo);
         assert.include(blocked.result.stderr, "is held");
         assert.isTrue(yield* fs.exists(lock));
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // R3: vp i runs before the build number is taken and release/ is touched.
+  it.effect.skipIf(skipOnWindows)(
+    "leaves release/ and the build number as they were when vp i fails",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const built = yield* buildRepo();
+        const previous = `${built.repo}/release/T3-Code-${versions.tag}.1-arm64.zip`;
+        yield* fs.writeFileString(previous, "");
+        const failed = yield* build(built, { vpIFails: true });
+        assert.notEqual(failed.result.code, 0);
+        assert.deepEqual(failed.release, [`T3-Code-${versions.tag}.1-arm64.zip`]);
+        assert.isFalse(yield* fs.exists(`${built.repo}/.git/fork-build-number`));
+        assert.isFalse(yield* fs.exists(`${built.root}/.claude/trash`));
+        assert.isFalse(
+          yield* fs.readLink(`${built.repo}/.git/fork-build.running`).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          ),
+        );
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // R4: one build at a time in a checkout, for the whole run.
+  it.effect.skipIf(skipOnWindows)(
+    "refuses while another build of the checkout runs, and takes over a lock whose build is gone",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const runner = yield* ProcessRunner.ProcessRunner;
+        const built = yield* buildRepo();
+        const running = `${built.repo}/.git/fork-build.running`;
+
+        // This test's own pid: alive.
+        yield* fs.symlink(String(process.pid), running);
+        const refused = yield* build(built);
+        assert.notEqual(refused.result.code, 0);
+        assert.include(
+          refused.result.stderr,
+          `another build runs in ${built.repo} (pid ${process.pid}`,
+        );
+        assert.equal(yield* fs.readLink(running), String(process.pid));
+        assert.deepEqual(refused.log, [""]);
+
+        // A pid that has ended: its lock is taken over, and gone once the build is done.
+        const ended = yield* runner.run({ command: "/bin/sh", args: ["-c", "echo $$"] });
+        yield* fs.remove(running);
+        yield* fs.symlink(ended.stdout.trim(), running);
+        const after = yield* build(built);
+        assert.equal(after.result.code, 0, after.result.stderr);
+        assert.include(
+          after.result.stdout,
+          `Removing a build lock left by pid ${ended.stdout.trim()}`,
+        );
+        // The link, not what it names (a pid, no file).
+        assert.isFalse(
+          yield* fs.readLink(running).pipe(
+            Effect.as(true),
+            Effect.orElseSucceed(() => false),
+          ),
+        );
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 });
@@ -792,7 +882,8 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         yield* m.loaded(true);
         yield* m.shim("0.1.11-nightly.20261119.4900");
         yield* m.dotfiles;
-        const installed = yield* m.install();
+        // With a role, so no line on stderr is expected.
+        const installed = yield* m.install({}, ["--role", "upgrader"]);
         assert.equal(installed.code, 0, installed.stderr);
         assert.equal(yield* m.installedVersion, versions.current);
         assert.equal(yield* m.linked, versions.current);
@@ -881,7 +972,7 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.notEqual((yield* m.install({ UNRECORDED: "1" })).code, 0);
         assert.isFalse(yield* fs.exists(copy));
 
-        const first = yield* m.install();
+        const first = yield* m.install({}, ["--role", "upgrader"]);
         assert.equal(first.code, 0, first.stderr);
         assert.equal(yield* fs.readFileString(copy), yield* fs.readFileString(source));
         assert.include(first.stdout, `Copied the upgrade workflow to ${path.dirname(copy)}.`);
@@ -904,6 +995,86 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.equal(again.code, 0, again.stderr);
         assert.notInclude(again.stdout, "Copied the upgrade workflow");
         assert.lengthOf(yield* trashed, 1);
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // Q77: one machine upgrades; the others only install. The role sits beside the workflow's copy.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
+    "records the --role it is given beside the workflow, keeps it when none is given, and copies no workflow without one",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const m = yield* machine();
+        const role = path.join(m.t3Home, "workflows", "upstream-upgrade.role");
+        const copy = path.join(m.t3Home, "workflows", "upstream-upgrade.ts");
+        const recorded = fs.readFileString(role).pipe(Effect.orElseSucceed(() => "(none)"));
+
+        // Neither role, or none named: refused before anything is done.
+        for (const args of [["--role", "builder"], ["--role"], ["--role", "installer", "x"]]) {
+          const refused = yield* m.install({}, args);
+          assert.equal(refused.code, 2, args.join(" "));
+          assert.include(refused.stderr, "usage: install.sh");
+        }
+        assert.equal(yield* recorded, "(none)");
+        assert.deepEqual(yield* m.backups, []);
+
+        // No role ever named: the app installs, the workflow is not copied, and it says how to fix it.
+        // A copy from before roles, which would upgrade, goes to the trash.
+        yield* fs.makeDirectory(path.dirname(copy), { recursive: true });
+        yield* fs.writeFileString(copy, "// before roles\n");
+        yield* m.release(versions.earlier);
+        yield* m.shim(versions.earlier);
+        const plain = yield* m.install();
+        assert.equal(plain.code, 0, plain.stderr);
+        assert.include(plain.stdout, "Installed ");
+        assert.include(
+          plain.stderr,
+          "no upgrade workflow role, so the workflow was not copied; install again with --role upgrader",
+        );
+        assert.equal(yield* recorded, "(none)");
+        assert.isFalse(yield* fs.exists(copy));
+        const trash = path.join(m.home, ".claude", "trash");
+        const [old, ...others] = (yield* fs.readDirectory(trash)).filter((entry) =>
+          entry.startsWith("upstream-upgrade.ts_"),
+        );
+        assert.deepEqual(others, []);
+        assert.equal(yield* fs.readFileString(path.join(trash, old!)), "// before roles\n");
+        assert.include(
+          plain.stderr,
+          `moved the workflow copy that has no role to ${trash}/${old}.`,
+        );
+
+        const named = yield* m.install({}, ["--role", "installer"]);
+        assert.equal(named.code, 0, named.stderr);
+        assert.equal(yield* recorded, "installer\n");
+        assert.include(named.stdout, "Recorded this machine's upgrade workflow role: installer.");
+        assert.include(named.stdout, "Copied the upgrade workflow");
+
+        // The next install names none (auto-install.sh's default): kept.
+        yield* m.release(versions.current);
+        const kept = yield* m.install();
+        assert.equal(kept.code, 0, kept.stderr);
+        assert.equal(yield* recorded, "installer\n");
+        assert.notInclude(kept.stdout, "Recorded");
+        assert.notInclude(kept.stderr, "no upgrade workflow role");
+
+        // Changed by naming the other, with the other flag in either order.
+        yield* m.release(versions.current);
+        const changed = yield* m.install({}, ["--role", "upgrader", "--service-stopped"]);
+        assert.equal(changed.code, 0, changed.stderr);
+        assert.equal(yield* recorded, "upgrader\n");
+
+        // A role that cannot be recorded: the workflow is not copied either, as a copy without its
+        // role would upgrade.
+        yield* fs.remove(role);
+        yield* fs.makeDirectory(role);
+        yield* fs.writeFileString(copy, "// edited\n");
+        yield* m.release(versions.current);
+        const unrecorded = yield* m.install({}, ["--role", "installer"]);
+        assert.equal(unrecorded.code, 0, unrecorded.stderr);
+        assert.include(unrecorded.stderr, "could not record the role installer");
+        assert.equal(yield* fs.readFileString(copy), "// edited\n");
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 });
@@ -942,6 +1113,10 @@ it.layer(NodeServices.layer)("scripts/fork/auto-install.sh", (it) => {
       `${repoRoot}scripts/fork/auto-install.sh`,
       path.join(repo, "scripts", "fork", "auto-install.sh"),
     );
+    // A machine installed since roles: install.sh recorded one.
+    const role = path.join(home, ".t3", "workflows", "upstream-upgrade.role");
+    yield* fs.makeDirectory(path.dirname(role), { recursive: true });
+    yield* fs.writeFileString(role, "upgrader\n");
     const script = (file: string, body: string) =>
       fs
         .writeFileString(file, `#!/bin/bash\n${body}\n`)
@@ -1029,6 +1204,7 @@ it.layer(NodeServices.layer)("scripts/fork/auto-install.sh", (it) => {
       home,
       repo,
       forkApp,
+      role,
       logs,
       lock,
       holdLock,
@@ -1104,6 +1280,58 @@ it.layer(NodeServices.layer)("scripts/fork/auto-install.sh", (it) => {
         );
         assert.lengthOf(yield* m.launchctl, 1);
       }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // Q77: the role reaches install.sh, which records it.
+  it.effect.skipIf(skip)("passes --role through the launchd job to install.sh", () =>
+    Effect.gen(function* () {
+      const runner = yield* ProcessRunner.ProcessRunner;
+      const m = yield* machine();
+      for (const args of [
+        ["--role", "builder"],
+        ["--role"],
+        // One word, as a quoted "--role installer" passes it.
+        ["--role installer"],
+        ["--run"],
+        ["--run", "job.label", "--role", "x"],
+      ]) {
+        const refused = yield* m.run(args);
+        assert.equal(refused.code, 2, args.join(" "));
+        assert.include(refused.stderr, "usage: auto-install.sh");
+      }
+      assert.deepEqual(yield* m.launchctl, []);
+      assert.deepEqual(yield* m.installs, []);
+
+      const started = yield* m.run(["--role", "installer"]);
+      assert.equal(started.code, 0, started.stderr);
+      const plist =
+        /^bootstrap gui\/\d+ (.+\.plist)$/.exec((yield* m.launchctl)[0] ?? "")?.[1] ?? "";
+      const args = yield* runner.run({
+        command: "plutil",
+        args: ["-extract", "ProgramArguments", "json", "-o", "-", plist],
+      });
+      assert.deepEqual(JSON.parse(args.stdout).slice(2), [
+        "--run",
+        /^bootstrap gui\/\d+ .+\/(.+)\.plist$/.exec((yield* m.launchctl)[0] ?? "")?.[1],
+        "--role",
+        "installer",
+      ]);
+
+      const done = yield* m.run(["--run", "job.label", "--role", "installer"]);
+      assert.equal(m.lastLine(done.stdout), "auto-install: SUCCESS: install.sh finished");
+      assert.deepEqual(yield* m.installs, [
+        "install.sh [--role installer]; apps running: []; service down",
+      ]);
+
+      // R1: no role recorded, so install.sh copied no workflow: the last line says so.
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs.remove(m.role);
+      const roleless = yield* m.run(["--run", "job.label"]);
+      assert.equal(
+        m.lastLine(roleless.stdout),
+        "auto-install: SUCCESS: install.sh finished; the upgrade workflow was not copied: no role (install again with --role upgrader|installer)",
+      );
+    }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 
   it.effect.skipIf(skip)(

@@ -30,6 +30,8 @@ const FIXED_VERSION = "0.1.12-fork.20261125.5150.2";
 const BASE_BUILD = "0.1.12-fork.20261123.5124.2";
 const BASE_OLDER = "0.1.12-fork.20261123.5124.1";
 const BASE_NEWEST = "0.1.12-fork.20261123.5124.3";
+// What the stand-in build.sh builds on the installer.
+const INSTALLER_BUILD = "0.1.12-fork.20261123.5124.9";
 
 const macOnly = HostProcess.Platform.defaultValue() !== "darwin";
 // A durable sleep wakes at the engine's next look at its messages, 10 seconds apart on a server;
@@ -60,21 +62,43 @@ const write = (path: string, text: string) => {
   NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
   NodeFS.writeFileSync(path, text);
 };
+/** What `left` still lists after up to 10 seconds of waiting for it to list nothing. */
+const settled = Effect.fn(function* (left: () => ReadonlyArray<string>) {
+  // oxlint-disable-next-line t3code/no-polling-loop-in-tests -- another process group's exit, which no event here marks; bounded at 10 s.
+  for (let waited = 0; left().length > 0 && waited < 10_000; waited += 250) {
+    // oxlint-disable-next-line t3code/no-real-time-wait-in-tests -- the workflow's SIGKILL comes KILL_AFTER_MS after a timeout, on the real clock.
+    yield* Effect.sleep(Duration.millis(250));
+  }
+  return left();
+});
+/** A stand-in's log, a line per entry; none before it wrote one. */
+const lines = (path: string) =>
+  NodeFS.existsSync(path) ? NodeFS.readFileSync(path, "utf8").trim().split("\n") : [];
 
 /**
  * Upstream with Nightly tags (`NEWER` adds migrations 111-112), fork/main on `BASE`, the checkout,
- * logging stand-ins for auto-install.sh and osascript (`notifyFails`: it exits 1). `unreachable`:
- * the first `tries` ssh connections fail (or `hang`); a failed fetch is tried again `retryAfterMs` on.
+ * and logging stand-ins for auto-install.sh, build.sh (builds `INSTALLER_BUILD`) and osascript.
  */
 const machine = (options: {
   readonly newer: boolean;
+  /** install.sh's role record, upgrader unless named; null: none. */
+  readonly role?: string | null;
+  /** origin's fork/main has a commit the checkout has not fetched. */
+  readonly forkMainAhead?: boolean;
+  /** build.sh's record says `installed` was built from the checkout's head. */
+  readonly installedFromCheckout?: boolean;
   readonly installed?: string;
   readonly release?: string;
+  /**
+   * The first `tries` ssh connections fail (or `hang`, with a child of its own); a failed fetch is
+   * tried again `retryAfterMs` on.
+   */
   readonly unreachable?: {
     readonly tries: number;
     readonly hang?: boolean;
     readonly retryAfterMs?: number;
   };
+  /** osascript exits 1. */
   readonly notifyFails?: boolean;
 }) => {
   const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-upgrade-"));
@@ -105,18 +129,44 @@ const machine = (options: {
   git(root, "clone", "-q", upstream, origin);
   git(origin, "checkout", "-q", "-b", "fork/main", BASE);
   write(NodePath.join(origin, "FORK.md"), "fork\n");
+  // The stand-in scripts are fork/main's, so the checkout is clean with them.
+  const launches = NodePath.join(root, "launches.log");
+  const builds = NodePath.join(root, "builds.log");
+  const log = NodePath.join(root, "auto-install_1.log");
+  const script = (path: string, body: string) => {
+    write(NodePath.join(origin, path), `#!/bin/sh\n${body}`);
+    NodeFS.chmodSync(NodePath.join(origin, path), 0o755);
+  };
+  script(
+    "scripts/fork/auto-install.sh",
+    `echo launched >>"${launches}"\necho "Started the install job."\necho "the fork installs. Log: ${log}"\n`,
+  );
+  script(
+    "scripts/fork/build.sh",
+    [
+      `echo "$(git rev-parse HEAD)" >>"${builds}"`,
+      "mkdir -p release",
+      `: >release/T3-Code-${INSTALLER_BUILD}-arm64.zip`,
+      `echo "${INSTALLER_BUILD} $(git rev-parse HEAD)" >>"$(git rev-parse --path-format=absolute --git-common-dir)/fork-builds"`,
+      "",
+    ].join("\n"),
+  );
+  write(NodePath.join(origin, ".gitignore"), "release/\n");
   git(origin, "add", ".");
   git(origin, "commit", "-q", "-m", "(fork) a change");
   const checkout = NodePath.join(root, "checkout");
   git(root, "clone", "-q", "--no-tags", "-b", "fork/main", origin, checkout);
   git(checkout, "remote", "add", "upstream", upstream);
-  const launches = NodePath.join(root, "launches.log");
-  const log = NodePath.join(root, "auto-install_1.log");
-  write(
-    NodePath.join(checkout, "scripts/fork/auto-install.sh"),
-    `#!/bin/sh\necho launched >>"${launches}"\necho "Started the install job."\necho "the fork installs. Log: ${log}"\n`,
-  );
-  NodeFS.chmodSync(NodePath.join(checkout, "scripts/fork/auto-install.sh"), 0o755);
+  if (options.installedFromCheckout === true && options.installed !== undefined) {
+    write(
+      NodePath.join(checkout, ".git", "fork-builds"),
+      `${BASE_OLDER} 0000000000000000000000000000000000000000\n${options.installed} ${git(checkout, "rev-parse", "HEAD")}\n`,
+    );
+  }
+  if (options.forkMainAhead === true) {
+    write(NodePath.join(origin, "FORK.md"), "fork, reviewed\n");
+    git(origin, "commit", "-q", "-am", "(fork) another change");
+  }
   if (options.release !== undefined) {
     write(NodePath.join(checkout, "release", `T3-Code-${options.release}-arm64.zip`), "");
   }
@@ -135,20 +185,26 @@ const machine = (options: {
   process.env.PATH = `${bin}:${process.env.PATH}`;
   // Every test, so none shows a real notification: the title and the text, the last two arguments.
   const notifications = NodePath.join(root, "notifications.log");
+  const roleFile = NodePath.join(root, "upstream-upgrade.role");
+  const role = options.role === undefined ? "upgrader" : options.role;
+  if (role !== null) write(roleFile, `${role}\n`);
   tool(
     "osascript",
     `printf '%s|%s\\n' "$7" "$8" >>"${notifications}"\n${options.notifyFails === true ? 'echo "not allowed" >&2\nexit 1\n' : ""}`,
   );
   const ssh = NodePath.join(root, "ssh.log");
+  const sleepers = NodePath.join(root, "sleepers.log");
   if (options.unreachable !== undefined) {
     const { tries, hang, retryAfterMs = 1000 } = options.unreachable;
     git(checkout, "remote", "set-url", "upstream", "ssh://example.invalid/upstream.git");
-    // Found on PATH through the workflow's GIT_SSH_COMMAND. A hang outlives the fetch by seconds.
+    // Found on PATH through the workflow's GIT_SSH_COMMAND. A hang waits on a child that outlives the
+    // run unless its process group is ended, as build.sh's builds would; both ignore SIGTERM, so only
+    // a SIGKILL ends them, and both leave the fetch's stderr, so a survivor never holds the step open.
     tool(
       "ssh",
       `echo "$@" >>"${ssh}"\nif [ "$(wc -l <"${ssh}")" -le ${tries} ]; then\n${
         hang === true
-          ? "  exec sleep 5\n"
+          ? `  exec 2>/dev/null\n  trap '' TERM\n  sleep 60 </dev/null >/dev/null &\n  echo $! >>"${sleepers}"\n  wait\n  exit 1\n`
           : '  echo "ssh: Could not resolve hostname example.invalid" >&2\n  exit 255\n'
       }fi\nexec git upload-pack "${upstream}"\n`,
     );
@@ -158,19 +214,27 @@ const machine = (options: {
   Object.assign(process.env, gitEnv, {
     T3_FORK_CHECKOUT: checkout,
     T3_FORK_APPLICATIONS_DIR: apps,
+    T3_FORK_ROLE_FILE: roleFile,
   });
   return {
     upstream,
     origin,
     checkout,
     log,
-    launches: () =>
-      NodeFS.existsSync(launches) ? NodeFS.readFileSync(launches, "utf8").trim().split("\n") : [],
-    ssh: () => (NodeFS.existsSync(ssh) ? NodeFS.readFileSync(ssh, "utf8").trim().split("\n") : []),
-    notifications: () =>
-      NodeFS.existsSync(notifications)
-        ? NodeFS.readFileSync(notifications, "utf8").trim().split("\n")
-        : [],
+    launches: () => lines(launches),
+    builds: () => lines(builds),
+    ssh: () => lines(ssh),
+    /** The hung ssh's children still alive. */
+    sleeping: () =>
+      lines(sleepers).filter((pid) => {
+        try {
+          process.kill(Number(pid), 0);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    notifications: () => lines(notifications),
   };
 };
 
@@ -622,6 +686,9 @@ upgradeIt(
       ...(m.ssh().length === 8 && m.ssh().every((line) => line.includes("BatchMode=yes"))
         ? []
         : [`ssh ran as: ${JSON.stringify(m.ssh())}`]),
+      // The timeout ends the fetch's whole process group, not git alone, with a SIGKILL a few
+      // seconds on, as its ssh ignores SIGTERM.
+      ...(yield* settled(m.sleeping)).map((pid) => `Left running: ${pid}`),
       ...(steps.some((one) => one.name === "upstream-wait-8")
         ? ["It slept after its last try."]
         : []),
@@ -905,5 +972,255 @@ upgradeIt(
         ? ["It reviewed a build with a bad version."]
         : []),
     ];
+  }),
+);
+
+// Q77: an installer machine builds and installs reviewed fork/main; it never upgrades or pushes.
+upgradeIt(
+  "as an installer, asks to build fork/main when the Fork app is not built from it, then builds and launches the install",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({
+      newer: true,
+      role: "installer",
+      forkMainAhead: true,
+      installedFromCheckout: true,
+      installed: BASE_BUILD,
+    });
+    const head = git(m.origin, "rev-parse", "fork/main");
+    const short = head.slice(0, 10);
+    const old = git(m.checkout, "rev-parse", "HEAD");
+    const runId = yield* start(workflows, "a");
+    const problems: Array<string> = [];
+    const question = titleOf(yield* asked(workflows, runId, "build"));
+    const expected = `Build and install fork/main ${short} (upstream ${BASE})? T3 Code (Fork) is ${BASE_BUILD}, built from ${old.slice(0, 10)}.`;
+    if (question?.title.startsWith(expected) !== true) {
+      return [`It asked ${question?.title}, not ${expected}`];
+    }
+    yield* answer(workflows, runId, "build", { choice: "Build" });
+    const ended = Option.getOrUndefined(
+      yield* world.reaches(workflows, runId, "completed", "stopped", "paused"),
+    );
+    const result = ended?.result as
+      | { forkMain?: string; buildVersion?: string; install?: string }
+      | null
+      | undefined;
+    if (
+      ended?.status !== "completed" ||
+      result?.forkMain !== head ||
+      result.buildVersion !== INSTALLER_BUILD ||
+      result.install !== `launched, not confirmed: ${m.log}`
+    ) {
+      problems.push(`It ended ${ended?.status}: ${ended?.detail} ${JSON.stringify(result)}`);
+    }
+    // Built from fork/main's head, in the checkout moved there.
+    if (git(m.checkout, "rev-parse", "HEAD") !== head) problems.push("The checkout did not move.");
+    if (git(m.checkout, "symbolic-ref", "--short", "HEAD") !== "fork/main") {
+      problems.push("The checkout left fork/main.");
+    }
+    if (JSON.stringify(m.builds()) !== JSON.stringify([head])) {
+      problems.push(`build.sh built ${JSON.stringify(m.builds())}.`);
+    }
+    if (m.launches().length !== 1) problems.push(`It launched ${m.launches().length} times.`);
+    // No agent, so no upgrade, review or push; and it fetched only.
+    if (world.turns.length > 0) problems.push(`It started ${world.turns.map(step).join(", ")}.`);
+    if (git(m.origin, "rev-parse", "fork/main") !== head)
+      problems.push("origin's fork/main moved.");
+    const { steps } = yield* workflows.get(runId);
+    if (steps.some((one) => one.name === "approve" || one.name === "read")) {
+      problems.push("It read or offered the upstream upgrade.");
+    }
+    problems.push(
+      ...(yield* announced(workflows, runId, m.notifications(), {
+        build: `Build and install fork/main ${short} (upstream ${BASE})?`,
+      })),
+    );
+    return problems;
+  }),
+);
+
+upgradeIt(
+  "as an installer, stays quiet when the Fork app is built from fork/main's head",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({
+      newer: true,
+      role: "installer",
+      installedFromCheckout: true,
+      installed: BASE_BUILD,
+    });
+    const head = git(m.origin, "rev-parse", "fork/main");
+    const runId = yield* start(workflows, "a");
+    const run = Option.getOrUndefined(
+      yield* world.reaches(workflows, runId, "skipped", "stopped", "paused", "waiting"),
+    );
+    return [
+      ...(run?.status === "skipped" &&
+      run.detail === `T3 Code (Fork) ${BASE_BUILD} is fork/main's ${head.slice(0, 10)}`
+        ? []
+        : [`It ended ${run?.status}: ${run?.detail}`]),
+      ...(m.notifications().length === 0 ? [] : ["It showed a notification."]),
+      ...(m.builds().length === 0 ? [] : ["It built."]),
+    ];
+  }),
+);
+
+upgradeIt(
+  "as an installer, stops without building when the checkout has changes, a local commit, or is on another branch",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: false, role: "installer", forkMainAhead: true });
+    const old = git(m.checkout, "rev-parse", "HEAD");
+    const problems: Array<string> = [];
+    const builtAfter = function* (key: string) {
+      const runId = yield* start(workflows, key);
+      if (Option.isNone(yield* asked(workflows, runId, "build"))) return undefined;
+      yield* answer(workflows, runId, "build", { choice: "Build" });
+      return Option.getOrUndefined(
+        yield* world.reaches(workflows, runId, "stopped", "completed", "paused"),
+      );
+    };
+
+    write(NodePath.join(m.checkout, "FORK.md"), "an edit\n");
+    const dirty = yield* builtAfter("dirty");
+    if (dirty?.detail?.startsWith(`not built: ${m.checkout} has changes: M FORK.md`) !== true) {
+      problems.push(`With an edit it ended ${dirty?.status}: ${dirty?.detail}`);
+    }
+    git(m.checkout, "checkout", "-q", "FORK.md");
+
+    // Committed but never pushed: origin's fork/main never held it.
+    write(NodePath.join(m.checkout, "FORK.md"), "a commit\n");
+    git(m.checkout, "commit", "-q", "-am", "mine");
+    const local = git(m.checkout, "rev-parse", "HEAD");
+    const committed = yield* builtAfter("committed");
+    if (
+      committed?.detail !==
+      `not built: ${m.checkout}'s fork/main is at ${local.slice(0, 10)}, which neither this clone built nor origin's held; once nothing on it matters, run: git -C ${m.checkout} reset --hard origin/fork/main`
+    ) {
+      problems.push(`With a local commit it ended ${committed?.status}: ${committed?.detail}`);
+    }
+    if (git(m.checkout, "rev-parse", "HEAD") !== local) problems.push("The local commit was lost.");
+    git(m.checkout, "reset", "-q", "--hard", old);
+
+    git(m.checkout, "checkout", "-q", "-b", "mine");
+    const elsewhere = yield* builtAfter("elsewhere");
+    if (elsewhere?.detail !== `not built: ${m.checkout} is on mine, not fork/main`) {
+      problems.push(`On another branch it ended ${elsewhere?.status}: ${elsewhere?.detail}`);
+    }
+    return [
+      ...problems,
+      ...(git(m.checkout, "rev-parse", "HEAD") === old ? [] : ["The checkout moved."]),
+      ...(m.builds().length === 0 ? [] : ["It built."]),
+      ...(m.launches().length === 0 ? [] : ["It launched."]),
+    ];
+  }),
+);
+
+// R2: a head origin's reflog has forgotten (its entries expire) is still known when this clone
+// built it.
+upgradeIt(
+  "as an installer, builds from a head this clone built once origin's reflog has forgotten it",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: false, role: "installer", forkMainAhead: true });
+    const old = git(m.checkout, "rev-parse", "HEAD");
+    // fork/main moved on twice, and the reflog of the first move is gone: only the second's is left.
+    git(m.checkout, "fetch", "-q", "origin", "fork/main");
+    NodeFS.rmSync(
+      NodePath.join(m.checkout, ".git", "logs", "refs", "remotes", "origin", "fork", "main"),
+    );
+    write(NodePath.join(m.origin, "FORK.md"), "fork, reviewed again\n");
+    git(m.origin, "commit", "-q", "-am", "(fork) a third change");
+    const head = git(m.origin, "rev-parse", "fork/main");
+    const problems: Array<string> = [];
+    const buildAnswered = function* (key: string) {
+      const runId = yield* start(workflows, key);
+      if (Option.isNone(yield* asked(workflows, runId, "build"))) return undefined;
+      yield* answer(workflows, runId, "build", { choice: "Build" });
+      return Option.getOrUndefined(
+        yield* world.reaches(workflows, runId, "stopped", "completed", "paused"),
+      );
+    };
+
+    const unknown = yield* buildAnswered("unknown");
+    if (
+      unknown?.detail?.startsWith(
+        `not built: ${m.checkout}'s fork/main is at ${old.slice(0, 10)}, `,
+      ) !== true
+    ) {
+      problems.push(`Unrecorded, it ended ${unknown?.status}: ${unknown?.detail}`);
+    }
+
+    write(NodePath.join(m.checkout, ".git", "fork-builds"), `${BASE_BUILD} ${old}\n`);
+    const recorded = yield* buildAnswered("recorded");
+    if (recorded?.status !== "completed") {
+      problems.push(`Recorded, it ended ${recorded?.status}: ${recorded?.detail}`);
+    }
+    return [
+      ...problems,
+      ...(git(m.checkout, "rev-parse", "HEAD") === head ? [] : ["The checkout did not move."]),
+      ...(JSON.stringify(m.builds()) === JSON.stringify([head])
+        ? []
+        : [`It built ${JSON.stringify(m.builds())}.`]),
+    ];
+  }),
+);
+
+upgradeIt(
+  "as an installer, asks no more about a fork/main commit answered Not now, and asks about a newer one",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const m = machine({ newer: false, role: "installer", forkMainAhead: true });
+    const problems: Array<string> = [];
+    const first = yield* start(workflows, "first");
+    if (Option.isNone(yield* asked(workflows, first, "build"))) return ["It never asked."];
+    yield* answer(workflows, first, "build", { choice: "Not now" });
+    yield* world.reaches(workflows, first, "stopped", "completed", "paused");
+
+    const head = git(m.origin, "rev-parse", "fork/main");
+    const second = yield* start(workflows, "second");
+    const quiet = Option.getOrUndefined(
+      yield* world.reaches(workflows, second, "skipped", "waiting", "paused"),
+    );
+    if (quiet?.detail !== `fork/main ${head.slice(0, 10)} was answered Not now`) {
+      problems.push(`After Not now it ended ${quiet?.status}: ${quiet?.detail}`);
+    }
+
+    write(NodePath.join(m.origin, "FORK.md"), "fork, reviewed again\n");
+    git(m.origin, "commit", "-q", "-am", "(fork) a third change");
+    const newer = git(m.origin, "rev-parse", "fork/main").slice(0, 10);
+    const third = yield* start(workflows, "third");
+    const question = titleOf(yield* asked(workflows, third, "build"));
+    if (question?.title.startsWith(`Build and install fork/main ${newer} `) !== true) {
+      problems.push(`For a newer commit it asked ${question?.title}`);
+    }
+    yield* answer(workflows, third, "build", { choice: "Not now" });
+    return [...problems, ...(m.builds().length === 0 ? [] : ["It built."])];
+  }),
+);
+
+// C1: with no role, or a wrong one, it neither upgrades nor installs.
+upgradeIt(
+  "stops when no role is recorded, or one that names neither role",
+  () => ({}),
+  Effect.fn(function* (workflows, world) {
+    const problems: Array<string> = [];
+    for (const [role, says] of [
+      [null, "none is recorded in "],
+      ["builder", 'holds "builder", not upgrader or installer'],
+    ] as const) {
+      machine({ newer: true, role });
+      const runId = yield* start(workflows, String(role));
+      const ended = Option.getOrUndefined(
+        yield* world.reaches(workflows, runId, "stopped", "waiting", "paused", "skipped"),
+      );
+      if (ended?.status !== "stopped" || ended.detail?.includes(says) !== true) {
+        problems.push(`With ${role} it ended ${ended?.status}: ${ended?.detail}`);
+      }
+      if ((yield* workflows.get(runId)).steps.some((one) => one.name === "checkout")) {
+        problems.push(`With ${role} it went on to the checkout.`);
+      }
+    }
+    return problems;
   }),
 );
