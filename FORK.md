@@ -60,7 +60,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.12-nightly.20261123.5124`, whose last upstream migration is 110.
+`v0.1.12-nightly.20261124.5191`, whose last upstream migration is 111.
 
 ### Questions and decisions
 
@@ -1182,8 +1182,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
      `restoresParkedChip` (the undo gate), and calls `removesRefusedParkedChips` (which runs the
      fork's `removeParkedChips` from `composer-parked-chips.ts`) at the top of `onSelectionUpdate`
      and of `onUpdate`, before upstream's stale-skill check, whose condition also counts
-     `PARKED_CHIPS_REMOVED` as part of the undo; its `handlePaste` strips parked chips before its
-     code-block branch. If upstream rewrites any of these hooks, keep each call in the same place;
+     `PARKED_CHIPS_REMOVED` as part of the undo; its `insertClipboardText`, which upstream's
+     `handlePaste` and (since 5191) `handleDrop` call, strips parked chips before its code-block
+     branch, so a dropped chip goes the way a pasted one does. If upstream rewrites any of these hooks, keep each call in the same place;
      "Parked items" (Undo) says why.
      `ChatComposer.tsx` builds that prop from the record it kept on delete (its label cleaned, equal
      to the chip's) and `parkedChipRestorable`, and restores the kept record of every returning chip
@@ -1362,14 +1363,14 @@ uninstall`, then reopen it.
 - `apps/web/src/components/ChatView.browser.test.tsx` "a shortcut conditioned on rightPanelOpen sees
   the thread's open right panel" times out when the whole file runs on this Mac, and passes alone.
   It fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
-  tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038` and
-  `v0.1.12-nightly.20261123.5124` tags.
+  tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038`,
+  `v0.1.12-nightly.20261123.5124` and `v0.1.12-nightly.20261124.5191` tags.
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"), and
   mise's `vp` shim now has no version set at all ("No version is set for shim: vp"); use the repo's
   `node_modules/.bin/vp`, which upstream-sync puts on its children's PATH.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
   real directory in a symlinked home …" fails on this Mac on the plain
-  `v0.1.12-nightly.20261121.5024`, `…5038` and `v0.1.12-nightly.20261123.5124` tags too (it returns
+  `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124` and `v0.1.12-nightly.20261124.5191` tags too (it returns
   no removed runtime), so `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
   themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
