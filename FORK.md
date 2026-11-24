@@ -823,6 +823,21 @@ stops before the install".
   says what it does each morning; its steps, questions and briefs are in the file. The install
   question and its launch (the owner's Q74, pending) are the `install` function, the run's last
   steps, easy to take out.
+- **Roles** (the owner's Q77, 2026-11-24, MAIN-121): one machine, the personal Mac, is the
+  `upgrader` and does all of the above. Every other machine (the work Mac) is an `installer`: when
+  origin's fork/main is not the commit the installed Fork app was built from, it asks to build and
+  install it, and on Build moves its clean checkout there, builds and launches the install. It never
+  rebases, reviews or pushes: two upgraders would both force-push fork/main, as the checkout's claim
+  is per machine. Each machine's first install names its role (`--role`, see "Installing"); later
+  installs keep it. With none recorded, install.sh copies no workflow (and moves a copy from before
+  roles to the trash) and the workflow stops rather than guess. The comparison is "differs", not
+  "newer": fork/main is rebased, so its commits are not ancestors of each other. The code: `readRole`, `readForkMain` and `buildForkMain` (with
+  `moveCheckout` and `buildCheckout`) in the file, the role in install.sh, the build's commit at the
+  end of build.sh. _Rejected:_ the upgrader driving the installer's machine through an agent on a
+  linked environment (couples the two machines' uptime); recording the commit in `release/` and
+  again in the T3 home on install (two writers; the version the app carries is already the key);
+  upgrading when no role is recorded (an agent's plain first install on a new machine would make a
+  second upgrader).
 - **Decisions:** a run owns the checkout only once `approve` is answered Upgrade (its title then
   starts with `Upgrading the fork`), until it ends: a run that only asks holds nothing, and every
   question times out within the day. Its `claim` step records it as the owner in the workflow
@@ -844,7 +859,7 @@ stops before the install".
 - **Installed as a copy:** `install.sh` copies the file into `~/.t3/workflows` once the app is in
   place (a differing copy, an edit in the Workflows page, goes to `~/.claude/trash` first), so a
   branch switched in the checkout never changes what runs. A body changed while a run is unfinished
-  is a new `version`, the old one kept until its runs end (the workflow skill's rule 3).
+  is a new `version` (the workflow skill's rule 3; the note at `version:` in the file).
 - **Notifications** (the owner's Q75, MAIN-116; T3 raises none for a workflow question): every
   question goes through `askAnnounced` in the file, which shows one on macOS in a
   `notify-<question>` step before the `ask`; one that fails is noted on its step and the run still
@@ -863,11 +878,13 @@ stops before the install".
   `UPSTREAM_TRIES`).
 - **Tests:** `evals/fork/upstream-upgrade.test.ts` loads the file with the server's loader and
   drives it in the real engine on a throwaway database through `evals/workflow-authoring/grade.ts`,
-  with stand-in agents, a checkout whose remotes are local repositories, a stand-in
-  `auto-install.sh` and an ssh that fails or hangs on its first N connections (macOS only: it reads
-  the app's version with PlistBuddy). `apps/server/src/cloud/forkServiceRuntime.test.ts`: "counts
-  a workflow run only while code of it runs, …" (auto-install.sh) and "copies the upgrade workflow
-  into the T3 home …" (install.sh).
+  with stand-in agents, a checkout whose remotes are local repositories, stand-in `auto-install.sh`
+  and `build.sh`, and an ssh that fails or hangs on its first N connections (macOS only: it reads
+  the app's version with PlistBuddy); the "as an installer, …" tests cover the installer.
+  `apps/server/src/cloud/forkServiceRuntime.test.ts`: "counts a workflow run only while code of it
+  runs, …" and "passes --role through the launchd job …" (auto-install.sh), "copies the upgrade
+  workflow into the T3 home …" and "records the --role it is given …" (install.sh), and "stamps
+  every build …" (build.sh's `fork-builds` record).
 - **Live check** (2026-11-23, of the first version): a server from the checkout on an isolated home
   with workflows on registered `upstream-upgrade@1` and its daily trigger (next due 08:00 local).
   Against a fake upstream, a run skipped with no newer Nightly; with one, it asked, and Not now
@@ -1288,7 +1305,8 @@ it fails instead. The steps below are what the script encodes and what stays a p
 7. **Build:** `.env` must exist (`cp .env.example .env`, once per checkout; gitignored). Without it the
    app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
    are upstream's public production identifiers, the same ones official builds embed. Then run
-   `scripts/fork/build.sh`: it moves the old build to the trash, clears any update feed, and stamps
+   `scripts/fork/build.sh`: one at a time per checkout, it installs the dependencies (`vp i` with the
+   lockfile as committed), moves the old build to the trash, clears any update feed, and stamps
    the version from the upstream tag below HEAD and a build number
    (`v0.1.11-nightly.20261117.4825` becomes `0.1.11-fork.20261117.4825.<n>`, see "Background
    service"). Without the stamp the app reported package.json's older version and
@@ -1324,6 +1342,21 @@ again itself only when something failed and no T3 Code app runs. Its header says
 active (a workflow run only while code of it runs: `active_runs`), how long it waits, where it
 logs and how its last line reads, and why a launchd job rather than `nohup`.
 install.sh also copies the daily upgrade workflow into `~/.t3/workflows`.
+
+**The first install names the machine's role** (the owner's Q77; "The daily upgrade workflow",
+Roles): `scripts/fork/auto-install.sh --role upgrader` on the personal Mac, `--role installer` on
+every other machine (the work Mac). It passes the flag to install.sh, which records it; later
+installs, the workflow's own included, keep it. An install that names none where none is recorded
+installs the app but not the workflow (a copy from before roles goes to the trash), and says so;
+auto-install.sh's last line says so too.
+
+An installer builds in its own checkout, so it first needs what `build.sh` needs: `~/repos/t3code`
+on a clean `fork/main` with `origin` and `upstream` remotes, its dependencies installed once
+(`vp i`), the repo's `.env`, and Rust (`cargo`) with the `aarch64-apple-darwin` target, for the
+resource monitor the desktop build compiles (`scripts/build-desktop-artifact.ts`). The workflow's
+build runs in the T3 server's environment, which under the background service is its launch
+agent's: after the first install, check that `plutil -extract EnvironmentVariables.PATH raw
+~/Library/LaunchAgents/com.t3tools.t3code.service.plist` finds `mise`, `jq` and `cargo`.
 
 Whether macOS asks before osascript, run by the job, may quit an app (Automation consent) is
 _unverified_; a refusal ends the run with `FAILED` and nothing installed.
