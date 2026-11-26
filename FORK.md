@@ -60,7 +60,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.12-nightly.20261124.5209`, whose last upstream migration is 111.
+`v0.1.13-nightly.20261125.5258`, whose last upstream migration is 119.
 
 ### Questions and decisions
 
@@ -761,7 +761,8 @@ and keep working after every fork rebuild.
   changes what makes a runtime reusable (the sentinel, the layout, the install call in
   `bootService.ts` `install`, its version check), what `t3 install` writes and records, or what the
   prune keeps. Make the seed and install.sh produce what the new code accepts; if a service install
-  now insists on a published release, stop and ask the owner.
+  now insists on a published release, stop and ask the owner. If upstream's `status` starts
+  reading launchd in a new way, extend the harness's read-only filter (its comment says why).
 
 ### Mark unread from here
 
@@ -1397,16 +1398,21 @@ uninstall`, then reopen it.
   the thread's open right panel" times out when the whole file runs on this Mac, and passes alone.
   It fails the same on the plain `v0.1.11-nightly.20261117.4825` and `v0.1.11-nightly.20261118.4864`
   tags, on `fork/main` at 7c371b246e (5024), and on the plain `v0.1.12-nightly.20261121.5038`,
-  `v0.1.12-nightly.20261123.5124`, `…5191` and `v0.1.12-nightly.20261124.5209` tags.
+  `v0.1.12-nightly.20261123.5124`, `…5191`, `v0.1.12-nightly.20261124.5209` and
+  `v0.1.13-nightly.20261125.5258` tags.
 - `npm:vite-plus` run through mise fails Effect tests ("Vitest failed to find the current suite"), and
   mise's `vp` shim now has no version set at all ("No version is set for shim: vp"); use the repo's
   `node_modules/.bin/vp`, which upstream-sync puts on its children's PATH.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
   real directory in a symlinked home …" fails on this Mac on the plain
-  `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124`, `…5191` and `v0.1.12-nightly.20261124.5209` tags too (it returns
+  `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124`, `…5191`, `v0.1.12-nightly.20261124.5209` and
+  `v0.1.13-nightly.20261125.5258` tags too (it returns
   no removed runtime), so `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
-- `apps/server/src/environmentTheme.test.ts` "publishes edits after the target of a symlinked
-  themes directory is restored" failed once in the 5024 full suite and passed three runs alone.
+- `apps/server/src/environmentTheme.test.ts` "publishes themes when a linked theme directory's
+  original grandparent is restored between probes" fails on this Mac on the plain
+  `v0.1.12-nightly.20261124.5191`, `v0.1.12-nightly.20261124.5209` and
+  `v0.1.13-nightly.20261125.5258` tags; "publishes later edits after a linked theme directory's
+  grandparent is restored" fails beside it on `…5191` and `…5209`.
 - Run tests by hand from a shell T3 Code started (an agent's terminal) with
   `env -u T3CODE_PORT -u T3CODE_HOST`: with the service's values inherited, every web browser test
   that renders `AppRoot` over the fake environment hangs to its 15 s timeout (checked on the plain
