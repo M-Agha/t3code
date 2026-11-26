@@ -8,10 +8,11 @@
 # checks the copy, and only then installs.
 # It never overwrites an app: an existing "T3 Code (Fork).app" is moved to ~/.claude/trash first, and
 # put back if the new one cannot be put in place; a service it stopped is started again then.
-# Installed, it copies the daily upgrade workflow into ~/.t3/workflows (a differing copy goes to the
-# trash first), moves a service it stopped to this build through this build's own runtime (a failure
-# there starts the unit on disk again; an app started meanwhile leaves it stopped), opens T3 Code
-# (Fork), and runs the dotfiles doctor's T3 Code step when ~/.config is a dotfiles checkout.
+# Installed, it registers the app with LaunchServices, copies the daily upgrade workflow into
+# ~/.t3/workflows (a differing copy goes to the trash first), moves a service it stopped to this
+# build through this build's own runtime (a failure there starts the unit on disk again; an app
+# started meanwhile leaves it stopped), opens T3 Code (Fork), and runs the dotfiles doctor's T3 Code
+# step when ~/.config is a dotfiles checkout.
 #
 # Usage: install.sh [--service-stopped] [--role upgrader|installer]
 #   --service-stopped  the caller (auto-install.sh) stopped the service, and this run treats it as one
@@ -19,7 +20,8 @@
 #   --role             this machine's part in the daily upgrade workflow (FORK.md, "Roles"), recorded
 #                      beside its copy and kept by every later install that does not name one; with
 #                      none ever named the workflow is not copied
-# T3_FORK_APPLICATIONS_DIR replaces /Applications, for forkServiceRuntime.test.ts.
+# T3_FORK_APPLICATIONS_DIR replaces /Applications and T3_FORK_LSREGISTER the system's lsregister,
+# for forkServiceRuntime.test.ts.
 # macOS only. Written for /bin/bash 3.2.
 set -euo pipefail
 usage="usage: install.sh [--service-stopped] [--role upgrader|installer]"
@@ -43,6 +45,7 @@ repo="$(cd "$(dirname "$0")/../.." && pwd)"
 apps_dir="${T3_FORK_APPLICATIONS_DIR:-/Applications}"
 app_name="T3 Code (Fork).app"
 dest="$apps_dir/$app_name"
+lsregister="${T3_FORK_LSREGISTER:-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister}"
 trash="$HOME/.claude/trash"
 stamp="$(date +%Y%m%d_%H%M%S)"
 # The launch agent `t3 service install` writes (bootService.ts, BOOT_SERVICE_LAUNCHD_LABEL).
@@ -185,6 +188,9 @@ trap restart_service EXIT
 [ -z "$aside" ] || echo "Moved the previous fork app to $aside."
 rmdir "$staging" 2>/dev/null || true
 echo "Installed $dest from $(basename "$zip")."
+# Registered now, so Spotlight and launchers find the new app before Finder scans it (MAIN-128).
+"$lsregister" -f -R -trusted "$dest" ||
+  echo "install: could not register $dest with LaunchServices; Spotlight may not find it until Finder sees it." >&2
 echo "Run one T3 Code app at a time: they share ~/.t3."
 
 # The daily upgrade workflow, as a copy, so switching the checkout's branch never changes what runs
@@ -234,24 +240,49 @@ fi
 # installed again) answers `service install` with "already installed" and stays stopped; `service
 # restart` starts it. One the owner had stopped stays stopped.
 service_cmd=install
-if [ "$(jq -r '.activeVersion // empty' "$t3_home/runtime/service-state.json" 2>/dev/null)" = "$built_version" ]; then
+allow=""
+active="$(jq -r '.activeVersion // empty' "$t3_home/runtime/service-state.json" 2>/dev/null || true)"
+if [ "$active" = "$built_version" ]; then
   service_cmd=restart
+# Semver puts "fork" below "nightly", so `service install` refuses to move a service from upstream's
+# Nightly to a fork build of it as a downgrade (the work Mac's first install, 2026-11-25). Allowed
+# only from an upstream nightly whose number is at or below the one this fork build is of.
+elif [[ $active =~ ^[^-+]+-nightly\.[0-9]+\.([0-9]+)$ ]]; then
+  nightly="${BASH_REMATCH[1]}"
+  if [[ $built_version =~ ^[^-+]+-fork\.[0-9]+\.([0-9]+)\.[0-9]+$ ]] &&
+    [ "$((10#$nightly))" -le "$((10#${BASH_REMATCH[1]}))" ]; then
+    allow=--allow-downgrade
+  fi
 fi
+# A command printed for later carries no flag: the service may have moved by the time it runs.
 start="\"$runtime_t3\" service $service_cmd"
+note=""
+[ -z "$allow" ] || note="If it refuses to replace t3@$active, add --allow-downgrade: this build is of that nightly or a later one."
 echo
 if [ -n "$stopped" ]; then
   # Not started again here: an app that hosts its own server would share the database with it.
   if apps_running; then
     trap - EXIT
-    fail "a T3 Code app started during the install, which is done; the background service stays stopped. Quit the app, then run: $start"
+    fail "a T3 Code app started during the install, which is done; the background service stays stopped. Quit the app, then run: $start${note:+ $note}"
   fi
-  "$runtime_t3" service "$service_cmd" || fail "$start failed; run it again to move the service to this build."
+  if ! out="$("$runtime_t3" service "$service_cmd" ${allow:+"$allow"} 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    # A real downgrade (BootServiceDowngradeRefusedError): running it again is refused again.
+    case "$out" in
+      *"Refusing to replace t3@"*)
+        fail "the background service runs t3@$active, newer than this build ($built_version): build from a later fork/main, or to move it back knowingly run: $start --allow-downgrade" ;;
+    esac
+    fail "$start failed; run it again to move the service to this build.${note:+ $note}"
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
   echo "The background service runs on this build ($built_version)."
 elif [ -f "$plist" ]; then
   echo "The background service was not running, and is left so. To run it on this build, run: $start"
+  [ -z "$note" ] || echo "$note"
 else
   echo "No background service is installed. To run one on this build: turn Local environment off in"
   echo "Settings → Environments (the first time only), then run: $start"
+  [ -z "$note" ] || echo "$note"
 fi
 trap - EXIT
 # Before the doctor, so T3 is back while it runs.

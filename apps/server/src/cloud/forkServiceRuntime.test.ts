@@ -240,9 +240,9 @@ it.layer(NodeServices.layer)("scripts/fork/seed-runtime.sh", (it) => {
 });
 
 it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
-  // A repo with only what build.sh reads, a mise that logs each step instead of building, and a clock
-  // that says what the test says.
-  const buildRepo = Effect.fn(function* () {
+  // A repo with only what build.sh reads (its dependencies installed, unless `fresh`: a fresh clone), a
+  // mise that logs each step instead of building, and a clock that says what the test says.
+  const buildRepo = Effect.fn(function* (options: { fresh?: boolean } = {}) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const runner = yield* ProcessRunner.ProcessRunner;
@@ -255,7 +255,7 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
       path.join(repo, "scripts/fork/build.sh"),
     );
     yield* fs.writeFileString(path.join(repo, ".env"), "T3_CONNECT_KEY=pk_live_test\n");
-    yield* fs.writeFileString(path.join(repo, ".gitignore"), "release/\n");
+    yield* fs.writeFileString(path.join(repo, ".gitignore"), "release/\nnode_modules/\n");
     const monitor = path.join(repo, "native/resource-monitor/target/aarch64-apple-darwin/release");
     yield* fs.makeDirectory(monitor, { recursive: true });
     yield* fs.writeFileString(path.join(monitor, "t3-resource-monitor"), "");
@@ -265,11 +265,28 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
       fs
         .writeFileString(path.join(bin, name), `#!/bin/bash\n${body}`)
         .pipe(Effect.andThen(fs.chmod(path.join(bin, name), 0o755)));
-    yield* tool("jq", "echo 26.13.1\n");
+    // What pnpm install leaves: the repo's vp.
+    const vp = "node_modules/.bin/vp";
+    if (options.fresh !== true) {
+      yield* fs.makeDirectory(path.join(repo, "node_modules/.bin"), { recursive: true });
+      yield* fs.writeFileString(path.join(repo, vp), "");
+      yield* fs.chmod(path.join(repo, vp), 0o755);
+    }
+    yield* tool(
+      "jq",
+      'case "$2" in .packageManager) echo "${PACKAGE_MANAGER-pnpm@12.14.0+sha512.abc}" ;; *) echo 26.13.1 ;; esac\n',
+    );
     yield* tool("date", 'case "$1" in -u) echo "$FAKE_UTC" ;; *) echo 20261120_120000 ;; esac\n');
+    // `mise exec <node> pnpm@<v> -- pnpm install` (the fresh clone's bootstrap) puts vp in place,
+    // unless PNPM_FAILS.
     yield* tool(
       "mise",
       [
+        'case "$3" in pnpm@*)',
+        '  echo "CI=${CI-} $2 $3 ${*:5}" >>"$MISE_LOG"',
+        '  [ -z "${PNPM_FAILS-}" ] || exit 1',
+        `  mkdir -p node_modules/.bin && touch ${vp} && chmod +x ${vp} && exit ;;`,
+        "esac",
         "shift 3",
         'echo "desktop=${T3CODE_DESKTOP_VERSION-} app=${APP_VERSION-} $*" >>"$MISE_LOG"',
         'case "$*" in',
@@ -298,7 +315,13 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
 
   const build = Effect.fn(function* (
     built: { root: string; repo: string; bin: string },
-    options: { utc?: string; moveHead?: boolean; vpIFails?: boolean } = {},
+    options: {
+      utc?: string;
+      moveHead?: boolean;
+      vpIFails?: boolean;
+      pnpmFails?: boolean;
+      packageManager?: string;
+    } = {},
   ) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -315,6 +338,8 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
         FAKE_UTC: options.utc ?? "20261120120000",
         MOVE_HEAD: options.moveHead === true ? "1" : undefined,
         VP_I_FAILS: options.vpIFails === true ? "1" : undefined,
+        PNPM_FAILS: options.pnpmFails === true ? "1" : undefined,
+        PACKAGE_MANAGER: options.packageManager,
         CI: undefined,
         GIT_CONFIG_GLOBAL: "/dev/null",
         // The test runner sets APP_VERSION; a shell running build.sh does not.
@@ -428,6 +453,41 @@ it.layer(NodeServices.layer)("scripts/fork/build.sh", (it) => {
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 
+  // OPEN #19: a fresh clone has no node_modules/.bin/vp for vp i.
+  it.effect.skipIf(skipOnWindows)(
+    "installs a fresh clone's dependencies with packageManager's pnpm first, and stops when that fails",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const fresh = yield* build(yield* buildRepo({ fresh: true }));
+        assert.equal(fresh.result.code, 0, fresh.result.stderr);
+        assert.deepEqual(
+          fresh.log.slice(0, 3),
+          [
+            "CI=true node@26.13.1 pnpm@12.14.0 pnpm install --frozen-lockfile",
+            "desktop= app= node_modules/.bin/vp i --frozen-lockfile",
+            "CI=true",
+          ],
+          fresh.log.join("\n"),
+        );
+        assert.include(fresh.result.stdout, "No node_modules/.bin/vp");
+
+        // Installed already: no bootstrap.
+        const installed = yield* build(yield* buildRepo());
+        assert.equal(installed.result.code, 0, installed.result.stderr);
+        assert.isFalse(installed.log.some((line) => line.includes("pnpm install")));
+
+        // The install fails, or packageManager is not pnpm: stopped before a build number is taken.
+        for (const options of [{ pnpmFails: true }, { packageManager: "npm@11.0.0" }]) {
+          const built = yield* buildRepo({ fresh: true });
+          const failed = yield* build(built, options);
+          assert.notEqual(failed.result.code, 0, JSON.stringify(options));
+          assert.isFalse(failed.log.some((line) => line.includes("vp i")));
+          assert.isFalse(yield* fs.exists(`${built.repo}/.git/fork-build-number`));
+        }
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
   // R4: one build at a time in a checkout, for the whole run.
   it.effect.skipIf(skipOnWindows)(
     "refuses while another build of the checkout runs, and takes over a lock whose build is gone",
@@ -482,10 +542,10 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
   const plist = (version: string) =>
     plistOf(`<key>CFBundleShortVersionString</key><string>${version}</string>`);
 
-  // The two scripts and a release/, a HOME with a database, and stand-ins: pgrep (an app runs while
-  // $HOME/app-running exists), launchctl (loaded while $HOME/service-loaded exists; logged), mise
-  // (runs the rest with this node; APP_STARTS=seed starts an app first), open (logged to events.log,
-  // fails with OPEN_FAILS=1), mv (KILL_AFTER_ASIDE=1 kills install.sh once the old app is trashed).
+  // The two scripts, a release/, a HOME with a database, and stand-ins: pgrep (an app runs while
+  // $HOME/app-running exists), launchctl (logged; loaded while $HOME/service-loaded exists), mise
+  // (APP_STARTS=seed starts an app first), open and lsregister (logged; OPEN_FAILS or
+  // LSREGISTER_FAILS=1 fails), mv (KILL_AFTER_ASIDE=1 kills install.sh once the old app is trashed).
   const machine = Effect.fn(function* () {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -531,6 +591,10 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
     );
     yield* tool("open", 'echo "open $*" >>"$HOME/events.log"\n[ "${OPEN_FAILS:-}" != 1 ]');
     yield* tool(
+      "lsregister",
+      'echo "$*" >>"$HOME/lsregister.log"\n[ "${LSREGISTER_FAILS:-}" != 1 ]',
+    );
+    yield* tool(
       "launchctl",
       [
         'echo "$*" >>"$HOME/launchctl.log"',
@@ -555,16 +619,17 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         .writeFileString(path.join(t3Home, "bin", "t3"), printsVersion(version))
         .pipe(Effect.andThen(fs.chmod(path.join(t3Home, "bin", "t3"), 0o755)));
 
-    // A runtime whose `t3 install` writes its launcher as upstream's does: staged in
-    // T3CODE_INSTALL_BIN_DIR, renamed into place, and recorded by its real path in runtime/launchers,
-    // unless UNRECORDED=1 (upstream then only warns; APP_STARTS=install starts an app first). Its
-    // `t3 service` logs who ran it and starts the service on its own version, unless SERVICE_FAILS=1.
+    // A runtime whose `t3 install` writes its launcher as upstream's does (staged, renamed, recorded
+    // in runtime/launchers unless UNRECORDED=1; APP_STARTS=install starts an app first). Its
+    // `t3 service` logs who ran it and starts the service on its own version, unless
+    // SERVICE_FAILS=1, or REFUSES (printed) without --allow-downgrade.
     const runtime = (version: string) =>
       [
         "#!/bin/sh",
         'if [ "$1" = service ]; then',
         '  echo "$0 $*" >>"$HOME/service.log"',
         '  [ "${SERVICE_FAILS:-}" != 1 ] || { echo "service failed" >&2; exit 1; }',
+        '  [ -z "${REFUSES:-}" ] || [ "$3" = --allow-downgrade ] || { echo "$REFUSES" >&2; exit 1; }',
         '  touch "$HOME/service-loaded"',
         `  printf '{"protocol":4,"activeVersion":"${version}"}' >"$HOME/.t3/runtime/service-state.json"`,
         "  exit",
@@ -624,6 +689,8 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
           HOME: home,
           T3CODE_HOME: undefined,
           T3_FORK_APPLICATIONS_DIR: apps,
+          // Never the system's: it would register a temporary app.
+          T3_FORK_LSREGISTER: path.join(bin, "lsregister"),
           PATH: `${bin}:${path.dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin`,
           ...env,
         },
@@ -700,6 +767,7 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
       runtimeT3,
       launchctlLog: lines(path.join(home, "launchctl.log")),
       serviceLog: lines(path.join(home, "service.log")),
+      lsregisterLog: lines(path.join(home, "lsregister.log")),
       events: lines(path.join(home, "events.log")),
       appQuits: fs.remove(path.join(home, "app-running"), { force: true }),
       loaded,
@@ -1075,6 +1143,94 @@ it.layer(NodeServices.layer)("scripts/fork/install.sh", (it) => {
         assert.equal(unrecorded.code, 0, unrecorded.stderr);
         assert.include(unrecorded.stderr, "could not record the role installer");
         assert.equal(yield* fs.readFileString(copy), "// edited\n");
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // The work Mac's first install from Nightly (2026-11-25): semver puts "fork" below "nightly", so
+  // `service install` refused the fork build of a later nightly as a downgrade.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
+    "allows the downgrade only from an upstream nightly at or below the fork build's own",
+    () =>
+      Effect.gen(function* () {
+        const m = yield* machine();
+        // The service runs on `from`, then this build installs over it; `t3 service install`
+        // refuses without --allow-downgrade, as it does from a newer version, unless `upgrade`.
+        const moveFrom = (from: string, options: { running?: boolean; upgrade?: boolean } = {}) =>
+          Effect.gen(function* () {
+            yield* m.release(versions.current);
+            yield* m.service(from);
+            yield* m.loaded(options.running ?? true);
+            const refusal = new BootService.BootServiceDowngradeRefusedError({
+              installedVersion: from,
+              targetVersion: versions.current,
+            });
+            return yield* m.install(options.upgrade === true ? {} : { REFUSES: refusal.message }, [
+              "--role",
+              "installer",
+            ]);
+          });
+        const install = `${m.runtimeT3(versions.current)} service install`;
+        const tagNightly = Number(versions.tag.split(".").at(-1));
+        const nightly = (n: number) => `0.1.11-nightly.20261118.${n}`;
+        yield* m.shim(versions.earlier);
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(`${m.t3Home}/runtime`, { recursive: true });
+
+        // The nightly this build is of: allowed.
+        const moved = yield* moveFrom(nightly(tagNightly));
+        assert.equal(moved.code, 0, moved.stderr);
+        assert.equal((yield* m.serviceLog).at(-1), `${install} --allow-downgrade`);
+        // A later nightly and a later fork build: a real downgrade, still refused, and said so.
+        for (const from of [
+          nightly(tagNightly + 1),
+          `0.1.11-fork.20261119.${tagNightly + 1}.20261119080000`,
+        ]) {
+          const refused = yield* moveFrom(from);
+          assert.notEqual(refused.code, 0, from);
+          assert.equal((yield* m.serviceLog).at(-1), install, from);
+          assert.include(
+            refused.stderr,
+            `the background service runs t3@${from}, newer than this build (${versions.current}): build from a later fork/main`,
+          );
+          assert.notInclude(refused.stderr, "run it again to move");
+        }
+        // A fork-to-fork upgrade: unchanged.
+        const upgraded = yield* moveFrom(versions.earlier, { upgrade: true });
+        assert.equal(upgraded.code, 0, upgraded.stderr);
+        assert.equal((yield* m.serviceLog).at(-1), install);
+        // Stopped by the owner: the command printed for later carries no flag, since the service
+        // may move before it runs; a line names the version the flag was judged against.
+        const runs = (yield* m.serviceLog).length;
+        const left = yield* moveFrom(nightly(tagNightly), { running: false });
+        assert.equal(left.code, 0, left.stderr);
+        assert.lengthOf(yield* m.serviceLog, runs);
+        assert.include(left.stdout, `run: "${m.runtimeT3(versions.current)}" service install\n`);
+        assert.include(
+          left.stdout,
+          `If it refuses to replace t3@${nightly(tagNightly)}, add --allow-downgrade`,
+        );
+        assert.notInclude(left.stdout, "service install --allow-downgrade");
+      }).pipe(Effect.provide(ProcessRunner.layer)),
+  );
+
+  // MAIN-128: registered at once, so Spotlight and launchers find the new app.
+  it.effect.skipIf(HostProcess.Platform.defaultValue() !== "darwin")(
+    "registers the installed app with LaunchServices, and only warns when that fails",
+    () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const m = yield* machine();
+        yield* m.shim(versions.earlier);
+        yield* m.release(versions.current);
+        const registered = yield* m.install();
+        assert.equal(registered.code, 0, registered.stderr);
+        assert.deepEqual(yield* m.lsregisterLog, [`-f -R -trusted ${path.join(m.apps, appName)}`]);
+
+        const unregistered = yield* m.install({ LSREGISTER_FAILS: "1" });
+        assert.equal(unregistered.code, 0, unregistered.stderr);
+        assert.lengthOf(yield* m.lsregisterLog, 2);
+        assert.include(unregistered.stderr, "could not register");
+        assert.equal(yield* m.installedVersion, versions.current);
       }).pipe(Effect.provide(ProcessRunner.layer)),
   );
 });

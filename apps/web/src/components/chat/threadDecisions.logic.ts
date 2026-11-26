@@ -1,5 +1,6 @@
 import {
   ENDED_RUN_STATUSES,
+  type OrchestrationV2UserMessageInputIntent,
   type ParkedContextRecord,
   type ThreadArtifact,
   type ThreadDecidedWithoutAsking,
@@ -306,6 +307,8 @@ interface Authorship {
 export interface HoldMessage extends Authorship {
   readonly id: string;
   readonly role: string;
+  /** An optimistic message's; `queued_turn` waits in the queue. */
+  readonly inputIntent?: OrchestrationV2UserMessageInputIntent | undefined;
 }
 
 /** A timeline turn item; only `user_message` and `assistant_message` items carry a message. */
@@ -323,10 +326,10 @@ const typedByUser = (message: Authorship) =>
   message.notification === undefined;
 
 /**
- * True while open questions are held back: the user's newest typed message (an unsent one, else the
- * newest in the server's order of those queued outside the timeline and the timeline's last) is neither
- * read by the server nor done. Read: the snapshot's `lastTypedMessageRead`, the newest typed message the
- * server has read in that same order, names it. FORK.md, "Hidden while a send is judged".
+ * True while the user's newest sent typed message is neither read by the server (the snapshot's
+ * `lastTypedMessageRead` names it or one after it in the server's order) nor done. A queued message
+ * holds nothing until it is delivered (MAIN-126), whether it waits outside the timeline or is a
+ * steer the server turned into a queued follow-up. FORK.md, "Hidden while a send is judged".
  */
 export const questionsHeld = (input: {
   readonly snapshot: ThreadDecisionsSnapshot | null;
@@ -343,34 +346,53 @@ export const questionsHeld = (input: {
     input.timeline.flatMap(({ item }) => (item.messageId === undefined ? [] : [item.messageId])),
   );
   const typed = (message: HoldMessage) => message.role === "user" && typedByUser(message);
+  const statusOf = (runId: string | null) => input.runs.find((run) => run.id === runId)?.status;
+  // The server's (created_at, message_id) order. A message the projection lacks has no time: as the
+  // one sent it counts as newest, so the hold waits for it rather than lifting on an older message.
+  const at = (id: string) => {
+    const message = input.projected.find((projected) => projected.id === id);
+    return message === undefined ? Infinity : DateTime.toEpochMillis(message.createdAt);
+  };
+  const order = (a: { id: string; at: number }, b: { id: string; at: number }) =>
+    a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   const timelineSent = input.timeline.findLast(
-    ({ item }) => item.type === "user_message" && typedByUser(item),
+    ({ item }) =>
+      item.type === "user_message" && typedByUser(item) && statusOf(item.runId) !== "queued",
   )?.item;
-  // The server's (created_at, message_id) order: a steer typed after a queued message is newer, though
-  // the queued one is outside the timeline. The timeline's message can lack a projected time; it then
-  // counts as newest, so the hold waits for it rather than lifting on an older message.
-  const timelineAt = input.projected.find((message) => message.id === timelineSent?.messageId);
   const candidates = [
     ...input.projected
-      .filter((message) => typed(message) && !inTimeline.has(message.id))
-      .map((message) => ({ ...message, at: DateTime.toEpochMillis(message.createdAt) })),
+      .filter(
+        (message) =>
+          typed(message) && !inTimeline.has(message.id) && statusOf(message.runId) !== "queued",
+      )
+      .map((message) => ({
+        id: message.id,
+        runId: message.runId,
+        at: DateTime.toEpochMillis(message.createdAt),
+      })),
     ...(timelineSent?.messageId === undefined
       ? []
       : [
-          {
-            id: timelineSent.messageId,
-            runId: timelineSent.runId,
-            at: timelineAt === undefined ? Infinity : DateTime.toEpochMillis(timelineAt.createdAt),
-          },
+          { id: timelineSent.messageId, runId: timelineSent.runId, at: at(timelineSent.messageId) },
         ]),
   ];
+  const optimistic = input.optimistic.findLast(
+    (message) => typed(message) && message.inputIntent !== "queued_turn",
+  );
+  // An optimistic message has only the client's time, never the server's: newest.
   const sent =
-    input.optimistic.findLast(typed) ??
-    candidates.toSorted((a, b) => a.at - b.at || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)).at(-1);
+    optimistic === undefined
+      ? candidates.toSorted(order).at(-1)
+      : { id: optimistic.id, runId: optimistic.runId, at: Infinity };
   if (sent === undefined) return false;
-  const status = input.runs.find((run) => run.id === sent.runId)?.status;
+  const status = statusOf(sent.runId);
   if (status !== undefined && ENDED_RUN_STATUSES.has(status)) return false;
-  return snapshot.lastTypedMessageRead !== sent.id;
+  const read = snapshot.lastTypedMessageRead;
+  if (read === null) return true;
+  if (read === sent.id) return false;
+  // Read past it: read while it was queued, delivered since. Without both times only the name counts.
+  const readAt = at(read);
+  return sent.at === Infinity || readAt === Infinity || order(sent, { id: read, at: readAt }) > 0;
 };
 
 export const resolvedQuestions = (snapshot: ThreadDecisionsSnapshot | null) =>
