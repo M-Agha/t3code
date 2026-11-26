@@ -265,3 +265,73 @@ it.effect(
       );
     }).pipe(Effect.provide(testConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
 );
+
+// Fork (Tracker): the pass also takes a deleted thread's Tracker, Parked and Artifacts rows.
+it.effect(
+  "a compaction pass removes the fork's rows of a deleted thread and keeps a live one's",
+  () =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(startupTime);
+      const forkRows = Effect.flatMap(
+        SqlClient.SqlClient,
+        (sql) => sql<{ readonly row: string }>`
+        SELECT 'question ' || thread_id AS row FROM fork_thread_decision_questions
+        UNION ALL SELECT 'parked ' || thread_id FROM fork_thread_parked_items
+        UNION ALL SELECT 'artifact ' || thread_id FROM fork_thread_artifacts
+        ORDER BY row
+      `,
+      ).pipe(Effect.map((rows) => rows.map(({ row }) => row)));
+
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const at = DateTime.formatIso(DateTime.makeUnsafe(startupTime - 2 * minute));
+        for (const [id, deletedAt] of [
+          ["thread:deleted", at],
+          ["thread:live", null],
+        ] as const) {
+          yield* sql`
+          INSERT INTO orchestration_v2_projection_threads (
+            thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+            created_at, updated_at, deleted_at, payload_json
+          ) VALUES (
+            ${id}, 'project:fork', 'title', 'codex', 'full-access', 'default', ${at}, ${at},
+            ${deletedAt}, '{"title":"title"}'
+          )
+        `;
+          yield* sql`
+          INSERT INTO fork_thread_decision_questions (
+            thread_id, label, label_number, text, source_message_id, asked_at, state
+          ) VALUES (${id}, 'Q1', 1, 'Q1: private question', 'm', ${at}, 'open')
+        `;
+          yield* sql`
+          INSERT INTO fork_thread_parked_items (
+            thread_id, kind, text, state, parked_by, created_at, updated_at
+          ) VALUES (${id}, 'me', 'private item', 'open', 'user', ${at}, ${at})
+        `;
+          yield* sql`
+          INSERT INTO fork_thread_artifacts (
+            thread_id, link_id, url, title, source, first_seen_at, updated_at
+          ) VALUES (${id}, 'a', 'https://claude.ai/artifact/a', 'Mine', 'manual', ${at}, ${at})
+        `;
+        }
+        // No pass runs in the first minute, so every row is still here.
+        yield* DatabaseStorage.DatabaseStorage;
+        assert.lengthOf(yield* forkRows, 6);
+
+        yield* TestClock.adjust(5 * minute);
+
+        assert.deepEqual(yield* forkRows, [
+          "artifact thread:live",
+          "parked thread:live",
+          "question thread:live",
+        ]);
+      }).pipe(
+        Effect.provide(
+          DatabaseStorage.layer.pipe(
+            Layer.provide(ProjectionMaintenance.layer),
+            Layer.provideMerge(Sqlite.layerMemory),
+          ),
+        ),
+      );
+    }).pipe(Effect.provide(testConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+);

@@ -36,6 +36,7 @@ import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as DecisionJudge from "./DecisionJudge.ts";
 import ForkMigration0006 from "../persistence/ForkMigrations/006_ThreadArtifactTypes.ts";
 import * as ThreadDecisions from "./ThreadDecisions.ts";
+import { sweepDeletedThreads } from "./sweepDeletedThreads.ts";
 import {
   formatComposerContextReference,
   toKindScopedComposerContextId,
@@ -2659,6 +2660,48 @@ it.effect("publishes a Sent at once, while the judge still reads the message car
       yield* Queue.take(asked);
       assert.strictEqual(yield* Queue.take(shipItStates), "sent");
       yield* Deferred.succeed(answer, verdict([]));
+    }).pipe(
+      Effect.provide(
+        decisionsWith(() =>
+          Queue.offer(asked, undefined).pipe(Effect.andThen(Deferred.await(answer))),
+        ),
+      ),
+    );
+  }).pipe(Effect.scoped),
+);
+
+// A compaction pass can sweep a thread deleted while its sync waits on the judge; the sync must not
+// write the swept rows back.
+it.effect("a sync read before its thread was deleted writes nothing once the sweep ran", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<void>();
+    const answer = yield* Deferred.make<string>();
+    yield* Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      assert.isTrue(yield* decisions.sync(threadId));
+      // A judged answer, then a reply asking Q6: the rows the sync writes after the judge answers.
+      yield* run("r2", 2, "completed");
+      yield* message("u1", "r2", "user", "yes");
+      yield* message("a2", "r2", "assistant", "Q6, next step: Ship it? My pick is yes: it passed.");
+      const synced = yield* decisions.sync(threadId).pipe(Effect.forkScoped);
+      yield* Queue.take(asked);
+      yield* sql`
+        UPDATE orchestration_v2_projection_threads SET deleted_at = '2026-01-05T00:00:00.000Z'
+        WHERE thread_id = ${threadId}
+      `;
+      yield* sweepDeletedThreads;
+      yield* Deferred.succeed(answer, verdict(["Q4", "Q5"]));
+      yield* Fiber.join(synced);
+      const rows = yield* sql<{ readonly row: string }>`
+        SELECT 'question ' || label AS row FROM fork_thread_decision_questions
+        WHERE thread_id = ${threadId}
+        UNION ALL SELECT 'watermark' FROM fork_thread_decision_sync WHERE thread_id = ${threadId}
+      `;
+      assert.deepEqual(rows, []);
     }).pipe(
       Effect.provide(
         decisionsWith(() =>

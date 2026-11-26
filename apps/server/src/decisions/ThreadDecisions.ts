@@ -49,6 +49,7 @@ import * as Stream from "effect/Stream";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import { CORE_ARTIFACT_TYPE_NAMES, readArtifactCall } from "./artifactCalls.ts";
 import * as DecisionJudge from "./DecisionJudge.ts";
+import { sweepDeletedThreads } from "./sweepDeletedThreads.ts";
 
 // Fork-only. Questions are derived from projected messages; only resolutions are irreplaceable.
 
@@ -301,39 +302,7 @@ export const layer = Layer.effect(
     const fail = (message: string) => (cause: unknown) =>
       new ThreadDecisionsError({ message, cause });
 
-    // Rows of deleted threads; their messages are gone from every view, so nothing can resolve them.
-    // Parked items and artifacts hold what the user made (items, links, titles), so only a
-    // soft-deleted thread drops them; one merely absent from the projection keeps them. Ceiling: rows
-    // of a thread removed outright stay (FORK.md, Artifacts).
-    yield* Effect.forEach(
-      [
-        ...[
-          "fork_thread_parked_items",
-          "fork_thread_parked_set_aside",
-          "fork_thread_artifacts",
-          "fork_thread_artifact_sync",
-        ].map(
-          (table) => `DELETE FROM ${table} WHERE thread_id IN (
-            SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NOT NULL
-          )`,
-        ),
-        ...[
-          "fork_thread_decision_questions",
-          "fork_thread_decided_without_asking",
-          "fork_thread_decision_sync",
-        ].map(
-          (table) => `DELETE FROM ${table} WHERE thread_id NOT IN (
-            SELECT thread_id FROM orchestration_v2_projection_threads WHERE deleted_at IS NULL
-          )`,
-        ),
-      ],
-      (statement) => sql.unsafe(statement),
-      { discard: true },
-    ).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logWarning("Failed to sweep orphaned decisions", { cause }),
-      ),
-    );
+    yield* sweepDeletedThreads;
 
     // Fork migration 005 writes the one row; without it no message counts as judged.
     const cutoff = yield* sql`SELECT 1 FROM fork_decision_judge_cutoff`;
@@ -372,6 +341,13 @@ export const layer = Layer.effect(
     ) {
       const last = rows.at(-1);
       if (last === undefined) return false;
+      // Read before the thread was deleted, perhaps before a judge's wait: writing now would put back
+      // rows a compaction pass's sweep (sweepDeletedThreads) already removed, until the next pass.
+      const [deleted] = yield* sql`
+        SELECT 1 FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${threadId} AND deleted_at IS NOT NULL
+      `;
+      if (deleted !== undefined) return false;
       let changed = false;
       for (const row of rows) {
         if (row.text === null) continue;

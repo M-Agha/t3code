@@ -17,6 +17,7 @@ import { resolveHostCliCommand } from "../cli/invocation.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionMaintenance from "../orchestration-v2/ProjectionMaintenance.ts";
 import * as DatabaseMaintenance from "./DatabaseMaintenance.ts";
+import { sweepDeletedThreads } from "../decisions/sweepDeletedThreads.ts";
 import { forkParked } from "../serverActivation.ts";
 
 // Bound each reclaim pass to one minute of churn.
@@ -151,6 +152,8 @@ const make = Effect.gen(function* () {
       sliceStarted = yield* Clock.monotonicTimeNanos;
     });
     const result = yield* maintenance.pruneEventStore(betweenPages);
+    // Fork (Tracker): a deleted thread's Tracker, Parked and Artifacts rows go with its conversation.
+    yield* sweepDeletedThreads;
     const completedAt = yield* Clock.currentTimeMillis;
     yield* fs.writeFileString(compactedAtPath, String(completedAt)).pipe(Effect.ignore);
     if (
