@@ -37,6 +37,7 @@ import {
   rowFocusAfter,
   unfinishedLabels,
   withoutLine,
+  type HoldMessage,
 } from "./threadDecisions.logic";
 
 const question = (
@@ -113,7 +114,7 @@ describe("holding questions back while a sent message is judged", () => {
 
   it("shows them once the message's run ends, though the judge has not read it", () => {
     expect(held({ runs: [{ id: "r2", status: "waiting" }] })).toBe(false);
-    expect(held({ runs: [{ id: "r2", status: "queued" }] })).toBe(true);
+    expect(held({ runs: [{ id: "r2", status: "starting" }] })).toBe(true);
   });
 
   it("holds from the moment of sending", () => {
@@ -124,24 +125,88 @@ describe("holding questions back while a sent message is judged", () => {
     expect(held({ projected: [message("m1", "r1")], snapshot: read("m2") })).toBe(false);
   });
 
-  it("takes the newest typed message in the server's order, queued or steered", () => {
-    // Queued behind r2, outside the timeline (ThreadDecisions.test.ts "names the newest typed message read, …").
-    const queued = {
-      runs: [...runs, { id: "r3", status: "queued" }],
-      projected: [message("m1", "r1", 1), message("m2", "r2", 2), message("m3", "r3", 3)],
+  // MAIN-126: the Tracker read "Reading your message" for a whole queue wait.
+  it("holds nothing while a message is queued, then from its delivery until it is read or its run ends", () => {
+    // Two messages queued behind the running r1, outside the timeline (ThreadDecisions.test.ts
+    // "names the newest typed message read, …"), and a third still optimistic, bound for the queue.
+    const projected = [message("m1", "r1", 1), message("m2", "r2", 2), message("m3", "r3", 3)];
+    const queuing = {
+      timeline: [user("m1", "r1"), reply("a1", "r1")],
+      projected,
+      runs: [
+        { id: "r1", status: "running" },
+        { id: "r2", status: "queued" },
+        { id: "r3", status: "queued" },
+      ],
     };
-    expect(held({ ...queued, snapshot: read("m2") })).toBe(true);
-    expect(held({ ...queued, snapshot: read("m3") })).toBe(false);
-    // Then a steer into the running r2, typed after the queued m3: the server names it once r2 ends.
+    expect(held(queuing)).toBe(false);
+    const toQueue: HoldMessage = { ...message("m9", null), inputIntent: "queued_turn" };
+    expect(held({ ...queuing, optimistic: [toQueue] })).toBe(false);
+    // r1 ended and r2 started: m2 is delivered, and held until read.
+    const delivered = {
+      timeline: [...queuing.timeline, user("m2", "r2")],
+      projected,
+      runs: [
+        { id: "r1", status: "completed" },
+        { id: "r2", status: "running" },
+        { id: "r3", status: "queued" },
+      ],
+    };
+    expect(held(delivered)).toBe(true);
+    expect(held({ ...delivered, snapshot: read("m2") })).toBe(false);
+    // The server read m2 and the still-queued m3 when r1 ended: m2 is read.
+    expect(held({ ...delivered, snapshot: read("m3") })).toBe(false);
+    // Without m2's time, only its own name counts.
+    expect(
+      held({ ...delivered, projected: [projected[0]!, projected[2]!], snapshot: read("m3") }),
+    ).toBe(true);
+    // Its run ends unread: shown.
+    expect(
+      held({
+        ...delivered,
+        runs: delivered.runs.map((run) => (run.id === "r2" ? { ...run, status: "waiting" } : run)),
+      }),
+    ).toBe(false);
+    // A run started before its message reaches the timeline counts too.
+    const started = delivered.runs.map((run) =>
+      run.id === "r3" ? { ...run, status: "running" } : run,
+    );
+    expect(held({ ...delivered, runs: started, snapshot: read("m2") })).toBe(true);
+  });
+
+  it("holds for a steer typed after a queued message until the server has read the steer", () => {
     const steered = {
-      ...queued,
       timeline: [...timeline, user("m4", "r2")],
-      projected: [...queued.projected, message("m4", "r2", 4)],
+      projected: [
+        message("m1", "r1", 1),
+        message("m2", "r2", 2),
+        message("m3", "r3", 3),
+        message("m4", "r2", 4),
+      ],
+      runs: [...runs, { id: "r3", status: "queued" }],
     };
-    expect(held({ ...steered, snapshot: read("m4") })).toBe(false);
     expect(held({ ...steered, snapshot: read("m3") })).toBe(true);
+    expect(held({ ...steered, snapshot: read("m4") })).toBe(false);
     // A timeline message the projection lacks counts as newest: the hold waits for it.
-    expect(held({ ...steered, projected: queued.projected, snapshot: read("m3") })).toBe(true);
+    expect(
+      held({ ...steered, projected: steered.projected.slice(0, 3), snapshot: read("m3") }),
+    ).toBe(true);
+    // Sent as a steer, not yet acknowledged: held from the moment of sending.
+    const steer: HoldMessage = { ...message("m9", null), inputIntent: "steer" };
+    expect(held({ ...steered, snapshot: read("m4"), optimistic: [steer] })).toBe(true);
+  });
+
+  it("holds nothing for a steer the server turned into a queued follow-up until its run starts", () => {
+    const followUp = {
+      timeline: [...timeline, user("m4", "r3")],
+      projected: [message("m1", "r1", 1), message("m2", "r2", 2), message("m4", "r3", 4)],
+      runs: [...runs, { id: "r3", status: "queued" }],
+      snapshot: read("m2"),
+    };
+    expect(held(followUp)).toBe(false);
+    const started = [...runs, { id: "r3", status: "running" }];
+    expect(held({ ...followUp, runs: started })).toBe(true);
+    expect(held({ ...followUp, runs: started, snapshot: read("m4") })).toBe(false);
   });
 
   it("holds nothing with no open question, or for a message no person typed", () => {
