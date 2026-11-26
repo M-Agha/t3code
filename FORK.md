@@ -56,6 +56,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: Dismiss closes a question without a message, and a send hides questions till read` | Questions and decisions       |
 | `(fork) timeline: Mark unread from here on agent messages, with a New divider and a jump on open`     | Mark unread from here         |
 | `(fork) workflows: a daily upstream-upgrade workflow, and workflow steps never park`                  | The daily upgrade workflow    |
+| `(fork) tracker: a deleted thread's rows go on each compaction pass, beside its conversation`         | Parked items                  |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -590,9 +591,15 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   Enter parks, Shift+Enter is a new line, a Park button; an empty field and the server's refusals
   (placeholders) show under it as an alert. A park in flight clears the field only if it still holds
   what was parked. The Send button and the old cards are gone.
-- The startup sweep deletes parked rows and their `fork_thread_parked_set_aside` only for
-  soft-deleted threads: unlike questions, they cannot be rebuilt. Artifacts' rows and watermark
-  follow the same rule (see Artifacts).
+- The sweep (`sweepDeletedThreads.ts`) deletes parked rows and their `fork_thread_parked_set_aside`
+  only for soft-deleted threads: unlike questions, they cannot be rebuilt. Artifacts' rows and
+  watermark follow the same rule (see Artifacts). It runs when the server starts and on each
+  six-hour compaction pass, beside upstream's purge of a deleted thread's conversation (5258), so a
+  deleted thread's Tracker, Parked and Artifacts text goes by the next pass (about six hours), not
+  at the next start (the owner's choice, 2026-11-26, over a hook in upstream's per-thread purge). It
+  does not follow the purge's exemptions (a thread a live run fork or parent still reads keeps its
+  conversation): such a thread's rows go anyway, and a sync of it writes no questions back
+  (`applyRows` skips a deleted thread, so a sync that waited on the judge cannot undo a sweep).
 
 ### Artifacts
 
@@ -618,7 +625,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   marks a row first seen at or after it: the sync that first read it found no row, so 006's replay
   leaves it unmarked too. Ceiling: a reply stuck at `streaming = 1` holds back that thread's later
   Artifact calls for good (the live DB had no such row on 2026-11-20); the upgrade is a cutoff by age.
-- The startup sweep deletes a thread's artifact rows and watermark only once the thread is
+- The sweep deletes a thread's artifact rows and watermark only once the thread is
   soft-deleted, as Parked's: they hold what the user made (links, titles), which nothing rebuilds.
   A thread merely absent from the projection keeps them (Astra on #8: they went with it before).
   Ceiling: rows of a thread removed outright stay; no upstream path hard-deletes a projected thread.
@@ -1061,6 +1068,10 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/server/src/binCli.test.ts`, whose "keeps migration warnings out of JSON thread output"
        migrates a database past upstream's head, which the fork refuses (rule 2): its assertions
        expect that refusal (MAIN-104).
+     - The deleted-thread sweep on each compaction pass (Parked items):
+       `apps/server/src/persistence/DatabaseStorage.ts` calls `sweepDeletedThreads` right after
+       upstream's `pruneEventStore` in `compact`, with its case at the end of
+       `apps/server/src/persistence/DatabaseStorage.test.ts`. If upstream moves the pass, follow it.
      - `apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts`: the `T3CODE_OWNS_BOARD` line,
        in the query `env` beside `PortScanner.AGENT_THREAD_ENV`.
      - `/park` in the composer send path: `apps/web/src/composer-logic.ts`,
