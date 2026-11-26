@@ -57,6 +57,7 @@ reasons are the ones they accepted.
 | `(fork) timeline: Mark unread from here on agent messages, with a New divider and a jump on open`     | Mark unread from here         |
 | `(fork) workflows: a daily upstream-upgrade workflow, and workflow steps never park`                  | The daily upgrade workflow    |
 | `(fork) tracker: a deleted thread's rows go on each compaction pass, beside its conversation`         | Parked items                  |
+| `(fork) install: moves the service off Nightly, builds a fresh clone; a queued send holds nothing`    | Installing, Questions         |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -189,38 +190,35 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   …"; `ThreadDecisions.question-panel.browser.test.tsx` "Dismiss on the card …", "Dismiss on a
   Tracker row …", "the card's Dismiss waits while the draft …", "dismissing the card's last question
   …", "dismissing the Tracker's last open question …" and "Undo says it is reopening …".
-- **Hidden while a send is judged:** after the user sends a message while questions are open, the card
-  and the Tracker's open questions (and the Questions count) are hidden, the Tracker saying "Reading
-  your message", until the server has read it or its run ends, whichever is first; then they show with
-  whatever the judge closed. `questionsHeld` (`threadDecisions.logic.ts`) decides from what the client
-  already has: the message the user sent (an optimistic one if there is one, else the newest in the
-  server's `(created_at, message_id)` order, its time from the projection's messages, of those queued
-  outside the timeline and the timeline's last typed one, so a steer typed after a queued message is
-  the one sent), its run's status
-  (`ENDED_RUN_STATUSES`, which `packages/contracts/src/threadDecisions.ts` exports for the server and
-  the client), and the snapshot's `lastTypedMessageRead`: the newest person-typed message at or before
-  the message watermark (`fork_thread_decision_sync`) in that same order, read in `snapshot`. Read
-  means it names the sent message, both sides having picked by the server's times. The server
-  publishes a snapshot whenever it reads a person-typed message with text while questions are open,
-  even one that closes nothing; every composer send has text (an image-only one carries
-  `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`), and a message without text would show only at its run's end.
-  Nothing is hidden with no question open. The panel's `actions.questionsHeld` carries it to the card
-  (`threadDecisionsBannerItem`) and the Tracker. A message sent mid-run is read when the running run
-  ends (the watermark waits at its still-growing reply), so its questions stay hidden until then and
-  show at that moment, the judge done; it queues behind that run, and its own run's end comes later.
-  (2026-11-21, the owner: "hide the questions till we get back a response from the judge or we get
-  back your answer fully".) _Rejected:_ a "judging" flag in the snapshot (the server cannot publish
-  when a message arrives that it cannot read yet); publishing the watermark itself (round 1): it
-  usually ends on the run's later reply, which the client cannot place against a queued message not
-  yet in its timeline, so such a send stayed hidden until the next run ended; comparing
-  `(created_at, message_id)` with the sent message's: the server stamps a user message with its own
-  clock (`Orchestrator.ts`, `DateTime.now`), not the client command's `createdAt`, so the optimistic
-  copy's time is not the stored one; picking a queued message ahead of the timeline's (round 1): a
-  steer typed after it is the one the server reads, so the hold lasted through the queued run. Tests:
-  `threadDecisions.logic.test.ts` "holding questions back
-  while a sent message is judged"; `ThreadDecisions.test.ts` "names the newest typed message read, …";
-  the browser tests "a sent message hides the open questions until the judge has read it", "… come
-  back when its run ends, …" and "a send's hold keeps the card's question and collapse".
+- **Hidden while a send is judged:** after the user sends a message while questions are open, the
+  card and the Tracker's open questions (and the Questions count) are hidden, the Tracker saying
+  "Reading your message", until the server has read it or its run ends, whichever is first; then
+  they show with whatever the judge closed. A queued message holds nothing while it waits: its hold
+  starts when it is delivered. Nothing is hidden with no question open. `questionsHeld`
+  (`apps/web/src/components/chat/threadDecisions.logic.ts`) has the rules, from what the client
+  already has: the sent message, its run's status (`ENDED_RUN_STATUSES`, which
+  `packages/contracts/src/threadDecisions.ts` exports for the server and the client) and the
+  snapshot's `lastTypedMessageRead` (read in `snapshot` from `fork_thread_decision_sync`'s
+  watermark). The server publishes a snapshot whenever it reads a person-typed message with text
+  while questions are open, even one that closes nothing; every composer send has text (an
+  image-only one carries `ATTACHMENT_ONLY_BOOTSTRAP_PROMPT`), and a message without text would show
+  only at its run's end. The panel's `actions.questionsHeld` carries it to the card
+  (`threadDecisionsBannerItem`) and the Tracker. (2026-11-21, the owner: "hide the questions till we
+  get back a response from the judge or we get back your answer fully". 2026-11-26, MAIN-126,
+  decided by the lead: the Tracker read "Reading your message", empty, for a whole queue wait, so a
+  message counts for the hold only once sent.) _Rejected:_ a "judging" flag in the snapshot (the
+  server cannot publish when a message arrives that it cannot read yet); publishing the watermark
+  itself (round 1): it usually ends on the run's later reply, which the client cannot place against
+  a queued message not yet in its timeline, so such a send stayed hidden until the next run ended;
+  comparing `(created_at, message_id)` with an optimistic message's: the server stamps a user
+  message with its own clock (`Orchestrator.ts`, `DateTime.now`), not the client command's
+  `createdAt`, so the optimistic copy's time is not the stored one; holding from a queued message's
+  send (MAIN-126's cause); picking a queued message ahead of the timeline's (round 1): a steer typed
+  after it is the one the server reads, so the hold lasted through the queued run. Tests:
+  `apps/web/src/components/chat/threadDecisions.logic.test.ts` "holding questions back while a sent
+  message is judged"; `ThreadDecisions.test.ts` "names the newest typed message read, …"; the
+  browser tests "a sent message hides the open questions until the judge has read it", "… come back
+  when its run ends, …" and "a send's hold keeps the card's question and collapse".
 - **When a reply is read:** at turn end (a run `waiting` or `completed`), never while a message
   streams; also when an assistant message finishes, and on subscribe, through a per-thread watermark
   (rows are derivable; replies written while an official build ran are backfilled).
@@ -723,6 +721,17 @@ and keep working after every fork rebuild.
   each new build through upstream's own path instead of reusing the last one's runtime. The format
   passes `isExactServiceVersion`, sorts above the bare tag version, and still reads as Stable and as
   the fork's branding (checked 2026-11-20).
+- **Moving a service off upstream Nightly:** semver puts `fork` below `nightly`, so `t3 service
+  install` refuses `0.1.12-fork.20261124.5209.<n>` over a service on `0.1.12-nightly.20261124.5204`
+  as a downgrade (the work Mac's first install, 2026-11-25: the app installed and the service stayed
+  on Nightly). `scripts/fork/install.sh` passes `--allow-downgrade` only when the service's
+  `activeVersion` (`service-state.json`) is an upstream nightly whose nightly number is at or below
+  the one this build is of; a later nightly, a later fork build or a stable release is still
+  refused, and install.sh then says the service runs that newer version (a build from a later
+  fork/main moves it) instead of "run it again". A start command it prints for later carries no
+  flag, since the service may move before it runs: a line beside it names the version judged
+  against. Test: `apps/server/src/cloud/forkServiceRuntime.test.ts` "allows the downgrade only from
+  an upstream nightly at or below the fork build's own".
 - **The T3 home is `~/.t3`:** an app opened from Finder does not see a shell's `T3CODE_HOME`, so
   install.sh refuses any other value, and the backup is always of the database the app migrates.
   _Rejected:_ resolving the home from the shell as the CLI does (it backs up and seeds a home the
@@ -1318,13 +1327,13 @@ it fails instead. The steps below are what the script encodes and what stays a p
    app is built with T3 Connect off and cannot reach machines linked through T3's relay. The values
    are upstream's public production identifiers, the same ones official builds embed. Then run
    `scripts/fork/build.sh`: one at a time per checkout, it installs the dependencies (`vp i` with the
-   lockfile as committed), moves the old build to the trash, clears any update feed, and stamps
-   the version from the upstream tag below HEAD and a build number
-   (`v0.1.11-nightly.20261117.4825` becomes `0.1.11-fork.20261117.4825.<n>`, see "Background
-   service"). Without the stamp the app reported package.json's older version and
-   linked clients called it out of date; a `-nightly.` version would rebrand it "T3 Code (Nightly)".
-   It then builds the background service's runtime archive at the same version and smoke-tests it
-   (see "Background service").
+   lockfile as committed, after `pnpm install` in a fresh clone, which has no `vp`: "Installing"),
+   moves the old build to the trash, clears any update feed, and stamps the version
+   from the upstream tag below HEAD and a build number (`v0.1.11-nightly.20261117.4825` becomes
+   `0.1.11-fork.20261117.4825.<n>`, see "Background service"). Without the stamp the app reported
+   package.json's older version and linked clients called it out of date; a `-nightly.` version would
+   rebrand it "T3 Code (Nightly)". It then builds the background service's runtime archive at the same
+   version and smoke-tests it (see "Background service").
    The build must not contain `app-update.yml`. `scripts/fork/install.sh` refuses a build without
    T3 Connect or without a `-fork.` version. Known limits of the `-fork.` version, both unused today
    (Fable 5.2 review, 2026-11-17): an SSH environment started from the fork asks for a
@@ -1345,6 +1354,8 @@ moves a background service it stopped to that build; its header says when it ref
 back after a failure, and what it prints. The first start of a newer build migrates `~/.t3` one way,
 so before it installs anything it copies the live `~/.t3/userdata/statev2.sqlite` to
 `~/.claude/trash/` (SQLite's online backup, integrity-checked): that copy is the only way back.
+Installed, the app is registered with LaunchServices (`lsregister -f -R -trusted`), so Spotlight and
+launchers find it at once (MAIN-128); a failure there only warns.
 
 **Automatically** (the default, MAIN-106): at the end of `/t3code-fork upgrade` or `ship`, after the
 push and the build, the agent runs `scripts/fork/auto-install.sh` and tells the owner T3 will close
@@ -1362,13 +1373,14 @@ installs, the workflow's own included, keep it. An install that names none where
 installs the app but not the workflow (a copy from before roles goes to the trash), and says so;
 auto-install.sh's last line says so too.
 
-An installer builds in its own checkout, so it first needs what `build.sh` needs: `~/repos/t3code`
-on a clean `fork/main` with `origin` and `upstream` remotes, its dependencies installed once
-(`vp i`), the repo's `.env`, and Rust (`cargo`) with the `aarch64-apple-darwin` target, for the
-resource monitor the desktop build compiles (`scripts/build-desktop-artifact.ts`). The workflow's
-build runs in the T3 server's environment, which under the background service is its launch
-agent's: after the first install, check that `plutil -extract EnvironmentVariables.PATH raw
-~/Library/LaunchAgents/com.t3tools.t3code.service.plist` finds `mise`, `jq` and `cargo`.
+An installer builds in its own checkout, so it first needs what `build.sh` needs: `~/repos/t3code` on
+a clean `fork/main` with `origin` and `upstream` remotes, the repo's `.env`, and Rust (`cargo`) with
+the `aarch64-apple-darwin` target, for the resource monitor the desktop build compiles
+(`scripts/build-desktop-artifact.ts`). The workflow's build runs in the T3 server's environment, which
+under the background service is its launch agent's: after the first install, check that `plutil
+-extract EnvironmentVariables.PATH raw ~/Library/LaunchAgents/com.t3tools.t3code.service.plist` finds
+`mise`, `jq` and `cargo`. A fresh clone needs nothing more: it has no `vp` yet, so
+`scripts/fork/build.sh` installs the dependencies itself first (OPEN #19).
 
 Whether macOS asks before osascript, run by the job, may quit an app (Automation consent) is
 _unverified_; a refusal ends the run with `FAILED` and nothing installed.

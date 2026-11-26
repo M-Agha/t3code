@@ -41,6 +41,15 @@ version="${version/-nightly./-fork.}"
 [[ $version =~ ^[^-+]+-fork\. ]] || fail "could not derive a fork version from tag $tag"
 
 node="node@$(jq -r .engines.node package.json)"
+# A fresh clone has no vp yet (OPEN #19): pnpm at packageManager's version (its "+sha512…" suffix
+# dropped) installs it, as vp i would; vp i below then finds them in place.
+if [ ! -x node_modules/.bin/vp ]; then
+  pm="$(jq -r .packageManager package.json)"
+  [[ $pm == pnpm@* ]] || fail "package.json's packageManager is $pm, not pnpm."
+  pnpm="${pm%%+*}"
+  echo "No node_modules/.bin/vp: installing the dependencies with $pnpm."
+  CI=true mise exec "$node" "$pnpm" -- pnpm install --frozen-lockfile
+fi
 # The dependencies of the commit being built (a checkout moved to a new fork/main has its old ones),
 # before a build number is taken or release/ is touched, so a failure here leaves both. vp i is pnpm
 # install: --frozen-lockfile refuses rather than rewrite pnpm-lock.yaml, and CI=true is how pnpm
