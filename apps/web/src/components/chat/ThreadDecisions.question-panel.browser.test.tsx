@@ -183,6 +183,16 @@ it("Accept adds the answer and moves on; Answer… adds the label and stays", as
   await expect.element(accept("Q4", "yes")).toHaveAttribute("aria-pressed", "true");
 });
 
+it("names the banner's Open Tracker and a reply's show-in-chat in the shared tooltip", async () => {
+  await using _app = await openThread(threadWithHistory("thread-decision-tooltips", 1));
+  await expect.element(accept("Q4", "yes")).toBeVisible();
+  await userEvent.hover(page.getByRole("button", { name: /^Open Tracker/ }));
+  await expect.element(page.getByText("Open Tracker", { exact: true })).toBeVisible();
+  await openTracker();
+  await userEvent.hover(page.getByRole("button", { name: /^Show the .* in the chat$/ }).first());
+  await expect.element(page.getByText("Show in the chat", { exact: true })).toBeVisible();
+});
+
 it("selects the option the draft chose as the draft changes", async () => {
   await using app = await openThread(threadWithHistory("thread-decision-draft", 1));
   await expect.element(accept("Q4", "yes")).toHaveAttribute("aria-pressed", "false");

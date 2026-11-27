@@ -58,7 +58,7 @@ import { Label } from "../ui/label";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
 import { ScrollArea } from "../ui/scroll-area";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 import { artifactGroups, rowFocusAfter } from "./threadDecisions.logic";
 import { useThreadDecisions } from "./ThreadDecisions";
 
@@ -214,38 +214,34 @@ function ArtifactRow(props: {
         )}
       >
         <span aria-hidden className="absolute inset-0 bg-accent/60" />
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon-micro"
-                className="relative"
-                aria-label={`Open in browser: ${title}`}
-                onClick={() => actions.openInBrowser(artifact)}
-              />
-            }
-          >
-            <ArrowUpRightIcon className="size-3.5" />
-          </TooltipTrigger>
-          <TooltipPopup side="top">Open in browser</TooltipPopup>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                variant="ghost"
-                size="icon-micro"
-                className="relative"
-                aria-label={`Copy link: ${title}`}
-                onClick={() => actions.copyLink(artifact)}
-              />
-            }
-          >
-            <LinkIcon className="size-3.5" />
-          </TooltipTrigger>
-          <TooltipPopup side="top">Copy link</TooltipPopup>
-        </Tooltip>
+        <SharedTooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon-micro"
+              className="relative"
+              aria-label={`Open in browser: ${title}`}
+              onClick={() => actions.openInBrowser(artifact)}
+            />
+          }
+          label="Open in browser"
+        >
+          <ArrowUpRightIcon className="size-3.5" />
+        </SharedTooltipTrigger>
+        <SharedTooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="icon-micro"
+              className="relative"
+              aria-label={`Copy link: ${title}`}
+              onClick={() => actions.copyLink(artifact)}
+            />
+          }
+          label="Copy link"
+        >
+          <LinkIcon className="size-3.5" />
+        </SharedTooltipTrigger>
         <Menu
           open={menuOpen}
           onOpenChange={(open) => {

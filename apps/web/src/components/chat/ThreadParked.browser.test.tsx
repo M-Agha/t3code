@@ -44,6 +44,7 @@ import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { I18nProvider } from "~/i18n/I18nProvider";
 import { startI18n, whenLocaleReady } from "~/i18n/runtime";
 import { act, render, type Screen } from "../../../test/render";
+import { SharedTooltipProvider } from "../ui/shared-tooltip";
 import { toastManager } from "../ui/toast";
 import { ThreadParkedPanel } from "./ThreadParked";
 
@@ -106,7 +107,12 @@ const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSna
   readBack: null,
 });
 
-const panel = () => <ThreadParkedPanel threadRef={threadRef} actions={actions} />;
+// The app's root mounts the shared tooltip the row's Add to draft uses.
+const panel = () => (
+  <SharedTooltipProvider>
+    <ThreadParkedPanel threadRef={threadRef} actions={actions} />
+  </SharedTooltipProvider>
+);
 
 function setup(ids: ReadonlyArray<number>, items: ReadonlyArray<ThreadParkedItem> = []) {
   state.snapshot = snapshotOf([...ids.map((id) => item(id)), ...items]);
@@ -335,7 +341,7 @@ it("offers no Add to draft while the composer edits a queued message, and says w
   await using screen = await render(panel());
   const add = screen.getByRole("button", { name: "Add to draft: item 1" });
   await expect.element(add).toHaveAttribute("aria-disabled", "true");
-  // A screen reader hears why without the tooltip, which Base UI links to nothing (Opus round 2, O1).
+  // A screen reader hears why without opening the tooltip, which describes the button only while open (Opus round 2, O1).
   await expect.element(add).toHaveAccessibleDescription("finish editing the queued message first");
   await add.hover();
   await expect

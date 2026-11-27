@@ -17,8 +17,8 @@ import type { ChatMessage } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
 import { resolveThreadLastVisitedAt } from "../Sidebar.logic";
 import { Button } from "../ui/button";
+import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 import { toastManager } from "../ui/toast";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { MessagesTimelineRow, TimelineLatestRun } from "./MessagesTimeline.logic";
 import { CHAT_TIMELINE_ANCHOR_OFFSET } from "./timelineScrollAnchoring";
 import { TimelineRowCtx } from "./timelineRowContext";
@@ -191,21 +191,19 @@ export const MarkUnreadFromHereButton = ({ message }: { readonly message: ChatMe
     );
   };
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost-muted"
-            onClick={() => void markUnread()}
-            aria-label="Mark unread from here"
-          />
-        }
-      >
-        <MailOpenIcon className="size-3" />
-      </TooltipTrigger>
-      <TooltipPopup side="top">Mark unread from here</TooltipPopup>
-    </Tooltip>
+    <SharedTooltipTrigger
+      render={
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost-muted"
+          onClick={() => void markUnread()}
+          aria-label="Mark unread from here"
+        />
+      }
+      label="Mark unread from here"
+    >
+      <MailOpenIcon className="size-3" />
+    </SharedTooltipTrigger>
   );
 };
