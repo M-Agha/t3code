@@ -408,6 +408,25 @@ export const layer = Layer.effect(
       run.run_id IS NULL OR json_extract(run.payload_json, '$.startedAt') IS NOT NULL
     )`;
 
+    // True for a messages or turn-items row (its run joined as `run`, NULL without one) that no rewind took
+    // out of the transcript. A rewind keeps the rows and marks the runs after the edited message
+    // `rolled_back` (CheckpointRollbackService); upstream's timeline hides them
+    // (createOrchestrationV2TurnItemVisibility), and the Tracker reads the same transcript.
+    const inTranscript = () => sql`(run.status IS NOT 'rolled_back')`;
+
+    // A messages row (its run joined as `run`) that reached, or waits to reach, the agent: its run did not
+    // end before it started, and no rewind took it out. Not runStarted: a send still queued counts here.
+    const reached = () => sql`(${neverStarted()} IS NOT 1 AND ${inTranscript()})`;
+
+    // The ids of the thread's messages a rewind took out of the transcript: through its rewound runs (by the
+    // runs' thread index), then their messages (by run).
+    const rewoundMessages = (threadId: ThreadId) => sql`
+      SELECT message.message_id
+      FROM orchestration_v2_projection_runs AS run
+      JOIN orchestration_v2_projection_messages AS message ON message.run_id = run.run_id
+      WHERE run.thread_id = ${threadId} AND NOT ${inTranscript()}
+    `;
+
     // Whether a thread is a main thread, and if not, what it is. `delegated` is isDelegatedAppThread in
     // SQL: a JSON null delegatedFrom reads as NULL too. Held to the contracts' parkRefusal by "refuses to
     // park exactly the threads threadParks rules out"; park and t3_question both refuse by it.
@@ -455,6 +474,98 @@ export const layer = Layer.effect(
       return closed;
     });
 
+    // `label` as applyRows left it from the replies still in the transcript and read, once a rewind took the
+    // one that last asked it (none: no such reply asked it). Mirrors syncMessages' replyByRun (a run's reply
+    // is its last assistant message) and applyRows' upsert (the newest shaped asking, else the first).
+    const askedInTranscript = Effect.fn("ThreadDecisions.askedInTranscript")(function* (
+      threadId: ThreadId,
+      label: string,
+    ) {
+      const replies = yield* sql<{
+        readonly messageId: string;
+        readonly createdAt: string;
+        readonly text: string;
+      }>`
+        SELECT message.message_id AS "messageId", message.created_at AS "createdAt",
+          json_extract(message.payload_json, '$.text') AS text
+        FROM orchestration_v2_projection_messages AS message
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+        JOIN fork_thread_decision_sync AS sync ON sync.thread_id = message.thread_id
+        WHERE message.thread_id = ${threadId} AND message.role = 'assistant'
+          AND message.streaming = 0 AND ${inTranscript()}
+          AND (message.created_at, message.message_id) <= (sync.after_created_at, sync.after_message_id)
+          AND instr(json_extract(message.payload_json, '$.text'), ${label}) > 0
+          AND (message.run_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM orchestration_v2_projection_messages AS later
+            WHERE later.run_id = message.run_id AND later.role = 'assistant'
+              AND (later.created_at, later.message_id) > (message.created_at, message.message_id)
+          ))
+        ORDER BY message.created_at, message.message_id
+      `;
+      let asked: { text: string; sourceMessageId: string; askedAt: string } | undefined;
+      for (const reply of replies) {
+        const question = readReplyDecisions(reply.text).questions.find((q) => q.label === label);
+        if (question === undefined) continue;
+        if (asked === undefined || splitQuestion(question.text).pick !== "") {
+          asked = {
+            text: question.text,
+            sourceMessageId: reply.messageId,
+            askedAt: reply.createdAt,
+          };
+        }
+      }
+      return asked;
+    });
+
+    // Undoes what rewound messages asked, answered or decided (FORK.md, "After an edit"). A question a reply
+    // still in the transcript asked too keeps its state and takes that reply's wording: the reopen below
+    // undoes a closing a rewound message or card made, and a Dismiss, an agent's drop or an agent's answer
+    // citing a message still there stays. The state before the rewound re-ask is not recorded.
+    const pruneRewound = Effect.fn("ThreadDecisions.pruneRewound")(function* (threadId: ThreadId) {
+      const gone = yield* sql<{ readonly label: string }>`
+        SELECT label FROM fork_thread_decision_questions
+        WHERE thread_id = ${threadId} AND source_message_id IN (${rewoundMessages(threadId)})
+      `;
+      for (const { label } of gone) {
+        const asked = yield* askedInTranscript(threadId, label);
+        yield* asked === undefined
+          ? sql`DELETE FROM fork_thread_decision_questions WHERE thread_id = ${threadId} AND label = ${label}`
+          : sql`
+              UPDATE fork_thread_decision_questions
+              SET text = ${asked.text}, source_message_id = ${asked.sourceMessageId},
+                asked_at = ${asked.askedAt}
+              WHERE thread_id = ${threadId} AND label = ${label}
+            `;
+      }
+      // A card's closing records no item (answer_message_id NULL, resolved at the card's updated_at, which a
+      // rewind leaves as it was), so it is found by that time among the rewound runs' answered cards.
+      // Ceiling: a card in the transcript resolved at the same millisecond in the same thread reopens too;
+      // a column naming the card (a fork migration) is the upgrade path.
+      const reopened = yield* sql`
+        UPDATE fork_thread_decision_questions
+        SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL,
+          settled_by = NULL
+        WHERE thread_id = ${threadId} AND state IN ('answered', 'dropped')
+          AND (
+            answer_message_id IN (${rewoundMessages(threadId)})
+            OR (answer_message_id IS NULL AND settled_by IS NULL AND resolved_at IN (
+              SELECT item.updated_at
+              FROM orchestration_v2_projection_runs AS run
+              JOIN orchestration_v2_projection_turn_items AS item ON item.run_id = run.run_id
+              WHERE run.thread_id = ${threadId} AND NOT ${inTranscript()}
+                AND item.type = 'user_input_request' AND item.status = 'completed'
+            ))
+          )
+        RETURNING label
+      `;
+      const undecided = yield* sql`
+        DELETE FROM fork_thread_decided_without_asking
+        WHERE thread_id = ${threadId} AND message_id IN (${rewoundMessages(threadId)})
+        RETURNING message_id
+      `;
+      return gone.length > 0 || reopened.length > 0 || undecided.length > 0;
+    }, sql.withTransaction);
+
     // Rows in order, in one transaction: the questions a run's reply asks, the closing found for each user
     // message among them, then the watermark past the last row.
     const applyRows = Effect.fn("ThreadDecisions.applyRows")(function* (
@@ -493,9 +604,10 @@ export const layer = Layer.effect(
                     AND (answer_run.ordinal > ${row.runOrdinal} OR answer_run.status = 'queued')
                 )`;
           for (const question of read.questions) {
-            // Only a shaped re-ask ("My pick is") reopens or rewords a known label. An unshaped line about it
-            // ("Q4 remains open", or an agent echoing "Q7: nothing to change." after the user answered) changes
-            // nothing: echoes reopened answered questions (2026-11-17). A label never seen before is still recorded.
+            // Only a shaped re-ask ("My pick is") reopens or rewords a known label (askedInTranscript mirrors
+            // it). An unshaped line about it ("Q4 remains open", or an agent echoing "Q7: nothing to change."
+            // after the user answered) changes nothing: echoes reopened answered questions (2026-11-17). A
+            // label never seen before is still recorded.
             const shaped = splitQuestion(question.text).pick !== "";
             const asked = yield* sql`
               INSERT INTO fork_thread_decision_questions (
@@ -575,12 +687,13 @@ export const layer = Layer.effect(
       if (!useJudge) return { closing: closingFor(row.text, open), judged: false };
       // The reply the message follows: whether a bare "yes" assents to the question block depends on it.
       const [reply] = yield* sql<{ readonly text: string }>`
-        SELECT json_extract(payload_json, '$.text') AS text
-        FROM orchestration_v2_projection_messages
-        WHERE thread_id = ${threadId} AND role = 'assistant'
-          AND json_extract(payload_json, '$.text') IS NOT NULL
-          AND (created_at, message_id) < (${row.createdAt}, ${row.messageId})
-        ORDER BY created_at DESC, message_id DESC
+        SELECT json_extract(message.payload_json, '$.text') AS text
+        FROM orchestration_v2_projection_messages AS message
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+        WHERE message.thread_id = ${threadId} AND message.role = 'assistant' AND ${inTranscript()}
+          AND json_extract(message.payload_json, '$.text') IS NOT NULL
+          AND (message.created_at, message.message_id) < (${row.createdAt}, ${row.messageId})
+        ORDER BY message.created_at DESC, message.message_id DESC
         LIMIT 1
       `;
       const judged = yield* judge.judge({
@@ -627,7 +740,7 @@ export const layer = Layer.effect(
           message.created_at >= (SELECT judged_from FROM fork_decision_judge_cutoff) AS judged
         FROM orchestration_v2_projection_messages AS message
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
-        WHERE message.thread_id = ${threadId}
+        WHERE message.thread_id = ${threadId} AND ${inTranscript()}
           AND (message.created_at, message.message_id) >
             (${watermark?.afterCreatedAt ?? ""}, ${watermark?.afterMessageId ?? ""})
         ORDER BY message.created_at, message.message_id
@@ -643,7 +756,8 @@ export const layer = Layer.effect(
       );
       const ready = blocked === -1 ? rows : rows.slice(0, blocked);
 
-      // A run's reply is its last assistant message; earlier ones narrate tool calls.
+      // A run's reply is its last assistant message; earlier ones narrate tool calls (mirrored by
+      // askedInTranscript).
       const replyByRun = new Map<string, string>();
       for (const row of ready) {
         if (row.role === "assistant") replyByRun.set(row.runId ?? row.messageId, row.messageId);
@@ -705,12 +819,13 @@ export const layer = Layer.effect(
       // The message pass stops before a message that may still change. A card answered after it waits,
       // so it never closes a question before the questions asked up to then are recorded.
       const [unread] = yield* sql<{ readonly createdAt: string }>`
-        SELECT created_at AS "createdAt"
-        FROM orchestration_v2_projection_messages
-        WHERE thread_id = ${threadId}
-          AND (created_at, message_id) >
+        SELECT message.created_at AS "createdAt"
+        FROM orchestration_v2_projection_messages AS message
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+        WHERE message.thread_id = ${threadId} AND ${inTranscript()}
+          AND (message.created_at, message.message_id) >
             (${watermark?.afterCreatedAt ?? ""}, ${watermark?.afterMessageId ?? ""})
-        ORDER BY created_at, message_id
+        ORDER BY message.created_at, message.message_id
         LIMIT 1
       `;
       const cards = yield* sql<{
@@ -718,13 +833,16 @@ export const layer = Layer.effect(
         readonly updatedAt: string;
         readonly payload: string;
       }>`
-        SELECT turn_item_id AS "itemId", updated_at AS "updatedAt", payload_json AS payload
-        FROM orchestration_v2_projection_turn_items
-        WHERE thread_id = ${threadId} AND type = 'user_input_request' AND status = 'completed'
-          AND (updated_at, turn_item_id) >
+        SELECT item.turn_item_id AS "itemId", item.updated_at AS "updatedAt",
+          item.payload_json AS payload
+        FROM orchestration_v2_projection_turn_items AS item
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = item.run_id
+        WHERE item.thread_id = ${threadId} AND item.type = 'user_input_request'
+          AND item.status = 'completed' AND ${inTranscript()}
+          AND (item.updated_at, item.turn_item_id) >
             (${watermark?.afterItemUpdatedAt ?? ""}, ${watermark?.afterItemId ?? ""})
-          ${unread === undefined ? sql`` : sql`AND updated_at < ${unread.createdAt}`}
-        ORDER BY updated_at, turn_item_id
+          ${unread === undefined ? sql`` : sql`AND item.updated_at < ${unread.createdAt}`}
+        ORDER BY item.updated_at, item.turn_item_id
       `;
       const last = cards.at(-1);
       if (last === undefined) return false;
@@ -1004,7 +1122,7 @@ export const layer = Layer.effect(
     }, sql.withTransaction);
 
     // Every (item, message) pair of the thread's user messages carrying an item's chip, oldest message
-    // first. `reached`: the message's run did not end before it started (`neverStarted`).
+    // first, each with whether it `reached` the agent.
     // Ceiling: it reads every user message of the thread naming a parked record, each sync; thousands
     // would want a watermark over the messages already read.
     const carriedPairs = Effect.fn("ThreadDecisions.carriedPairs")(function* (threadId: ThreadId) {
@@ -1012,11 +1130,11 @@ export const layer = Layer.effect(
         readonly messageId: string;
         readonly createdAt: string;
         readonly payload: string;
-        readonly neverStarted: number | null;
+        readonly reached: number;
       }>`
         SELECT message.message_id AS "messageId", message.created_at AS "createdAt",
           message.payload_json AS payload,
-          ${neverStarted()} AS "neverStarted"
+          ${reached()} AS "reached"
         FROM orchestration_v2_projection_messages AS message
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
         WHERE message.thread_id = ${threadId} AND message.role = 'user'
@@ -1028,7 +1146,7 @@ export const layer = Layer.effect(
           itemId,
           messageId: message.messageId,
           createdAt: message.createdAt,
-          reached: message.neverStarted !== 1,
+          reached: message.reached === 1,
         })),
       );
     });
@@ -1105,6 +1223,11 @@ export const layer = Layer.effect(
         .withLock(
           threadId,
           Effect.all([
+            // First, in its own transaction and published at once: a message sent after a rewind is
+            // judged against the questions the transcript leaves open, and may wait on the judge.
+            pruneRewound(threadId).pipe(
+              Effect.tap((pruned) => (pruned ? PubSub.publish(changes, threadId) : Effect.void)),
+            ),
             syncMessages(threadId),
             // After the messages, so a card never closes a question before its reply is read. Each in its
             // own transaction: a failure here must not hide decisions already committed.
@@ -1170,7 +1293,7 @@ export const layer = Layer.effect(
                 WHERE message.thread_id = ${threadId} AND message.role = 'user'
                   AND message.created_at > ${oldest}
                   AND ${userAuthored()}
-                  AND ${neverStarted()} IS NOT 1
+                  AND ${reached()}
                   AND instr(json_extract(message.payload_json, '$.text'), ${VETO_PREFIX}) > 0
               `;
         const vetoLines = vetoes.map((message) => ({
@@ -1436,6 +1559,7 @@ export const layer = Layer.effect(
             LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
             WHERE message.thread_id = ${input.threadId} AND message.message_id = ${input.source}
               AND message.role = 'user' AND ${userAuthored()} AND ${runStarted()}
+              AND ${inTranscript()}
           `;
           if (typed === undefined) return { notTyped: input.source } as const;
           if (!quotes(typed.text ?? "", input.words)) return { notQuoted: input.source } as const;
@@ -1515,7 +1639,7 @@ export const layer = Layer.effect(
         LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
         WHERE message.thread_id = ${threadId} AND message.role = 'user' AND ${userAuthored()}
           AND json_extract(message.payload_json, '$.text') IS NOT NULL
-          AND ${neverStarted()} IS NOT 1
+          AND ${reached()}
           AND message.created_at < ${state.judgedFrom}
           AND (message.created_at, message.message_id) <=
             (${state.afterCreatedAt}, ${state.afterMessageId})
@@ -1551,6 +1675,13 @@ export const layer = Layer.effect(
             const closedNow = yield* locks.withLock(
               threadId,
               Effect.gen(function* () {
+                // A rewind since the list was read (its sync waits on this lock between two messages).
+                const [kept] = yield* sql`
+                  SELECT 1 FROM orchestration_v2_projection_messages AS message
+                  LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+                  WHERE message.message_id = ${row.messageId} AND ${inTranscript()}
+                `;
+                if (kept === undefined) return 0;
                 const found = yield* closingOf(threadId, row, true, reading.reopened);
                 if (found === undefined) return 0;
                 if (!found.judged) {
