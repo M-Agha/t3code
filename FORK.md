@@ -63,7 +63,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.13-nightly.20261125.5258`, whose last upstream migration is 119.
+`v0.1.14-nightly.20261127.5332`, whose last upstream migration is 119.
 
 ### Questions and decisions
 
@@ -570,8 +570,11 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     thread's, resolved or edited since, and a chip without its record reaches the agent as
     `unavailable`. A pasted chip the draft already holds stays single. Add to draft attaches
     it again (Sol S5, Opus O1). A cut and paste of a chip within one draft drops it too; undo or Add to
-    draft brings it back. A paste into a fenced code block drops them as well, since the provider's
-    projector reads a reference inside a fence too (Sol round 2, S6). Mobile drops them on paste too
+    draft brings it back. A paste into a fenced code block keeps them verbatim: since 5332 upstream's
+    `collectComposerContextReferences` skips a reference inside a closed fence, so it is literal text,
+    never context, and marks nothing sent. The owner chose upstream's way here (Q1, 2026-11-27); the
+    strip there (Sol round 2, S6) guarded against a fenced reference being read, which 5332 ended.
+    Mobile drops them on paste too
     (Sol round 2, S1). A paste of parked chips alone does nothing on either
     (`pastesOnlyParkedReferences`): on mobile it leaves the selection, and the attachments a selected
     chip holds, in place (Sol round 3, S5). A drop of text onto the web composer (since 5191 upstream's
@@ -1318,8 +1321,14 @@ it fails instead. The steps below are what the script encodes and what stays a p
      fork's `removeParkedChips` from `composer-parked-chips.ts`) at the top of `onSelectionUpdate`
      and of `onUpdate`, before upstream's stale-skill check, whose condition also counts
      `PARKED_CHIPS_REMOVED` as part of the undo; its `insertClipboardText`, which upstream's
-     `handlePaste` and (since 5191) `handleDrop` call, strips parked chips before its code-block
-     branch, so a dropped chip goes the way a pasted one does. If upstream rewrites any of these hooks, keep each call in the same place;
+     `handlePaste` and (since 5191) `handleDrop` call, strips parked chips right after its code-block
+     branch (a paste into a fence stays literal, as upstream has it), so a dropped chip goes the way a
+     pasted one does. Since 5319 both it and
+     `composerInlineTokenPaste.ts`'s `importPastedComposerText` take upstream's parsed
+     `PastedComposerClipboard` (`readPastedComposerClipboard`), and strip its `text`; upstream's
+     paste-to-focus, `ChatComposer.tsx`'s `pasteTextAtEnd`, passes that `clipboardPaste` on its
+     plain-text exit too (upstream passes none there), so a paste into a blurred composer strips them
+     as well (its case in `ChatView.parked.browser.test.tsx`). If upstream rewrites any of these hooks, keep each call in the same place;
      "Parked items" (Undo) says why.
      `ChatComposer.tsx` builds that prop from the record it kept on delete (its label cleaned, equal
      to the chip's) and `parkedChipRestorable`, and restores the kept record of every returning chip
@@ -1345,7 +1354,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
      before its unknown-kind branch, and `apps/mobile/vite.config.ts` lists
      `ComposerContextSheet.test.tsx` among its React tests. `t3_park`'s `kind` in
      `thread/tools.ts` takes `ThreadParkedKindWord`. In tests: `apps/web/test/fakeEnvironment.ts` has
-     `answerStreamRpc` (a subscription the test pushes snapshots into) and a thread's `delegateOf`
+     `answerStreamRpc` (a subscription the test pushes snapshots into), `runningRun` and the
+     `userItem` export (upstream dropped both as unused in 5305; the Tracker's hold case uses them),
+     and a thread's `delegateOf`
      (a subagent `delegate_task` started, which has a composer, unlike `providerSubagentOf`),
      `core.test.ts`'s `t3_park` case holds its own refusal (a delegated child) and the server's it passes on (a side chat, a
      placeholder), and reads the stored kind through `parkKind`, and `ChatView.logic.test.ts`,
@@ -1525,14 +1536,17 @@ uninstall`, then reopen it.
   `node_modules/.bin/vp`, which upstream-sync puts on its children's PATH.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
   real directory in a symlinked home …" fails on this Mac on the plain
-  `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124`, `…5191`, `v0.1.12-nightly.20261124.5209` and
-  `v0.1.13-nightly.20261125.5258` tags too (it returns
+  `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124`, `…5191`, `v0.1.12-nightly.20261124.5209`,
+  `v0.1.13-nightly.20261125.5258` and `v0.1.14-nightly.20261127.5332` tags too (it returns
   no removed runtime), so `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes themes when a linked theme directory's
   original grandparent is restored between probes" fails on this Mac on the plain
-  `v0.1.12-nightly.20261124.5191`, `v0.1.12-nightly.20261124.5209` and
-  `v0.1.13-nightly.20261125.5258` tags; "publishes later edits after a linked theme directory's
+  `v0.1.12-nightly.20261124.5191`, `v0.1.12-nightly.20261124.5209`,
+  `v0.1.13-nightly.20261125.5258` and `v0.1.14-nightly.20261127.5332` tags; "publishes later edits after a linked theme directory's
   grandparent is restored" fails beside it on `…5191` and `…5209`.
+- `apps/server/src/provider/AntigravityInstallation.test.ts` "explains that the linux-arm64 runtime
+  needs 4 KiB pages when it aborts on a 16 KiB kernel" failed once in the 5332 full suite (its
+  phase was `cancelled`, not `failed`) and passed three runs alone; the fork does not touch it.
 - Run tests by hand from a shell T3 Code started (an agent's terminal) with
   `env -u T3CODE_PORT -u T3CODE_HOST`: with the service's values inherited, every web browser test
   that renders `AppRoot` over the fake environment hangs to its 15 s timeout (checked on the plain
