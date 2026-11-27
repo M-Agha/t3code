@@ -65,7 +65,7 @@ reasons are the ones they accepted.
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
 upstream release the fork sits on (`git merge-base fork/main upstream/main`). Today that is
-`v0.1.14-nightly.20261127.5332`, whose last upstream migration is 119.
+`v0.1.14-nightly.20261127.5345`, whose last upstream migration is 119.
 
 ### Questions and decisions
 
@@ -1627,12 +1627,12 @@ uninstall`, then reopen it.
 - `apps/server/src/cloud/pinnedRuntime.test.ts` "removes a runtime only its own entry names when its
   real directory in a symlinked home …" fails on this Mac on the plain
   `v0.1.12-nightly.20261121.5024`, `…5038`, `…5124`, `…5191`, `v0.1.12-nightly.20261124.5209`,
-  `v0.1.13-nightly.20261125.5258` and `v0.1.14-nightly.20261127.5332` tags too (it returns
+  `v0.1.13-nightly.20261125.5258`, `v0.1.14-nightly.20261127.5332` and `…5345` tags too (it returns
   no removed runtime), so `check:changed` fails on it whenever the fork changes `pinnedRuntime.ts`.
 - `apps/server/src/environmentTheme.test.ts` "publishes themes when a linked theme directory's
   original grandparent is restored between probes" fails on this Mac on the plain
   `v0.1.12-nightly.20261124.5191`, `v0.1.12-nightly.20261124.5209`,
-  `v0.1.13-nightly.20261125.5258` and `v0.1.14-nightly.20261127.5332` tags; "publishes later edits after a linked theme directory's
+  `v0.1.13-nightly.20261125.5258`, `v0.1.14-nightly.20261127.5332` and `…5345` tags; "publishes later edits after a linked theme directory's
   grandparent is restored" fails beside it on `…5191` and `…5209`.
 - `apps/server/src/provider/AntigravityInstallation.test.ts` "explains that the linux-arm64 runtime
   needs 4 KiB pages when it aborts on a 16 KiB kernel" failed once in the 5332 full suite (its
