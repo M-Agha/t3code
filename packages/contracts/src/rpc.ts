@@ -460,6 +460,7 @@ import {
 } from "./scheduledTask.ts";
 import {
   ThreadDecisionQuestionInput,
+  ThreadDecisionsReadBackInput,
   ThreadDecisionsError,
   ThreadDecisionsSnapshot,
   ThreadDecisionsSubscribeInput,
@@ -675,6 +676,7 @@ export const WS_METHODS = {
   threadDecisionsSubscribe: "threadDecisions.subscribe",
   threadDecisionsReopen: "threadDecisions.reopen",
   threadDecisionsDismiss: "threadDecisions.dismiss",
+  threadDecisionsReadBack: "threadDecisions.readBack",
   threadDecisionsPark: "threadDecisions.park",
   threadDecisionsUpdateParked: "threadDecisions.updateParked",
   threadDecisionsLinkArtifact: "threadDecisions.linkArtifact",
@@ -2434,6 +2436,13 @@ const WsThreadDecisionsDismissRpc = Rpc.make(WS_METHODS.threadDecisionsDismiss, 
   error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
 });
 
+const WsThreadDecisionsReadBackRpc = Rpc.make(WS_METHODS.threadDecisionsReadBack, {
+  payload: ThreadDecisionsReadBackInput,
+  // Starts it; its progress and outcome come in the snapshot (`readBack`).
+  success: Schema.Void,
+  error: Schema.Union([ThreadDecisionsError, EnvironmentAuthorizationError]),
+});
+
 const WsThreadDecisionsParkRpc = Rpc.make(WS_METHODS.threadDecisionsPark, {
   payload: ThreadParkInput,
   success: Schema.Void,
@@ -2649,6 +2658,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsThreadDecisionsSubscribeRpc,
   WsThreadDecisionsReopenRpc,
   WsThreadDecisionsDismissRpc,
+  WsThreadDecisionsReadBackRpc,
   WsThreadDecisionsParkRpc,
   WsThreadDecisionsUpdateParkedRpc,
   WsThreadDecisionsLinkArtifactRpc,

@@ -229,6 +229,7 @@ describe("command permissions", () => {
     WS_METHODS.scheduledTasksDelete,
     WS_METHODS.threadDecisionsReopen,
     WS_METHODS.threadDecisionsDismiss,
+    WS_METHODS.threadDecisionsReadBack,
     WS_METHODS.threadDecisionsPark,
     WS_METHODS.threadDecisionsUpdateParked,
     WS_METHODS.threadDecisionsLinkArtifact,

@@ -10,6 +10,7 @@ import ForkMigration0004 from "./ForkMigrations/004_ThreadDecisionCardSync.ts";
 import ForkMigration0005 from "./ForkMigrations/005_DecisionJudgeCutoff.ts";
 import ForkMigration0006 from "./ForkMigrations/006_ThreadArtifactTypes.ts";
 import ForkMigration0007 from "./ForkMigrations/007_ThreadParkedSends.ts";
+import ForkMigration0008 from "./ForkMigrations/008_ThreadDecisionAgentSettlements.ts";
 
 // Fork-only schema, kept out of effect_sql_migrations: the Migrator skips every id up to the highest
 // recorded, so a fork id there would make an official build skip its own migration with that id.
@@ -23,6 +24,7 @@ const forkMigrationEntries = [
   [5, "DecisionJudgeCutoff", ForkMigration0005],
   [6, "ThreadArtifactTypes", ForkMigration0006],
   [7, "ThreadParkedSends", ForkMigration0007],
+  [8, "ThreadDecisionAgentSettlements", ForkMigration0008],
 ] as const;
 
 const UPSTREAM_MIGRATION_HEAD = Math.max(...migrationManifest.map(([id]) => id));
