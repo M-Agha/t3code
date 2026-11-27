@@ -3,11 +3,13 @@ import { EnvironmentId, MessageId, RunId } from "@t3tools/contracts";
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, type ComponentProps } from "react";
 import { describe, expect, it, onTestFinished, vi } from "vite-plus/test";
+import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
 import { act, fakeTimers, render } from "../../../test/render";
 import { useUiStateStore } from "../../uiStateStore";
+import { SharedTooltipProvider } from "../ui/shared-tooltip";
 import { toastManager } from "../ui/toast";
 import { MessagesTimeline } from "./MessagesTimeline";
 import { CHAT_TIMELINE_ANCHOR_OFFSET, rememberTimelinePosition } from "./timelineScrollAnchoring";
@@ -102,10 +104,15 @@ const marker = (threadKey: string, since: string | null, last = since): UnreadMa
   last,
 });
 
-const renderTimeline = async (props: TimelineProps) => {
+/** `sharedTooltip` mounts the shared tooltip as the app's root does; a rerender must then wrap too. */
+const renderTimeline = async (props: TimelineProps, sharedTooltip = false) => {
   const container = document.createElement("div");
   container.style.cssText = "height: 800px; width: 900px; display: flex; flex-direction: column;";
-  return render(<MessagesTimeline {...props} />, { container });
+  const timeline = <MessagesTimeline {...props} />;
+  return render(
+    sharedTooltip ? <SharedTooltipProvider>{timeline}</SharedTooltipProvider> : timeline,
+    { container },
+  );
 };
 
 const divider = (container: HTMLElement) =>
@@ -354,11 +361,10 @@ describe("Mark unread from here: the action", () => {
     onTestFinished(() => {
       shell.latestRun = null;
     });
-    await using screen = await renderTimeline({
-      ...props,
-      timelineEntries: entries,
-      canOperateThread: true,
-    });
+    await using screen = await renderTimeline(
+      { ...props, timelineEntries: entries, canOperateThread: true },
+      true,
+    );
     const buttons = () => [
       ...screen.container.querySelectorAll<HTMLButtonElement>(
         'button[aria-label="Mark unread from here"]',
@@ -366,6 +372,8 @@ describe("Mark unread from here: the action", () => {
     ];
     await vi.waitFor(() => expect(buttons()).toHaveLength(2));
     const second = buttons().find((button) => rowOf(button) === "entry-a2");
+    await userEvent.hover(second!);
+    await expect.element(page.getByText("Mark unread from here", { exact: true })).toBeVisible();
     const addToast = vi.spyOn(toastManager, "add");
     await act(async () => second!.click());
     // No environment is connected here, so it takes the thread menu's local path.

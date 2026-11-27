@@ -51,7 +51,7 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Textarea } from "../ui/textarea";
 import { toastManager } from "../ui/toast";
 import { RadioGroup, SegmentedRadio } from "../ui/radio-group";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 import { type ThreadDecisionActions, useThreadDecisions } from "./ThreadDecisions";
 import {
   ariaItemText,
@@ -379,33 +379,31 @@ function ParkedRow(props: {
         >
           <span aria-hidden className="absolute inset-0 bg-accent/60 pointer-coarse:hidden" />
           {draftable ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  // Focusable while blocked, so its tooltip can say why (a disabled button shows none);
-                  // the tooltip is not its description (Base UI links none), so a hidden one says it
-                  // to a screen reader (Opus round 2, O1).
-                  <Button
-                    variant="ghost"
-                    size="icon-micro"
-                    className="relative"
-                    aria-disabled={props.busy || actions.draftBlocked !== null || undefined}
-                    aria-label={`Add to draft: ${label}`}
-                    aria-describedby={draftBlocked?.id}
-                    onClick={ifIdle(() => {
-                      if (draftBlocked === null) actions.addToDraft(item);
-                    })}
-                  />
-                }
-              >
-                <CornerDownLeftIcon className="size-3.5" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">
-                {actions.draftBlocked === null
+            <SharedTooltipTrigger
+              render={
+                // Focusable while blocked, so its tooltip can say why (a disabled button shows none);
+                // the tooltip describes it only while open, so a hidden one says it to a screen
+                // reader (Opus round 2, O1).
+                <Button
+                  variant="ghost"
+                  size="icon-micro"
+                  className="relative"
+                  aria-disabled={props.busy || actions.draftBlocked !== null || undefined}
+                  aria-label={`Add to draft: ${label}`}
+                  aria-describedby={draftBlocked?.id}
+                  onClick={ifIdle(() => {
+                    if (draftBlocked === null) actions.addToDraft(item);
+                  })}
+                />
+              }
+              label={
+                actions.draftBlocked === null
                   ? "Add to draft"
-                  : `Add to draft: ${actions.draftBlocked}`}
-              </TooltipPopup>
-            </Tooltip>
+                  : `Add to draft: ${actions.draftBlocked}`
+              }
+            >
+              <CornerDownLeftIcon className="size-3.5" />
+            </SharedTooltipTrigger>
           ) : null}
           <Menu
             open={menuOpen}

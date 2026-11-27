@@ -33,6 +33,7 @@ vi.mock(import("../../state/use-atom-command"), async (importOriginal) => ({
 
 import { serverEnvironment } from "~/state/server";
 import { act, render, type Screen } from "../../../test/render";
+import { SharedTooltipProvider } from "../ui/shared-tooltip";
 import { ThreadArtifactsPanel } from "./ThreadArtifacts";
 
 state.unlinkCommand = serverEnvironment.unlinkThreadArtifact;
@@ -70,7 +71,12 @@ const setup = (artifacts: ReadonlyArray<ThreadArtifact>) => {
   state.unlink.mockReset().mockResolvedValue({ _tag: "Success" });
 };
 
-const panel = () => <ThreadArtifactsPanel threadRef={threadRef} />;
+// The app's root mounts the shared tooltip the row's buttons use.
+const panel = () => (
+  <SharedTooltipProvider>
+    <ThreadArtifactsPanel threadRef={threadRef} />
+  </SharedTooltipProvider>
+);
 
 // A row's actions are always in the DOM and focusable; hover or keyboard focus shows them.
 const actionsOpacity = (button: { element: () => Element }) =>
@@ -144,7 +150,7 @@ it("offers Unlink only on an artifact the user linked, from hover or the keyboar
     .toHaveFocus();
   await userEvent.tab();
   await userEvent.tab();
-  // "…" has no tooltip, whose opening would show the actions by itself.
+  // Shown by focus alone: "…" has no tooltip, and a shared tooltip never marks its trigger open.
   const more = screen.getByRole("button", { name: "Actions for Q3 shipping review" });
   await expect.element(more).toHaveFocus();
   await expect.poll(() => actionsOpacity(more)).toBe("1");
@@ -155,6 +161,16 @@ it("offers Unlink only on an artifact the user linked, from hover or the keyboar
     input: { threadId: threadRef.threadId, id: "Q3shipReview" },
   });
   expect(state.command).not.toHaveBeenCalled();
+});
+
+it("names a row's Open in browser and Copy link in the shared tooltip", async () => {
+  setup([BOARD]);
+  await using screen = await render(panel());
+  await userEvent.hover(screen.getByRole("link", { name: /Tracker redesign/ }));
+  await userEvent.hover(screen.getByRole("button", { name: "Open in browser: Tracker redesign" }));
+  await expect.element(page.getByText("Open in browser", { exact: true })).toBeVisible();
+  await userEvent.hover(screen.getByRole("button", { name: "Copy link: Tracker redesign" }));
+  await expect.element(page.getByText("Copy link", { exact: true })).toBeVisible();
 });
 
 // The snapshot without the unlinked row, as the server sends it next.

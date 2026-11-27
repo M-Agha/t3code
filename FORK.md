@@ -59,6 +59,7 @@ reasons are the ones they accepted.
 | `(fork) tracker: a deleted thread's rows go on each compaction pass, beside its conversation`         | Parked items                  |
 | `(fork) install: moves the service off Nightly, builds a fresh clone; a queued send holds nothing`    | Installing, Questions         |
 | `(fork) decisions: t3_question lets an agent settle its thread's questions, and a one-time read-back` | Questions and decisions       |
+| `(fork) tooltips: the fork's buttons and chips use upstream's shared tooltip, as upstream's own do`   | Tooltips                      |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -512,8 +513,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     answer), as `/park` is, or the thread cannot take a message; the button stays focusable
     (`aria-disabled`) so its tooltip, and the menu item's second line, say which, and a screen
     reader hears it as the button's description (`aria-describedby` to a visually hidden reason:
-    Base UI's tooltip describes nothing; Opus round 2, O1). The menu's Add to draft is blocked the
-    way the lock blocks an action (below).
+    the tooltip describes the button only while it is open, "Tooltips"; Opus round 2, O1). The
+    menu's Add to draft is blocked the way the lock blocks an action (below).
   - **Locked while drafted** (the owner's Q56, MAIN-82, 2026-11-20): while a draft this client holds
     has an item's chip, the thread's own draft or an open queued message's edit (either would send the
     words it holds; the lead's ruling R3), its row says In draft, and Edit, Mark done, Move and Drop
@@ -920,7 +921,9 @@ menu item" and answered Q64 "yes, with the divider" (2026-11-21; _rejected:_ the
   If upstream rebuilds the timeline's rows or its opening restore, keep the divider on the row that
   holds (or folds) the first unread entry and the jump after the restore; if upstream renames a
   tool group's row ids or stops giving folds their `runId`, `rowHoldingEntry` and its tests go
-  first. If upstream ships its own unread divider, stop and ask the owner (step 4).
+  first. If upstream ships its own unread divider, stop and ask the owner (step 4). The button's
+  tooltip is upstream's `SharedTooltipTrigger`, as the timestamp's beside it ("Tooltips"): if
+  upstream changes that one's, change this one's the same way.
 
 ### The daily upgrade workflow
 
@@ -1035,6 +1038,43 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
   `check:changed` does not) lists only fork keys and exits 1; they render in English. That is
   expected. Do not run `vp run i18n:generate` to silence it: it writes fork keys into every
   upstream-generated catalog, which then conflicts at each rebase.
+
+### Tooltips
+
+Upstream's ea3328c50c ("one shared tooltip serves every trigger in the app", in 5258..5332) moved
+its tooltips to `SharedTooltipTrigger` (`apps/web/src/components/ui/shared-tooltip.tsx`): one Base
+UI tooltip under `SharedTooltipProvider` (mounted in `apps/web/src/routes/__root.tsx`) that every
+trigger points at, instead of one per trigger. The fork's own triggers do the same, as the owner's
+rule asks (reuse upstream's way of doing a thing; S1 of the 5332 upgrade review, 2026-11-27): Mark
+unread from here (`UnreadFromHere.tsx`, beside the timestamp upstream switched in
+`AssistantMessageMeta`), Parked's chip (`ParkedContextChip.tsx`, as `EnvironmentContextChip.tsx`),
+an Artifacts row's Open in browser and Copy link (`ThreadArtifacts.tsx`), a Parked row's Add to
+draft (`ThreadParked.tsx`), and in `ThreadDecisions.tsx` the question panel's Open Tracker and a
+reply heading's Show in the chat. The fork's seams in upstream files add no tooltip.
+
+- Each keeps its text, accessible name, side (top) and delay (the shared one's `OPEN_DELAY_MS`,
+  equal to Base UI's default, which none of them changed). What differs is the shared tooltip's own behaviour, the
+  same on upstream's triggers: its popup takes the pointer and stays open while hovered; while
+  open it is in its trigger's `aria-describedby` (a blocked Add to draft, already described by its
+  hidden reason, then has both); and a trigger no longer carries Base UI's `data-popup-open`, so a
+  row's hover-revealed actions (`has-[[data-popup-open]]`, still there for the "…" menu) stay shown
+  by hover or focus, not by an open tooltip. So a pointer moved from a row's Open in browser or Add
+  to draft onto its tooltip keeps the tooltip open while the row's actions fade, as on upstream's
+  hover-revealed timestamp row.
+- **Tests:** `apps/web/test/render.tsx` mounts no `SharedTooltipProvider`, and without one
+  `SharedTooltipTrigger` falls back to a Base UI tooltip of its own, so a test of the app's path
+  mounts it: `ParkedContextChip.browser.test.tsx`, and the `panel()` of
+  `ThreadArtifacts.browser.test.tsx` and `ThreadParked.browser.test.tsx`; in
+  `UnreadFromHere.browser.test.tsx` only its action case (`renderTimeline`'s second argument), since
+  the other cases rerender without it. `ThreadDecisions.question-panel.browser.test.tsx` renders
+  `AppRoot`, which mounts it.
+- **One commit on top.** It sits after the commits that own these files rather than folded into
+  each, since folding rewrites `fork/main` (the lead's choice, 2026-11-27). The next upgrade rebase
+  may fold each hunk into its file's owning commit; then drop this commit's row from the table.
+- **Conflict guidance:** a fork trigger uses what upstream's own triggers use. If upstream renames
+  `SharedTooltipTrigger` or its `label` prop, or goes back to a tooltip per trigger, follow it in
+  the files above. If it stops mounting the provider at the root, the triggers fall back to Base
+  UI tooltips by themselves, with no fork change.
 
 ## Rules a rebase must keep
 
@@ -1309,7 +1349,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
      re-reads after an image hold), `ChatView.logic.ts`'s send snapshot, `chatViewSend.ts`,
      `useQueuedRunEdit.ts`, `composerContextUndo.ts`, `composerSend.logic.ts`, `useComposerStash.ts`
      and `composerInlineTokenPaste.ts`, which drop the chip). Most hunks are a `parked` line beside
-     its `environment` twin; the rest carry a `Fork (Parked)` comment.
+     its `environment` twin; the rest carry a `Fork (Parked)` comment. `ParkedContextChip.tsx` is
+     drawn as `EnvironmentContextChip.tsx` is, its tooltip through `SharedTooltipTrigger`
+     ("Tooltips").
      `chatViewSend.ts` restores a refused send's parked chips through upstream's `withRestored`,
      keyed on `contextId`, as it restores the other kinds. Since 5024 a `/side` command starts its
      side chat with the draft's context (upstream refuses context only while answering a pending

@@ -3,7 +3,7 @@ import type { ParkedContextRecord } from "@t3tools/contracts";
 import { ArchiveIcon } from "lucide-react";
 
 import { ContextChip, ContextChipLabel } from "./ContextChip";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { SharedTooltipTrigger } from "./ui/shared-tooltip";
 
 /**
  * Fork (Parked): a parked item attached with Add to draft, in the composer and in sent messages. The
@@ -14,23 +14,20 @@ export function ParkedContextChip(props: {
   readonly copyMarkdown?: string;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <ContextChip
-            kind="parked"
-            tabIndex={0}
-            aria-label={`Parked item, ${props.record.label}`}
-            data-markdown-copy={props.copyMarkdown}
-          >
-            <ArchiveIcon />
-            <ContextChipLabel>{props.record.label}</ContextChipLabel>
-          </ContextChip>
-        }
-      />
-      <TooltipPopup side="top" className="max-w-80 whitespace-pre-wrap">
-        {props.record.payload.text}
-      </TooltipPopup>
-    </Tooltip>
+    <SharedTooltipTrigger
+      render={
+        <ContextChip
+          kind="parked"
+          tabIndex={0}
+          aria-label={`Parked item, ${props.record.label}`}
+          data-markdown-copy={props.copyMarkdown}
+        >
+          <ArchiveIcon />
+          <ContextChipLabel>{props.record.label}</ContextChipLabel>
+        </ContextChip>
+      }
+      label={props.record.payload.text}
+      className="max-w-80 whitespace-pre-wrap"
+    />
   );
 }
