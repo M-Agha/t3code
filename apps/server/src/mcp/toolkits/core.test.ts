@@ -405,6 +405,131 @@ it.effect(
   },
 );
 
+it.effect(
+  "t3_question lists, answers and drops the main thread's questions, and refuses a subagent or a workflow step",
+  () => {
+    const subagent = ThreadId.make("mcp-core-question-subagent");
+    const step = ThreadId.make("mcp-core-question-step");
+    return Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      for (const [id, payload] of [
+        [threadId, {}],
+        [subagent, { lineage: { relationshipToParent: "subagent" } }],
+        [step, { lineage: { workflowStep: true } }],
+      ] as const) {
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_threads (
+            thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+            created_at, updated_at, payload_json
+          ) VALUES (${id}, 'project', 'Thread', 'codex', 'full-access', 'default',
+            '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ${JSON.stringify(payload)})
+        `;
+      }
+      for (const [messageId, role, at, text] of [
+        [
+          "reply",
+          "assistant",
+          "2026-01-02T00:00:00.000Z",
+          "Q4, resume: Resume the run? My pick is yes: it stopped cleanly.\nQ5, table: Rename it? My pick is no: unread.",
+        ],
+        ["said", "user", "2026-01-02T00:01:00.000Z", "resume it"],
+      ] as const) {
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_messages (
+            message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at,
+            payload_json
+          ) VALUES (${messageId}, ${threadId}, NULL, NULL, ${role}, 0, ${at}, ${at},
+            ${JSON.stringify({ text, createdBy: role === "user" ? "user" : "agent" })})
+        `;
+      }
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* decisions.sync(threadId);
+      const server = yield* McpServer.McpServer;
+      const ask = (caller: ThreadId, args: Record<string, unknown>) =>
+        server.callTool({ name: "t3_question", arguments: args }).pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...scope,
+            thread: {
+              threadId: caller,
+              providerSessionId: "mcp-core-session",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            },
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      const listed = yield* ask(threadId, { action: "list" });
+      expect(listed.structuredContent).toMatchObject({
+        questions: [
+          { label: "Q4", state: "open", askedIn: "reply" },
+          { label: "Q5", state: "open", askedIn: "reply" },
+        ],
+      });
+      expect(
+        declaredFailure(yield* ask(threadId, { action: "answer", label: "Q4", askedIn: "reply" })),
+      ).toMatchObject({ code: "invalid_request", message: "This action needs `words`." });
+      expect(
+        (yield* ask(threadId, {
+          action: "answer",
+          label: "Q4",
+          askedIn: "reply",
+          words: "resume it",
+          source: "said",
+        })).isError,
+      ).not.toBe(true);
+      // A blank reason is no reason: refused before the service sees it.
+      const blank = yield* Effect.flip(
+        ask(threadId, { action: "drop", label: "Q5", askedIn: "reply", reason: "  " }),
+      );
+      expect(blank.message).toContain("Expected a non-blank string");
+      expect(
+        (yield* ask(threadId, {
+          action: "drop",
+          label: "Q5",
+          askedIn: "reply",
+          reason: "the table is gone",
+        })).isError,
+      ).not.toBe(true);
+      const { questions } = yield* decisions.snapshot(threadId);
+      expect(
+        questions.map((q) => [q.label, q.state, q.answerText, q.answerMessageId, q.settledByAgent]),
+      ).toEqual([
+        ["Q4", "answered", "resume it", "said", true],
+        ["Q5", "dropped", "the table is gone", null, true],
+      ]);
+      for (const [caller, refusal] of [
+        [subagent, ThreadDecisions.QUESTION_REFUSAL.subagent],
+        [step, ThreadDecisions.QUESTION_REFUSAL.workflowStep],
+      ] as const) {
+        expect(declaredFailure(yield* ask(caller, { action: "list" }))).toMatchObject({
+          code: "invalid_request",
+          message: refusal,
+        });
+        expect(
+          declaredFailure(
+            yield* ask(caller, { action: "drop", label: "Q4", askedIn: "reply", reason: "x" }),
+          ),
+        ).toMatchObject({ code: "invalid_request", message: refusal });
+      }
+    }).pipe(
+      Effect.provide(
+        layerThreadToolkitWith(ThreadDecisions.layer).pipe(
+          Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(
+            Layer.mock(ThreadManagement.ThreadManagementService)({
+              getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            }),
+          ),
+          Layer.provideMerge(ThreadDecisions.layer),
+          // The first sync of a thread reads by the rules alone, so no judge is asked.
+          Layer.provide(Layer.mock(DecisionJudge.DecisionJudge)({})),
+          Layer.provideMerge(SqlitePersistence.layerMemory),
+        ),
+      ),
+    );
+  },
+);
+
 it("bounds public command rejections and redacts internal dispatch causes", () => {
   const command = { commandId: CommandId.make("mcp-core-command"), commandType: "thread.settle" };
   expect(

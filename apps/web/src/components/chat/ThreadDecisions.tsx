@@ -8,8 +8,11 @@ import {
   type ThreadDecisionQuestion,
   type ThreadDecisionsSnapshot,
   type ThreadParkedItem,
+  type ThreadDecisionsReadBack,
 } from "@t3tools/contracts";
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { useAtomValue } from "@effect/atom-react";
 import {
   ArrowUpRightIcon,
@@ -30,6 +33,7 @@ import {
   type RefObject,
   useContext,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
   useState,
@@ -41,6 +45,7 @@ import { parkedContextRecord, parkedContextReference } from "~/lib/composerConte
 import { formatInlineContextReference } from "~/lib/composerContextReferences";
 import { readThreadShell } from "~/state/entities";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { m } from "~/i18n/messages";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import ChatMarkdown from "~/components/ChatMarkdown";
 import { RelativeTime } from "~/components/RelativeTime";
@@ -1045,12 +1050,134 @@ function SelectDock(props: {
 
 const replyTitle = (index: number) => (index === 0 ? "Latest reply" : "Earlier reply");
 
+/**
+ * The one-time read-back (MAIN-129), on this click only: the judge reads the messages from before it
+ * took over, on the server, its progress in the snapshot on every client. `useReadBackOutcome`, which
+ * outlives this bar, toasts the end; `heldFocusRef` tells it whether this bar had focus as it went.
+ */
+function ReadBackBar(props: {
+  readonly threadRef: ScopedThreadRef;
+  readonly count: number;
+  readonly readBack: ThreadDecisionsReadBack | null;
+  readonly heldFocusRef: RefObject<boolean>;
+}) {
+  const { threadRef, readBack, heldFocusRef } = props;
+  const countId = useId();
+  const barRef = useRef<HTMLDivElement>(null);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- reads DOM focus as the bar leaves the document (the cleanup runs before the removal), for the panel's end-of-run focus move
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    heldFocusRef.current = false;
+    return () => {
+      heldFocusRef.current = bar?.contains(document.activeElement) ?? false;
+    };
+  }, [heldFocusRef]);
+  const [starting, setStarting] = useState(false);
+  const canRun = useAtomValue(
+    serverEnvironment.readBackThreadDecisions.permissionAtom(threadRef.environmentId),
+  );
+  const start = useAtomCommand(serverEnvironment.readBackThreadDecisions);
+  const running = readBack?.running === true;
+  const busy = starting || running;
+  const onClick = () => {
+    // Kept focusable while busy (`aria-disabled`), so the click is dropped here.
+    if (busy) return;
+    setStarting(true);
+    void start({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId },
+    }).then((result) => {
+      setStarting(false);
+      if (result._tag === "Success") return;
+      toastManager.add({
+        type: "error",
+        title: "Could not read your earlier messages",
+        description:
+          thrownErrorMessage(squashAtomCommandFailure(result), m) ?? "Nothing was changed.",
+      });
+    });
+  };
+  return (
+    <div
+      ref={barRef}
+      data-tracker-row="read-back"
+      className="flex min-h-9 shrink-0 flex-wrap items-center gap-x-2 border-b border-border px-4 py-1 text-xs text-muted-foreground"
+    >
+      <span id={countId} className="min-w-0">
+        {plural(props.count, "question")} asked before the judge took over
+      </span>
+      <Button
+        size="xs"
+        variant="ghost"
+        className="ms-auto shrink-0"
+        data-tracker-control="read-back"
+        disabled={!canRun}
+        aria-disabled={busy || undefined}
+        aria-describedby={countId}
+        onClick={onClick}
+      >
+        {busy ? "Checking earlier messages…" : "Check earlier messages"}
+      </Button>
+      {/* In the accessibility tree while empty, so its first line is announced. */}
+      <span role="status" className="w-full min-w-0 empty:sr-only">
+        {running
+          ? `${readBack.read} of ${plural(readBack.total, "message")} read`
+          : readBack?.error == null
+            ? null
+            : `Last check failed: ${readBack.error}`}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Toasts how a read-back ended, on every client that watched it run, and keeps focus in the Tracker
+ * when the bar that had this client's focus goes away with it (`barFocusRef`); focus anywhere else,
+ * the body included, is the user's. Held by the panel, which a tab switch keeps.
+ */
+function useReadBackOutcome(
+  readBack: ThreadDecisionsReadBack | null,
+  panelRef: RefObject<HTMLElement | null>,
+  barFocusRef: RefObject<boolean>,
+) {
+  const wasRunning = useRef(false);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- toasts a server-side run's end, seen as a snapshot change, and moves the focus its bar took with it
+  useEffect(() => {
+    const running = readBack?.running === true;
+    const ended = wasRunning.current && !running;
+    wasRunning.current = running;
+    if (!ended || readBack === null) return;
+    if (readBack.error === null) {
+      toastManager.add({
+        title: `Read your earlier messages: ${plural(readBack.closed, "question")} closed`,
+      });
+    } else {
+      toastManager.add({
+        type: "error",
+        title: "Could not read your earlier messages",
+        description: readBack.error,
+      });
+    }
+    const panel = panelRef.current;
+    const active = document.activeElement;
+    const held = barFocusRef.current;
+    barFocusRef.current = false;
+    if (!held || panel === null || (active !== null && active !== document.body)) return;
+    // Select when questions remain, else the Questions tab.
+    const next =
+      panel.querySelector('[data-tracker-row="status"] [data-tracker-control="select"]') ??
+      panel.querySelector('[data-tracker-control="questions"]');
+    if (next instanceof HTMLElement) next.focus();
+  }, [readBack, panelRef, barFocusRef]);
+}
+
 function QuestionsTab(props: {
   readonly threadRef: ScopedThreadRef;
   readonly snapshot: ThreadDecisionsSnapshot | null;
   readonly actions: ThreadDecisionActions;
   readonly selecting: boolean;
   readonly onSelecting: (selecting: boolean) => void;
+  readonly readBackFocusRef: RefObject<boolean>;
 }) {
   const gt = useGT();
   const { actions, selecting } = props;
@@ -1060,22 +1187,44 @@ function QuestionsTab(props: {
   const groups = openQuestionsByReply(props.snapshot);
   const shownLabels = groups.flatMap((group) => group.items.map((question) => question.label));
   const open = openQuestions(props.snapshot);
+  const readBackCount = props.snapshot?.readBackCount ?? 0;
+  const readBack = props.snapshot?.readBack ?? null;
+  // Offered outside Select mode, which has its own bar; while it runs, kept whatever else changes. The
+  // second child in every branch below (`null` holds the status bar's place), so React keeps the one bar,
+  // with its focus and live region, while the run closes the last open question or a send holds them.
+  const readBackBar =
+    readBack?.running === true || (!selecting && readBackCount > 0) ? (
+      <ReadBackBar
+        threadRef={props.threadRef}
+        count={readBackCount}
+        readBack={readBack}
+        heldFocusRef={props.readBackFocusRef}
+      />
+    ) : null;
   // A selection ends with Select mode, however it ends.
   if (!selecting && selected.size > 0) setSelected(new Set());
   if (actions.questionsHeld) {
     return (
-      <EmptyState
-        title="Reading your message"
-        description="Open questions come back once your message is checked against them, or once the reply is done."
-      />
+      <>
+        {null}
+        {readBackBar}
+        <EmptyState
+          title="Reading your message"
+          description="Open questions come back once your message is checked against them, or once the reply is done."
+        />
+      </>
     );
   }
   if (groups.length === 0) {
     return (
-      <EmptyState
-        title="No open questions"
-        description="Questions an agent asks at the end of a reply, as Q-labelled lines, appear here until you answer them."
-      />
+      <>
+        {null}
+        {readBackBar}
+        <EmptyState
+          title="No open questions"
+          description="Questions an agent asks at the end of a reply, as Q-labelled lines, appear here until you answer them."
+        />
+      </>
     );
   }
   const drafted = (question: ThreadDecisionQuestion) =>
@@ -1132,6 +1281,7 @@ function QuestionsTab(props: {
           </>
         )}
       </StatusBar>
+      {readBackBar}
       <ScrollArea className="min-h-0 flex-1">
         {groups.map((group, index) => {
           const title = replyTitle(index);
@@ -1415,6 +1565,8 @@ function ResolvedRow(props: {
   const { question } = props;
   const gt = useGT();
   const answered = question.state === "answered";
+  // Settled through t3_question: its Undo is Reopen (MAIN-127).
+  const byAgent = question.settledByAgent;
   const departed =
     answered &&
     question.pick !== "" &&
@@ -1432,10 +1584,14 @@ function ResolvedRow(props: {
           size="xs"
           variant="ghost"
           disabled={!props.canReopen || props.reopening}
-          aria-label={`Reopen ${question.label}`}
+          aria-label={
+            byAgent
+              ? `Undo the agent's settling of ${question.label} (reopens it)`
+              : `Reopen ${question.label}`
+          }
           onClick={props.onReopen}
         >
-          {props.reopening ? "Reopening…" : gt("Reopen")}
+          {props.reopening ? "Reopening…" : byAgent ? gt("Undo") : gt("Reopen")}
         </Button>
       </div>
       <ChatMarkdown
@@ -1446,7 +1602,9 @@ function ResolvedRow(props: {
       />
       {question.answerText === null ? null : (
         <p className="mt-0.5 text-sm whitespace-pre-wrap wrap-anywhere">
-          <span className="me-1.5 text-xs font-semibold text-foreground">You</span>
+          <span className="me-1.5 text-xs font-semibold text-foreground">
+            {byAgent ? "Settled by the agent" : "You"}
+          </span>
           {question.answerText}
         </p>
       )}
@@ -1685,6 +1843,9 @@ export function ThreadDecisionsPanel(props: {
   const { reopen } = actions;
   const panelRef = useRef<HTMLDivElement>(null);
   const focusAfter = useFocusAfter(panelRef);
+  // Whether the read-back bar had this client's focus when it went: set by the bar, read at a run's end.
+  const readBackFocusRef = useRef(false);
+  useReadBackOutcome(snapshot?.readBack ?? null, panelRef, readBackFocusRef);
   const counts = {
     questions: actions.questionsHeld ? 0 : (snapshot?.openCount ?? 0),
     decisions: choicesToReview(snapshot, actions.draft),
@@ -1716,6 +1877,7 @@ export function ThreadDecisionsPanel(props: {
             <Toggle
               variant="segmented-bordered"
               value="questions"
+              data-tracker-control="questions"
               aria-label={tabName("Questions", counts.questions)}
             >
               <TabLabel name="Questions" count={counts.questions} />
@@ -1740,6 +1902,7 @@ export function ThreadDecisionsPanel(props: {
             actions={actions}
             selecting={selecting}
             onSelecting={setSelecting}
+            readBackFocusRef={readBackFocusRef}
           />
         ) : (
           <DecisionsTab

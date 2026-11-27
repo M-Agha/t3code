@@ -22,6 +22,10 @@ import {
   clampedPositiveInt,
   ThreadParkedKindWord,
   THREAD_PARKED_TEXT_MAX_LENGTH,
+  ThreadParkedText,
+  ThreadDecisionLabel,
+  ThreadDecisionState,
+  MessageId,
 } from "@t3tools/contracts";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Schema from "effect/Schema";
@@ -276,6 +280,39 @@ const ParkTool = Tool.make("t3_park", {
   .annotate(Tool.OpenWorld, false)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
 
+const QuestionTool = Tool.make("t3_question", {
+  ...commandTool,
+  description:
+    "This thread's Q-labelled questions in the user's Tracker. list: open first. answer: close an open one with the user's own `words`, citing `source`, the id of their message that said them. drop: close one made moot or replaced, with a `reason`. Pass `label` and `askedIn` as list gave them; one asked again since is refused, so list again. Never answer what the user did not say. Main thread only.",
+  parameters: Schema.Struct({
+    action: Schema.Literals(["list", "answer", "drop"]),
+    label: Schema.optional(ThreadDecisionLabel),
+    askedIn: Schema.optional(MessageId),
+    words: Schema.optional(ThreadParkedText),
+    source: Schema.optional(MessageId),
+    reason: Schema.optional(ThreadParkedText),
+  }),
+  success: Schema.Union([
+    Schema.Struct({
+      questions: Schema.Array(
+        Schema.Struct({
+          label: Schema.String,
+          text: Schema.String,
+          state: ThreadDecisionState,
+          askedIn: Schema.String,
+          askedAt: IsoDateTime,
+        }),
+      ),
+    }),
+    Schema.Struct({ message: Schema.String }),
+  ]),
+  dependencies: [...commandTool.dependencies, ThreadDecisions.ThreadDecisions],
+})
+  .annotate(Tool.Title, "Settle this thread's questions")
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.OpenWorld, false)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromOutsideClients);
+
 export const ThreadToolkit = Toolkit.make(
   ScheduledTaskRunTool,
   ThreadSearchTool,
@@ -286,4 +323,5 @@ export const ThreadToolkit = Toolkit.make(
   QueueTool,
   SubmitOutputTool,
   ParkTool,
+  QuestionTool,
 );

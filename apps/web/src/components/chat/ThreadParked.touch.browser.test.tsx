@@ -66,6 +66,8 @@ it("keeps a touch screen's always-shown actions off the row's time", async () =>
     artifacts: [],
     artifactCount: 0,
     lastTypedMessageRead: null,
+    readBackCount: 0,
+    readBack: null,
   };
   const session = cdp();
   await session.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });

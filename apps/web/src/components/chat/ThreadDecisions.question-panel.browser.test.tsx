@@ -4,6 +4,7 @@ import {
   MessageId,
   ThreadId,
   type ThreadDecisionQuestion,
+  ThreadDecisionsError,
   type ThreadDecisionsSnapshot,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -13,6 +14,8 @@ import * as Effect from "effect/Effect";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
+// The live region's test reads computed styles.
+import "~/index.css";
 import { AppRoot } from "~/AppRoot";
 // The route loads ChatView lazily; importing it here keeps its first transform out of the timeout.
 import "~/components/ChatView";
@@ -70,6 +73,7 @@ const open = (label: string, pick: string, reason: string): ThreadDecisionQuesti
   answerText: null,
   answerMessageId: null,
   resolvedAt: null,
+  settledByAgent: false,
 });
 
 const snapshotFor = (
@@ -91,6 +95,8 @@ const snapshotFor = (
     artifacts: [],
     artifactCount: 0,
     lastTypedMessageRead: null,
+    readBackCount: 0,
+    readBack: null,
   };
 };
 
@@ -1000,4 +1006,232 @@ it("dismissing the Tracker's last open question hands focus to the composer", as
   // The row's, which reads "Dismiss"; the card's is its ✕, with the same name.
   await page.getByText("Dismiss", { exact: true }).click();
   await vi.waitFor(() => expect(editor().element().contains(document.activeElement)).toBe(true));
+});
+
+it("an agent's settling reads as the agent's, and its Undo is Reopen, held behind its toast", async () => {
+  const reopened: unknown[] = [];
+  using _reopen = answerRpc(WS_METHODS.threadDecisionsReopen, (input: never) => {
+    reopened.push(input);
+    return Effect.void;
+  });
+  const settled = (label: string, state: "answered" | "dropped", answerText: string) => ({
+    ...open(label, "yes", "why"),
+    state,
+    answerText,
+    answerMessageId: state === "answered" ? MessageId.make("said") : null,
+    resolvedAt: "2026-01-01T00:01:00.000Z",
+    settledByAgent: true,
+  });
+  await using _app = await openThread(
+    threadWithHistory("thread-decision-agent-settled", 1),
+    undefined,
+    {
+      questions: [
+        open("Q6", "yes", "a"),
+        settled("Q3", "answered", "resume it"),
+        settled("Q4", "dropped", "the table was removed"),
+        {
+          ...open("Q5", "yes", "b"),
+          state: "answered",
+          answerText: "Q5: yes",
+          resolvedAt: "2026-01-01T00:02:00.000Z",
+        },
+      ],
+    },
+  );
+  await openTracker();
+  await page.getByRole("button", { name: "Decisions", exact: true }).click();
+  const row = (label: string) =>
+    document.querySelector(`li[data-thread-decision="${label}"]`)?.textContent ?? "";
+  await vi.waitFor(() => expect(row("Q3")).toContain("Settled by the agentresume it"));
+  expect(row("Q4")).toContain("Settled by the agentthe table was removed");
+  // A person's answer keeps its own words.
+  expect(row("Q5")).toContain("YouQ5: yes");
+  expect(row("Q5")).not.toContain("Settled by the agent");
+  expect(
+    document.querySelector('section[aria-label="Not a decision"] [data-thread-decision="Q4"]'),
+  ).not.toBeNull();
+  await expect.element(option("Reopen Q5")).toBeEnabled();
+  await expect.element(option("Reopen Q3")).not.toBeInTheDocument();
+  await expect
+    .element(option("Undo the agent's settling of Q4 (reopens it)"))
+    .toHaveTextContent("Undo");
+
+  using _timers = fakeTimers();
+  await option("Undo the agent's settling of Q3 (reopens it)").click();
+  await expect.element(page.getByText("Reopening Q3")).toBeVisible();
+  await vi.advanceTimersByTimeAsync(9_000);
+  await vi.waitFor(() => expect(reopened).toHaveLength(1), { timeout: 5_000 });
+  expect(reopened[0]).toMatchObject({ label: "Q3", sourceMessageId: "reply" });
+});
+
+const readBackButton = () => option("Check earlier messages");
+const checking = () => option("Checking earlier messages…");
+const reading = (read: number, total: number, closed = 0) => ({
+  running: true,
+  read,
+  total,
+  closed,
+  error: null,
+});
+
+it("offers the read-back only while questions from before the judge are open, and only once it ran", async () => {
+  const thread = threadWithHistory("thread-decision-read-back-offer", 1);
+  await using app = await openThread(thread);
+  await openTracker();
+  await expect.element(tracker.accept("Q4", "yes")).toBeVisible();
+  await expect.element(readBackButton()).not.toBeInTheDocument();
+  await app.push({ ...snapshotFor(thread), readBackCount: 2 });
+  await expect.element(readBackButton()).toBeEnabled();
+  // Its name is what it shows; the count describes it.
+  await expect
+    .element(readBackButton())
+    .toHaveAccessibleDescription("2 questions asked before the judge took over");
+  // Select mode has its own bar.
+  await page.getByRole("button", { name: "Select", exact: true }).click();
+  await expect.element(readBackButton()).not.toBeInTheDocument();
+  await page.getByRole("button", { name: "Done", exact: true }).click();
+  await expect.element(readBackButton()).toBeVisible();
+  // The read-back ran (here, or on another client): the snapshot stops offering it.
+  await app.push({ ...snapshotFor(thread), readBackCount: 0 });
+  await expect.element(readBackButton()).not.toBeInTheDocument();
+});
+
+it("the read-back shows the server's progress on every client, and says how it ended", async () => {
+  const calls: unknown[] = [];
+  let refuse = false;
+  using _readBack = answerRpc(WS_METHODS.threadDecisionsReadBack, (input: never) => {
+    calls.push(input);
+    return refuse
+      ? Effect.fail(
+          new ThreadDecisionsError({
+            message: "This thread's earlier messages are already being read.",
+          }),
+        )
+      : Effect.void;
+  });
+  const thread = threadWithHistory("thread-decision-read-back-run", 1);
+  await using app = await openThread(thread);
+  await openTracker();
+  await app.push({ ...snapshotFor(thread), readBackCount: 1 });
+  await readBackButton().click();
+  await vi.waitFor(() => expect(calls).toEqual([{ threadId: thread.id }]));
+
+  // Running is the server's: shown from the snapshot, whichever client started it.
+  await app.push({ ...snapshotFor(thread), readBackCount: 1, readBack: reading(1, 2) });
+  await expect.element(checking()).toHaveAttribute("aria-disabled", "true");
+  await expect.element(page.getByRole("status").getByText("1 of 2 messages read")).toBeVisible();
+  // Busy, it keeps the focus it had, and a click sends nothing.
+  expect(checking().element()).toBe(document.activeElement);
+  checking()
+    .element()
+    .dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await expect.poll(() => calls.length).toBe(1);
+  // A tab switch keeps it: the panel, not the tab, holds the snapshot.
+  await page.getByRole("button", { name: "Decisions", exact: true }).click();
+  await page.getByRole("button", { name: /^Questions/ }).click();
+  await expect.element(checking()).toHaveAttribute("aria-disabled", "true");
+
+  // It failed: the error reaches the client, the offer stays, and so does focus on it.
+  checking().element().focus();
+  await app.push({
+    ...snapshotFor(thread),
+    readBackCount: 1,
+    readBack: { ...reading(2, 2), running: false, error: "1 of 2 messages got no answer." },
+  });
+  await expect.element(page.getByText("Could not read your earlier messages")).toBeVisible();
+  await expect
+    .element(
+      page.getByRole("status").getByText("Last check failed: 1 of 2 messages got no answer."),
+    )
+    .toBeVisible();
+  await expect.element(readBackButton()).not.toHaveAttribute("aria-disabled");
+  expect(readBackButton().element()).toBe(document.activeElement);
+
+  // A refused start toasts the server's words. From the keyboard, as focus is on it: the toasts sit
+  // over the panel's top right, where a pointer would land on them.
+  refuse = true;
+  await userEvent.keyboard("{Enter}");
+  await expect
+    .element(page.getByText("This thread's earlier messages are already being read."))
+    .toBeVisible();
+  refuse = false;
+
+  // It succeeded: the offer goes, the toast says what it closed, and focus stays in the Tracker.
+  expect(readBackButton().element()).toBe(document.activeElement);
+  await userEvent.keyboard("{Enter}");
+  await vi.waitFor(() => expect(calls).toHaveLength(3));
+  await app.push({ ...snapshotFor(thread), readBackCount: 1, readBack: reading(0, 2) });
+  await expect.element(checking()).toBeVisible();
+  checking().element().focus();
+  await app.push({
+    ...snapshotFor(thread),
+    readBackCount: 0,
+    readBack: { ...reading(2, 2, 1), running: false },
+  });
+  await expect
+    .element(page.getByText("Read your earlier messages: 1 question closed"))
+    .toBeVisible();
+  await expect.element(readBackButton()).not.toBeInTheDocument();
+  await vi.waitFor(() =>
+    expect(page.getByRole("button", { name: "Select", exact: true }).element()).toBe(
+      document.activeElement,
+    ),
+  );
+});
+
+it("the read-back keeps one bar and live region for its whole run, and its end takes no focus it never had", async () => {
+  const thread = threadWithHistory("thread-decision-read-back-one-bar", 1);
+  await using app = await openThread(thread, { acceptCommands: true });
+  await openTracker();
+  await app.push({ ...snapshotFor(thread), readBackCount: 3 });
+  await expect.element(readBackButton()).toBeVisible();
+  const region = () => document.querySelector('[data-tracker-row="read-back"] [role="status"]');
+  // Empty, it is already in the accessibility tree, so the first progress line is announced.
+  const idle = region();
+  expect(idle?.textContent).toBe("");
+  expect(getComputedStyle(idle!).display).not.toBe("none");
+  await app.push({ ...snapshotFor(thread), readBackCount: 3, readBack: reading(0, 2) });
+  await expect.element(page.getByRole("status").getByText("0 of 2 messages read")).toBeVisible();
+  expect(region()).toBe(idle);
+
+  // A send mid-run holds the open questions: the same bar stays.
+  await userEvent.click(editor());
+  await userEvent.keyboard("go on{Enter}");
+  await vi.waitFor(() => expect(sentTexts()).toEqual(["go on"]));
+  await expect.element(page.getByText("Reading your message")).toBeVisible();
+  expect(region()).toBe(idle);
+  const [sent] = sentMessages();
+  checking().element().focus();
+
+  // The read-back closes the last open question mid-run: the same bar stays, focus on it.
+  const answered = snapshotFor(thread).questions.map((question) => ({
+    ...question,
+    state: "answered" as const,
+    answerText: "yes",
+    resolvedAt: "2026-01-02T00:00:00.000Z",
+  }));
+  await app.push({
+    ...snapshotFor(thread, { questions: answered }),
+    lastTypedMessageRead: sent!.messageId,
+    readBack: reading(1, 2, 3),
+  });
+  await expect.element(page.getByText("No open questions")).toBeVisible();
+  await expect.element(page.getByRole("status").getByText("1 of 2 messages read")).toBeVisible();
+  expect(region()).toBe(idle);
+  expect(checking().element()).toBe(document.activeElement);
+
+  // It ends while this client's focus has left the bar, for the page: the toast, and focus stays put.
+  checking().element().blur();
+  expect(document.activeElement).toBe(document.body);
+  await app.push({
+    ...snapshotFor(thread, { questions: answered }),
+    lastTypedMessageRead: sent!.messageId,
+    readBack: { ...reading(2, 2, 3), running: false },
+  });
+  await expect
+    .element(page.getByText("Read your earlier messages: 3 questions closed"))
+    .toBeVisible();
+  await expect.element(readBackButton()).not.toBeInTheDocument();
+  expect(document.activeElement).toBe(document.body);
 });

@@ -115,7 +115,56 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 export const CHILD_PARK_REFUSAL =
   "not parked: only the main thread parks on the user's list; put follow-ups in your report to your parent";
 
+// The service refuses a thread that is not a main thread (ThreadDecisions' threadRole, as for parks), so
+// the caller's thread is passed as it is.
+const callerQuestions = Effect.fn("mcp.callerQuestions")(function* () {
+  const scope = yield* McpInvocationContext.McpInvocationContext;
+  const { thread } = yield* McpInvocationContext.requireThreadScope(scope, "Settling questions");
+  return { threadId: thread.threadId, decisions: yield* ThreadDecisions.ThreadDecisions };
+});
+const questionFailure = (error: { readonly message: string }) =>
+  new OrchestratorMcpFailure({ code: "invalid_request", message: error.message });
+
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_question: McpToolAccess.either(
+    (input) => input.action === "list",
+    McpToolAccess.readsAsCaller(() =>
+      Effect.gen(function* () {
+        const { threadId, decisions } = yield* callerQuestions();
+        const questions = yield* decisions
+          .agentQuestions(threadId)
+          .pipe(Effect.mapError(questionFailure));
+        return { questions };
+      }),
+    ),
+    McpToolAccess.actsAsCaller((input) =>
+      Effect.gen(function* () {
+        const { threadId, decisions } = yield* callerQuestions();
+        const question = {
+          threadId,
+          label: yield* required(input.label, "label"),
+          askedIn: yield* required(input.askedIn, "askedIn"),
+        };
+        yield* (
+          input.action === "answer"
+            ? decisions.settle({
+                ...question,
+                action: "answer",
+                words: yield* required(input.words, "words"),
+                source: yield* required(input.source, "source"),
+              })
+            : decisions.settle({
+                ...question,
+                action: "drop",
+                reason: yield* required(input.reason, "reason"),
+              })
+        ).pipe(Effect.mapError(questionFailure));
+        return {
+          message: `${question.label} is closed in the user's Tracker as settled by you; they can undo it there.`,
+        };
+      }),
+    ),
+  ),
   t3_park: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;
