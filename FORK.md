@@ -60,6 +60,7 @@ reasons are the ones they accepted.
 | `(fork) install: moves the service off Nightly, builds a fresh clone; a queued send holds nothing`    | Installing, Questions         |
 | `(fork) decisions: t3_question lets an agent settle its thread's questions, and a one-time read-back` | Questions and decisions       |
 | `(fork) tooltips: the fork's buttons and chips use upstream's shared tooltip, as upstream's own do`   | Tooltips                      |
+| `(fork) decisions: the Tracker follows the transcript when an edit rewinds later messages`            | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -280,6 +281,49 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   question the owner reopens while the read-back runs"; the browser tests "offers the read-back only
   while questions from before the judge are open, …", "the read-back shows the server's progress on
   every client, …" and "the read-back keeps one bar and live region for its whole run, …".
+- **After an edit (rewind):** the Tracker reflects the current transcript (the owner, 2026-11-27:
+  "when I edit a previous message which removes the future questions, I still get asked these future
+  questions that technically never happened anymore"). Upstream's "Edit from here"
+  (`apps/server/src/orchestration-v2/CheckpointRollbackService.ts`) deletes nothing: it marks every run
+  after the edited message `rolled_back`, keeps their messages and turn items, and its timeline hides
+  them (`createOrchestrationV2TurnItemVisibility` in `packages/shared/src/orchestrationV2Timeline.ts`).
+  The Pi provider marks runs `rolled_back` the same way when its native branch moves
+  (`apps/server/src/orchestration-v2/ProviderEventIngestor.ts`, `rollBackRewoundRuns`), mid-run, so
+  limit (b) below is the expected case there. `ThreadDecisions.ts` reads the same transcript
+  (`inTranscript`). Each sync first runs `pruneRewound`, under the thread's lock, in its own
+  transaction, published at once, so a message sent after the rewind is judged against what the
+  transcript leaves open: a question a rewound reply asked goes, open or closed; a closing by a rewound
+  message (the judge's, the rules', an agent's `answer`) or card reopens its question, settled_by
+  cleared; the rewound replies' Decided without asking items go. Dismiss and an agent's `drop` name no
+  message and stay, unless their question went. A question a rewound reply asked again ("My pick is")
+  takes the wording of the reply still there that asks it (`askedInTranscript`, which mirrors
+  `syncMessages`' and `applyRows`' rules) and keeps its state: a Dismiss, a drop or an agent's answer
+  citing a message still there stays. The message pass, cards, the reply the judge reads beside a
+  message, vetoes, `t3_question`'s source and the read-back skip rewound rows, so one the sync never
+  read before the rewind is never read; the read-back checks each listed message again under the lock,
+  as a rewind can land between two. A parked item a rewound message carried goes back to Open (Parked
+  items, "Back to Open"); artifacts stay. The rollback's `run.updated` already syncs (`rolled_back` is
+  in `ENDED_RUN_STATUSES`). The watermark is not moved: it is a `(created_at, message_id)` position,
+  every message sent after a rewind is stamped later by the server (this Mac's DB, 2026-11-27: run 194
+  of one thread rolled back, 195 after it), and the pass skips the rewound ones, so it skips nothing
+  new. `lastTypedMessageRead` may still name a rewound message until the next one is read;
+  `questionsHeld` then holds the new send until it is read, as it should. _Rejected:_ filtering every
+  reader at read time (a reopened question must be open for the next message, a card, Dismiss and
+  `t3_question` alike, so the state itself has to change); a new orchestration event (rule 1); moving
+  the watermark back (nothing after it is skipped). _Known limits:_ (a) a question put back after a
+  rewound re-ask keeps what closed it since, but not what the re-ask cleared: one closed before that
+  re-ask is open (fails safe); (b) a message still in the transcript that answered a question already
+  closed by a later-rewound answer does not close it again (it was read while closed); (c) a card's
+  closing names no item, so it is found by its time (`pruneRewound`'s comment): a card in the
+  transcript resolved in the same millisecond of the same thread reopens too; a fork migration naming
+  the card is the upgrade path. On conflict: if upstream changes how a rewind marks what it removes (a
+  new status, deleted rows), `inTranscript` follows its timeline's visibility. Tests:
+  `ThreadDecisions.test.ts` "follows the transcript after a rewind: …", "reopens what a rewound card or
+  agent settlement closed, and judges nothing rewound", "keeps a re-asked question's closings that name
+  no rewound message", "reads a card answered after a rewound message the sync never read", "reads back
+  no rewound message", "skips a message the read-back listed once a rewind takes it out" and "puts an
+  item back to Open when the message that sent it is rewound". No web test: the client keeps no
+  question rows of its own, only the snapshot's.
 - **Hidden while a send is judged:** after the user sends a message while questions are open, the
   card and the Tracker's open questions (and the Questions count) are hidden, the Tracker saying
   "Reading your message", until the server has read it or its run ends, whichever is first; then
@@ -599,11 +643,13 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     once is skipped later: a chip edited out of a queued message and put back (two clients saving the
     same message) marks the item Sent again (Sol S2).
   - **Back to Open:** only when the message never reached the agent: its run never started
-    (`neverStarted`: a queued send cancelled, a thread archived with it queued, or a run that could
-    not start), or the chip was edited
-    out of the queued message. Another message carrying the item since its last Reopen keeps it Sent,
-    with that message. Nothing else changes it: steers, declined steers, provider failures after the
-    start and usage limits leave the message to T3, which delivers or retries it.
+    (`neverStarted`: a queued send cancelled, a thread archived with it queued, or a run that could not
+    start), or the chip was edited out of the queued message, or the agent no longer has it: an edit of
+    an earlier message rewound its run (Questions and decisions, "After an edit"; the restored draft has
+    no chip, since recall drops parked chips, so Add to draft puts it back). Another message carrying
+    the item since its last Reopen keeps it Sent, with that message. Nothing else changes it: steers,
+    declined steers, provider failures after the start and usage limits leave the message to T3, which
+    delivers or retries it.
   - **Reopen** returns a Sent item to Open. In the same transaction it reads every message recorded
     so far that carries the item and sets each aside (`fork_thread_parked_set_aside`, keyed by thread,
     item and message), so none of them marks it Sent again, including one recorded just before the
@@ -760,6 +806,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   on screen when it closes (the empty state's, or the footer's once a link fills the panel). It is
   rendered once outside both states, so an artifact arriving while it is open keeps what was typed.
   No embedding, no claude.ai API.
+- An edit that rewinds the thread (Questions and decisions, "After an edit") leaves artifact rows as
+  they are: a publish in a rewound run still exists on claude.ai, and the rows hold what the user made.
 
 ### Shared logic with session-kit
 

@@ -3414,3 +3414,315 @@ it.effect("leaves open a question the owner reopens while the read-back runs", (
     );
   }),
 );
+
+// An edit of an earlier message rewinds the runs after it: upstream keeps their rows, marked
+// `rolled_back` (CheckpointRollbackService), and its timeline hides them.
+const rewind = Effect.fn("rewind")(function* (...runIds: ReadonlyArray<string>) {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    UPDATE orchestration_v2_projection_runs SET status = 'rolled_back'
+    WHERE ${sql.in("run_id", runIds)}
+  `;
+});
+
+const decided = (text: string, labels: string) =>
+  `**Decided without asking**\n- ${text}\n\n${labels}`;
+
+it.effect(
+  "follows the transcript after a rewind: what rewound messages asked or answered is undone",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r1", 1, "completed", nextAt());
+      yield* message("a1", "r1", "assistant", decided("Kept A.", asks("Q1", "Q2", "Q3", "Q4")));
+      yield* decisions.sync(threadId);
+      yield* decisions.dismiss(yield* target("Q3"));
+      yield* decisions.settle({ ...(yield* listed("Q4")), action: "drop", reason: "moot now" });
+      yield* run("r2", 2, "completed", nextAt());
+      yield* message("u2", "r2", "user", "Q1: yes");
+      yield* message(
+        "a2",
+        "r2",
+        "assistant",
+        decided(
+          "Kept B.",
+          `Q2, key words: Settle Q2 now? My pick is no: changed.\n${asks("Q5", "Q6")}`,
+        ),
+      );
+      yield* run("r3", 3, "completed", nextAt());
+      yield* message("u3", "r3", "user", "Q6: yes");
+      yield* message("a3", "r3", "assistant", "Done.");
+      yield* decisions.sync(threadId);
+      assert.deepEqual(yield* states(), {
+        Q1: "answered",
+        Q2: "open",
+        Q3: "dismissed",
+        Q4: "dropped",
+        Q5: "open",
+        Q6: "answered",
+      });
+      assert.strictEqual((yield* question("Q2"))?.pick, "no");
+
+      // The owner edits u2: r2 and r3 leave the transcript.
+      yield* rewind("r2", "r3");
+      assert.isTrue(yield* decisions.sync(threadId));
+      // Q5 and Q6 were asked by a rewound reply, open or closed: gone. Q1's answer was rewound: open again.
+      // Q2 was asked again by a rewound reply: a1's again, as a1 asked it. Dismiss and the agent's drop stay.
+      assert.deepEqual(yield* answers(), {
+        Q1: ["open", null, null],
+        Q2: ["open", null, null],
+        Q3: ["dismissed", null, null],
+        Q4: ["dropped", "moot now", null],
+      });
+      const q2 = yield* question("Q2");
+      assert.deepEqual([q2?.sourceMessageId, q2?.pick], ["a1", "yes"]);
+      const snapshot = yield* decisions.snapshot(threadId);
+      assert.strictEqual(snapshot.openCount, 2);
+      assert.deepEqual(
+        snapshot.decidedWithoutAsking.map((item) => item.text),
+        ["Kept A."],
+      );
+      assert.deepEqual((yield* decisions.agentQuestions(threadId)).map((q) => q.label).toSorted(), [
+        "Q1",
+        "Q2",
+        "Q3",
+        "Q4",
+      ]);
+      assert.isFalse(yield* decisions.sync(threadId));
+
+      // The edited message, sent again, is read past the rewind: it closes the reopened Q1, and a reply
+      // asking Q5 again asks a new question.
+      yield* run("r4", 4, "completed", nextAt());
+      yield* message("u4", "r4", "user", "Q1: no");
+      yield* message("a4", "r4", "assistant", asks("Q5"));
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* states(), {
+        Q1: "answered",
+        Q2: "open",
+        Q3: "dismissed",
+        Q4: "dropped",
+        Q5: "open",
+      });
+      assert.deepEqual(
+        [(yield* question("Q1"))?.answerMessageId, (yield* question("Q5"))?.sourceMessageId],
+        ["u4", "a4"],
+      );
+      assert.strictEqual((yield* decisions.snapshot(threadId)).lastTypedMessageRead, "u4");
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "reopens what a rewound card or agent settlement closed, and judges nothing rewound",
+  () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const vetoed = Effect.fn("vetoed")(function* () {
+        const snapshot = yield* decisions.snapshot(threadId);
+        return snapshot.decidedWithoutAsking.map((item) => [item.text, item.vetoed]);
+      });
+      yield* seed();
+      yield* run("r1", 1, "completed", nextAt());
+      yield* message("a1", "r1", "assistant", decided("Kept A.", asks("Q1", "Q2", "Q3")));
+      // A card in the transcript: its closing stays.
+      yield* card("c0", "r1", [{ question: "Q3: Settle?" }], { "Q3: Settle?": "Yes" });
+      yield* decisions.sync(threadId);
+      yield* run("r2", 2, "completed", nextAt());
+      yield* card("c1", "r2", [{ question: "Q1: Settle?" }], { "Q1: Settle?": "Yes" });
+      yield* message("u2", "r2", "user", "keep it going\nVeto: Kept A.");
+      yield* message("a2", "r2", "assistant", "Noted.");
+      yield* decisions.sync(threadId);
+      yield* decisions.settle({
+        ...(yield* listed("Q2")),
+        action: "answer",
+        words: "keep it going",
+        source: "u2",
+      });
+      assert.deepEqual(yield* states(), { Q1: "answered", Q2: "answered", Q3: "answered" });
+      assert.deepEqual(yield* vetoed(), [["Kept A.", true]]);
+
+      yield* rewind("r2");
+      // Rewound before any sync read them: r3's answer and question are never read.
+      yield* run("r3", 3, "completed", nextAt());
+      yield* message("u3", "r3", "user", "Q3: no, and Q9 too");
+      yield* card("c3", "r3", [{ question: "Q1: Settle?" }], { "Q1: Settle?": "No" });
+      yield* message("a3", "r3", "assistant", asks("Q7"));
+      yield* rewind("r3");
+      assert.isTrue(yield* decisions.sync(threadId));
+      assert.deepEqual(yield* answers(), {
+        Q1: ["open", null, null],
+        Q2: ["open", null, null],
+        Q3: ["answered", "Q3: Yes", null],
+      });
+      assert.isFalse((yield* question("Q2"))?.settledByAgent);
+      assert.deepEqual(yield* vetoed(), [["Kept A.", false]]);
+      // The agent cannot cite the rewound message.
+      const refused = yield* decisions
+        .settle({
+          ...(yield* listed("Q2")),
+          action: "answer",
+          words: "keep it going",
+          source: "u2",
+        })
+        .pipe(Effect.flip);
+      assert.include(refused.message, "is not a message the user typed in this thread");
+
+      // The next message is judged after the reply still in the transcript, not a rewound one.
+      yield* run("r4", 4, "completed", nextAt());
+      yield* message("u4", "r4", "user", "go on");
+      yield* decisions.sync(threadId);
+      assert.deepEqual(prompts.map(said), ["keep it going\nVeto: Kept A.", "go on"]);
+      assert.include(prompts[1], "The assistant's last reply:\n<<<\n**Decided without asking**");
+    }).pipe(
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Effect.sync(() => {
+            prompts.push(prompt);
+            return verdict([]);
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("keeps a re-asked question's closings that name no rewound message", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed", nextAt());
+    yield* message("a1", "r1", "assistant", asks("Q1", "Q2", "Q3", "Q4"));
+    yield* run("r2", 2, "completed", nextAt());
+    yield* message("u2", "r2", "user", "I prefer the second one");
+    yield* message("a2", "r2", "assistant", "Noted.");
+    // An agent restates its open questions in each reply: the source moves to a3.
+    yield* run("r3", 3, "completed", nextAt());
+    yield* message("u3", "r3", "user", "go on");
+    yield* message("a3", "r3", "assistant", asks("Q1", "Q2", "Q3", "Q4"));
+    yield* decisions.sync(threadId);
+    yield* decisions.dismiss(yield* target("Q1"));
+    yield* decisions.settle({
+      ...(yield* listed("Q2")),
+      action: "answer",
+      words: "I prefer the second one",
+      source: "u2",
+    });
+    yield* decisions.settle({ ...(yield* listed("Q4")), action: "drop", reason: "moot now" });
+    yield* run("r4", 4, "completed", nextAt());
+    yield* message("u4", "r4", "user", "Q3: yes");
+    yield* decisions.sync(threadId);
+    assert.deepEqual(yield* answers(), {
+      Q1: ["dismissed", null, null],
+      Q2: ["answered", "I prefer the second one", "u2"],
+      Q3: ["answered", "Q3: yes", "u4"],
+      Q4: ["dropped", "moot now", null],
+    });
+
+    // The owner edits u3: a3 and u4 leave the transcript, a1 still asks all four.
+    yield* rewind("r3", "r4");
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* answers(), {
+      Q1: ["dismissed", null, null],
+      Q2: ["answered", "I prefer the second one", "u2"],
+      Q3: ["open", null, null],
+      Q4: ["dropped", "moot now", null],
+    });
+    assert.deepEqual(
+      (yield* decisions.snapshot(threadId)).questions.map((q) => q.sourceMessageId),
+      ["a1", "a1", "a1", "a1"],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("puts an item back to Open when the message that sent it is rewound", () =>
+  Effect.gen(function* () {
+    yield* seed();
+    const [rewound, kept] = yield* parkForAgent("rewound", "kept");
+    yield* run("r1", 1, "completed", nextAt());
+    yield* sendParked("u1", "r1", [kept!]);
+    yield* run("r2", 2, "completed", nextAt());
+    yield* sendParked("u2", "r2", [rewound!]);
+    assert.deepEqual(yield* parkedAfterSync(), { rewound: "sent u2", kept: "sent u1" });
+    yield* rewind("r2");
+    assert.deepEqual(yield* parkedAfterSync(), { rewound: "open -", kept: "sent u1" });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("reads a card answered after a rewound message the sync never read", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed", nextAt());
+    yield* message("a1", "r1", "assistant", asks("Q1"));
+    yield* decisions.sync(threadId);
+    yield* run("r2", 2, "completed", nextAt());
+    yield* message("u2", "r2", "user", "hm");
+    yield* rewind("r2");
+    // No message after the rewind yet: the rewound one must not hold the card back.
+    yield* run("r3", 3, "completed", nextAt());
+    yield* card("c3", "r3", [{ question: "Q1: Settle?" }], { "Q1: Settle?": "Yes" });
+    assert.isTrue(yield* decisions.sync(threadId));
+    assert.deepEqual(yield* answers(), { Q1: ["answered", "Q1: Yes", null] });
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("skips a message the read-back listed once a rewind takes it out", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<string>();
+    const gate = yield* Deferred.make<void>();
+    const prompts: string[] = [];
+    yield* Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* beforeTheJudge(true);
+      const before = yield* states();
+      const reading = yield* decisions.readBack(threadId);
+      // u1 is with the judge, u3 already listed: the owner edits u2, so r4 leaves the transcript.
+      yield* Queue.take(asked);
+      yield* rewind("r4");
+      yield* Deferred.succeed(gate, undefined);
+      const done = yield* Fiber.join(reading);
+      assert.deepEqual([done.read, done.total, done.error], [3, 3, null]);
+      assert.deepEqual(prompts.map(said), ["yes", "yes"]);
+      assert.deepEqual(yield* states(), before);
+    }).pipe(
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Queue.offer(asked, prompt).pipe(
+            Effect.andThen(Deferred.await(gate)),
+            Effect.andThen(
+              Effect.sync(() => {
+                prompts.push(prompt);
+                // Only u3's verdict closes: a rewound message must not reach applyClosing.
+                return verdict(
+                  prompts.length === 3 ? openIn(prompt).filter((label) => label !== undefined) : [],
+                );
+              }),
+            ),
+          ),
+        ),
+      ),
+    );
+  }),
+);
+
+it.effect("reads back no rewound message", () => {
+  const prompts: string[] = [];
+  return Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* beforeTheJudge(true);
+    yield* rewind("r4");
+    const done = yield* Fiber.join(yield* decisions.readBack(threadId));
+    assert.deepEqual([done.read, done.total, done.error], [2, 2, null]);
+    assert.strictEqual(prompts.length, 2);
+  }).pipe(
+    Effect.provide(
+      decisionsWith((prompt) =>
+        Effect.sync(() => {
+          prompts.push(prompt);
+          return verdict([]);
+        }),
+      ),
+    ),
+  );
+});
