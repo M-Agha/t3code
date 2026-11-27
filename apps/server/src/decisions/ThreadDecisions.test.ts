@@ -2881,3 +2881,536 @@ it.effect("warns at start when the judge's cutoff row is missing", () =>
     ]);
   }).pipe(Effect.provide(SqlitePersistence.layerMemory)),
 );
+
+// t3_question (MAIN-127): the agent settles its own thread's questions, as listed.
+const listed = Effect.fn("listed")(function* (label: string) {
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  const found = (yield* decisions.agentQuestions(threadId)).find((q) => q.label === label);
+  assert.isDefined(found, `${label} is not listed`);
+  return { threadId, label, askedIn: found.askedIn };
+});
+
+it.effect("lists the thread's questions for its agent, open first, closed newest first", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", asks("Q1", "Q2"));
+    yield* run("r2", 2, "completed");
+    yield* message("u1", "r2", "user", "Q2: no");
+    yield* message("a2", "r2", "assistant", asks("Q3", "Q4"));
+    yield* run("r3", 3, "completed");
+    yield* message("u3", "r3", "user", "Q1: yes");
+    yield* decisions.sync(threadId);
+    const list = yield* decisions.agentQuestions(threadId);
+    assert.deepEqual(
+      list.map((q) => [q.label, q.state, q.askedIn]),
+      [
+        ["Q3", "open", "a2"],
+        ["Q4", "open", "a2"],
+        ["Q1", "answered", "a1"],
+        ["Q2", "answered", "a1"],
+      ],
+    );
+    assert.include(list[0]?.text, "Settle Q3?");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("lists every open question and only the 50 newest closed ones", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const sql = yield* SqlClient.SqlClient;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    const labels = Array.from({ length: 52 }, (_, index) => `Q${index + 1}`);
+    yield* message("a1", "r1", "assistant", asks(...labels));
+    yield* decisions.sync(threadId);
+    // Q1 to Q51 closed a minute apart, Q1 first; Q52 stays open.
+    yield* sql`
+      UPDATE fork_thread_decision_questions
+      SET state = 'answered', answer_text = 'yes',
+        resolved_at = printf('2026-02-01T%02d:%02d:00.000Z', label_number / 60, label_number % 60)
+      WHERE thread_id = ${threadId} AND label_number <= 51
+    `;
+    const list = yield* decisions.agentQuestions(threadId);
+    assert.deepEqual(
+      list.map((q) => q.label),
+      ["Q52", ...labels.slice(1, 51).toReversed()],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("answers an open question with the user's words and drops one, as by the agent", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed", nextAt());
+    // The rules close nothing on this; the agent reads it as the answer to Q4.
+    yield* message("u1", "r2", "user", "resume it, and stop asking");
+    yield* decisions.sync(threadId);
+    assert.deepEqual(yield* states(), { Q4: "open", Q5: "open" });
+
+    const published = yield* decisions
+      .subscribe(threadId)
+      .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+    yield* Effect.yieldNow;
+    yield* decisions.settle({
+      ...(yield* listed("Q4")),
+      action: "answer",
+      words: "resume it",
+      source: "u1",
+    });
+    const [, after] = yield* Fiber.join(published);
+    const q4 = after?.questions.find((q) => q.label === "Q4");
+    assert.deepEqual(
+      [q4?.state, q4?.answerText, q4?.answerMessageId, q4?.settledByAgent],
+      ["answered", "resume it", "u1", true],
+    );
+    assert.isNotNull(q4?.resolvedAt);
+
+    yield* decisions.settle({
+      ...(yield* listed("Q5")),
+      action: "drop",
+      reason: "the table was removed in this change",
+    });
+    const q5 = yield* question("Q5");
+    assert.deepEqual(
+      [q5?.state, q5?.answerText, q5?.answerMessageId, q5?.settledByAgent],
+      ["dropped", "the table was removed in this change", null, true],
+    );
+    // A question a person's message closed is not the agent's.
+    yield* run("r3", 3, "completed");
+    yield* message("a3", "r3", "assistant", asks("Q6"));
+    yield* run("r4", 4, "completed");
+    yield* message("u4", "r4", "user", "Q6: yes");
+    yield* decisions.sync(threadId);
+    assert.isFalse((yield* question("Q6"))?.settledByAgent);
+    // Only an open one is settled.
+    const closed = yield* Effect.flip(
+      decisions.settle({ ...(yield* listed("Q6")), action: "drop", reason: "moot" }),
+    );
+    assert.strictEqual(closed.message, "not settled: Q6 is already answered.");
+    const unknown = yield* Effect.flip(
+      decisions.settle({ threadId, label: "Q9", askedIn: "a1", action: "drop", reason: "moot" }),
+    );
+    assert.strictEqual(unknown.message, "not settled: Q9 is not a question in this thread.");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("cites only a message the user typed in this thread as the answer's source", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const other = ThreadId.make("thread-other");
+    yield* seed();
+    yield* seed(null, other);
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed");
+    yield* message("u-scheduled", "r2", "user", "resume it", { scheduledTaskId: "task" });
+    yield* message("u-agent", "r2", "user", "resume it", { createdBy: "agent" });
+    yield* decisions.sync(threadId);
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_messages (
+        message_id, thread_id, run_id, node_id, role, streaming, created_at, updated_at, payload_json
+      ) VALUES ('u-elsewhere', ${other}, NULL, NULL, 'user', 0, ${nextAt()}, ${nextAt()},
+        ${JSON.stringify({ text: "resume it", createdBy: "user" })})
+    `;
+    const target = yield* listed("Q4");
+    for (const source of ["a1", "u-scheduled", "u-agent", "u-elsewhere", "missing"]) {
+      const refused = yield* Effect.flip(
+        decisions.settle({ ...target, action: "answer", words: "resume it", source }),
+      );
+      assert.strictEqual(
+        refused.message,
+        `not settled: ${source} is not a message the user typed in this thread that reached you; cite the user's own message.`,
+      );
+    }
+    assert.strictEqual((yield* question("Q4"))?.state, "open");
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("answers only in the user's own words, from a message that reached the agent", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    // Said before Q4 was asked: a preference stated ahead of the question may answer it.
+    yield* run("r0", 0, "completed", nextAt());
+    yield* message("u0", "r0", "user", "If it stops cleanly,  Resume\n it  without asking me.");
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    // Queued, then cancelled before its run started: the agent never received it.
+    yield* run("r2", 2, "cancelled");
+    yield* message("u-unsent", "r2", "user", "resume it");
+    // Still queued: the owner may cancel it, and t3_queue can rewrite it.
+    yield* run("r3", 3, "queued");
+    yield* message("u-queued", "r3", "user", "resume it");
+    yield* decisions.sync(threadId);
+    const q4 = yield* listed("Q4");
+    for (const source of ["u-unsent", "u-queued"]) {
+      const unsent = yield* Effect.flip(
+        decisions.settle({ ...q4, action: "answer", words: "resume it", source }),
+      );
+      assert.strictEqual(
+        unsent.message,
+        `not settled: ${source} is not a message the user typed in this thread that reached you; cite the user's own message.`,
+      );
+    }
+    const unrelated = yield* Effect.flip(
+      decisions.settle({ ...q4, action: "answer", words: "rename the table", source: "u0" }),
+    );
+    assert.strictEqual(
+      unrelated.message,
+      "not settled: `words` are not in u0; quote the user's own words from it.",
+    );
+    assert.strictEqual((yield* question("Q4"))?.state, "open");
+    yield* decisions.settle({ ...q4, action: "answer", words: "resume it", source: "u0" });
+    const answered = yield* question("Q4");
+    assert.deepEqual(
+      [answered?.state, answered?.answerText, answered?.answerMessageId],
+      ["answered", "resume it", "u0"],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("refuses to settle a question asked again since the agent listed it", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* run("r2", 2, "completed", nextAt());
+    yield* message("u1", "r2", "user", "resume it");
+    yield* decisions.sync(threadId);
+    const seen = yield* listed("Q4");
+    yield* message(
+      "a2",
+      "r2",
+      "assistant",
+      "Q4, resume: Resume it now? My pick is yes: it is safe.",
+    );
+    yield* decisions.sync(threadId);
+    for (const settlement of [
+      { action: "answer", words: "resume it", source: "u1" },
+      { action: "drop", reason: "moot" },
+    ] as const) {
+      const refused = yield* Effect.flip(decisions.settle({ ...seen, ...settlement }));
+      assert.strictEqual(
+        refused.message,
+        "not settled: Q4 was asked again since you listed it; list again.",
+      );
+    }
+    assert.deepEqual(
+      [(yield* question("Q4"))?.state, (yield* question("Q4"))?.sourceMessageId],
+      ["open", "a2"],
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("Undo of an agent's settlement is Reopen, and a re-ask clears it too", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    yield* decisions.settle({ ...(yield* listed("Q4")), action: "drop", reason: "moot" });
+    yield* decisions.settle({ ...(yield* listed("Q5")), action: "drop", reason: "moot" });
+    yield* decisions.reopen(yield* target("Q4"));
+    const reopened = yield* question("Q4");
+    assert.deepEqual(
+      [reopened?.state, reopened?.answerText, reopened?.resolvedAt, reopened?.settledByAgent],
+      ["open", null, null, false],
+    );
+    yield* run("r2", 2, "completed");
+    yield* message("a2", "r2", "assistant", "Q5, table: Rename it today? My pick is no: wait.");
+    yield* decisions.sync(threadId);
+    const reasked = yield* question("Q5");
+    assert.deepEqual([reasked?.state, reasked?.settledByAgent], ["open", false]);
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// A server from before migration 008 reopens without clearing `settled_by`; a later closing by
+// another path must not read as the agent's.
+it.effect(
+  "a question closed by the user's message or Dismiss is not the agent's, whatever came before",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const sql = yield* SqlClient.SqlClient;
+      yield* seed();
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      yield* decisions.sync(threadId);
+      yield* decisions.settle({ ...(yield* listed("Q4")), action: "drop", reason: "moot" });
+      yield* decisions.settle({ ...(yield* listed("Q5")), action: "drop", reason: "moot" });
+      yield* sql`
+      UPDATE fork_thread_decision_questions
+      SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL
+      WHERE thread_id = ${threadId}
+    `;
+      yield* run("r2", 2, "completed");
+      yield* message("u2", "r2", "user", "Q4: yes");
+      yield* decisions.sync(threadId);
+      yield* decisions.dismiss(yield* target("Q5"));
+      const [q4, q5] = [yield* question("Q4"), yield* question("Q5")];
+      assert.deepEqual(
+        [q4?.state, q4?.settledByAgent, q5?.state, q5?.settledByAgent],
+        ["answered", false, "dismissed", false],
+      );
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("refuses t3_question's list and settle in every thread park refuses", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    const root = ThreadId.make("thread-root");
+    const lineage = { parentThreadId: root, rootThreadId: root };
+    const shapes = [
+      ["subagent", { lineage: { ...lineage, relationshipToParent: "subagent" } }],
+      ["workflowStep", { lineage: { ...lineage, relationshipToParent: null, workflowStep: true } }],
+      ["sideChat", { lineage: { ...lineage, relationshipToParent: "fork", sideChat: true } }],
+    ] as const;
+    for (const [refusal, shape] of shapes) {
+      const id = ThreadId.make(`thread-${refusal}`);
+      yield* seed(null, id, shape);
+      const listing = yield* Effect.flip(decisions.agentQuestions(id));
+      assert.strictEqual(listing.message, ThreadDecisions.QUESTION_REFUSAL[refusal]);
+      const settling = yield* Effect.flip(
+        decisions.settle({ threadId: id, label: "Q1", askedIn: "a1", action: "drop", reason: "x" }),
+      );
+      assert.strictEqual(settling.message, ThreadDecisions.QUESTION_REFUSAL[refusal]);
+    }
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "reads back, once, the messages from before the judge took over, each against what it could answer",
+  () => {
+    const prompts: string[] = [];
+    return Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* seed();
+      yield* run("r0", 0, "completed");
+      // A question the rules closed is not offered; the message before any open question is not read back.
+      yield* message("a0", "r0", "assistant", asks("Q8"));
+      yield* message("u0", "r0", "user", "Q8: yes");
+      yield* run("r1", 1, "completed");
+      yield* message("a1", "r1", "assistant", REPLY);
+      yield* run("r2", 2, "completed");
+      // The rules close nothing on a bare yes; the judge would.
+      yield* message("u1", "r2", "user", "yes");
+      yield* message("a2", "r2", "assistant", asks("Q6", "Q7"));
+      yield* run("r3", 3, "completed");
+      yield* message("u2", "r3", "user", "yes");
+      yield* judgeFrom(nextAt());
+      yield* decisions.sync(threadId);
+      assert.deepEqual(prompts, []);
+      const before = yield* decisions.snapshot(threadId);
+      assert.deepEqual(
+        [before.questions.length, before.openCount, before.readBackCount],
+        [5, 4, 4],
+      );
+
+      assert.deepEqual(yield* Fiber.join(yield* decisions.readBack(threadId)), {
+        running: false,
+        read: 2,
+        total: 2,
+        closed: 4,
+        error: null,
+      });
+      // A message is judged only against the questions asked before it.
+      assert.deepEqual(prompts.map(said), ["yes", "yes"]);
+      assert.deepEqual(prompts.map(openIn), [
+        ["Q4", "Q5"],
+        ["Q6", "Q7"],
+      ]);
+      assert.deepEqual(yield* answers(), {
+        Q4: ["answered", "yes", "u1"],
+        Q5: ["answered", "yes", "u1"],
+        Q6: ["answered", "yes", "u2"],
+        Q7: ["answered", "yes", "u2"],
+        Q8: ["answered", "Q8: yes", "u0"],
+      });
+      assert.strictEqual((yield* decisions.snapshot(threadId)).readBackCount, 0);
+
+      // Once: reopened, a question from before the cutoff is not offered again, nor read again.
+      yield* decisions.reopen(yield* target("Q4"));
+      assert.strictEqual((yield* decisions.snapshot(threadId)).readBackCount, 0);
+      const again = yield* Effect.flip(decisions.readBack(threadId));
+      assert.strictEqual(again.message, "This thread's earlier messages were already read.");
+      assert.strictEqual(prompts.length, 2);
+    }).pipe(
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Effect.sync(() => {
+            prompts.push(prompt);
+            return verdict(openIn(prompt).filter((label) => label !== undefined));
+          }),
+        ),
+      ),
+    );
+  },
+);
+
+it.effect("offers no read-back for questions asked after the judge took over", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* seed();
+    yield* run("r1", 1, "completed");
+    yield* message("a1", "r1", "assistant", REPLY);
+    yield* decisions.sync(threadId);
+    const snapshot = yield* decisions.snapshot(threadId);
+    assert.deepEqual([snapshot.openCount, snapshot.readBackCount], [2, 0]);
+    const refused = yield* Effect.flip(decisions.readBack(threadId));
+    assert.strictEqual(
+      refused.message,
+      "No open question in this thread was asked before the judge took over.",
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+// The thread for the read-back tests: Q4 and Q5 asked in a1, then the user's "yes" (u1), then Q6 asked
+// and a second "yes" (u2), and with `third` a third (u3), all before the judge took over.
+const beforeTheJudge = Effect.fn("beforeTheJudge")(function* (third = false) {
+  const decisions = yield* ThreadDecisions.ThreadDecisions;
+  yield* seed();
+  yield* run("r1", 1, "completed");
+  yield* message("a1", "r1", "assistant", REPLY);
+  yield* run("r2", 2, "completed");
+  yield* message("u1", "r2", "user", "yes");
+  yield* message("a2", "r2", "assistant", asks("Q6"));
+  yield* run("r3", 3, "completed");
+  yield* message("u2", "r3", "user", "yes");
+  if (third) {
+    yield* run("r4", 4, "completed");
+    yield* message("u3", "r4", "user", "yes");
+  }
+  yield* judgeFrom(nextAt());
+  yield* decisions.sync(threadId);
+});
+
+// Any end before the run is forked gives the claim back and says so: no client keeps a busy button.
+it.effect(
+  "gives the read-back's claim back, and publishes it, when loading its messages fails",
+  () =>
+    Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      const sql = yield* SqlClient.SqlClient;
+      yield* beforeTheJudge();
+      const published = yield* decisions
+        .subscribe(threadId)
+        .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
+      yield* Effect.yieldNow;
+      // A run SQLite cannot read as JSON fails the read-back's message query, after the claim.
+      yield* sql`UPDATE orchestration_v2_projection_runs SET status = 'failed', payload_json = '{' WHERE run_id = 'r3'`;
+      const failed = yield* Effect.flip(decisions.readBack(threadId));
+      assert.strictEqual(failed.message, "Could not read this thread's earlier messages.");
+      const [, after] = yield* Fiber.join(published);
+      assert.deepEqual([after?.readBack, after?.readBackCount], [null, 3]);
+      // Not left running: the next request is not refused as one already being read.
+      const again = yield* Effect.flip(decisions.readBack(threadId));
+      assert.strictEqual(again.message, "Could not read this thread's earlier messages.");
+    }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect("records no read-back when the judge did not answer, and offers it again", () =>
+  Effect.gen(function* () {
+    const decisions = yield* ThreadDecisions.ThreadDecisions;
+    yield* beforeTheJudge();
+    assert.strictEqual((yield* decisions.snapshot(threadId)).readBackCount, 3);
+    const failed = {
+      running: false,
+      read: 2,
+      total: 2,
+      closed: 0,
+      error: "2 of 2 messages got no answer from the judge; nothing recorded, try again.",
+    };
+    assert.deepEqual(yield* Fiber.join(yield* decisions.readBack(threadId)), failed);
+    const after = yield* decisions.snapshot(threadId);
+    assert.deepEqual([after.readBackCount, after.readBack], [3, failed]);
+    assert.deepEqual(yield* states(), { Q4: "open", Q5: "open", Q6: "open" });
+    // Not recorded: the owner can try again.
+    assert.strictEqual(
+      (yield* Fiber.join(yield* decisions.readBack(threadId))).error,
+      failed.error,
+    );
+  }).pipe(Effect.provide(withDecisions)),
+);
+
+it.effect(
+  "runs the read-back past its request, shows its progress, and refuses a second while it runs",
+  () =>
+    Effect.gen(function* () {
+      const asked = yield* Queue.unbounded<void>();
+      const answer = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const decisions = yield* ThreadDecisions.ThreadDecisions;
+        yield* beforeTheJudge();
+        // The request ends once the read-back has started, as an RPC's fiber does.
+        const reading = yield* Fiber.join(yield* Effect.forkChild(decisions.readBack(threadId)));
+        yield* Queue.take(asked);
+        assert.deepEqual((yield* decisions.snapshot(threadId)).readBack, {
+          running: true,
+          read: 0,
+          total: 2,
+          closed: 0,
+          error: null,
+        });
+        const second = yield* Effect.flip(decisions.readBack(threadId));
+        assert.strictEqual(
+          second.message,
+          "This thread's earlier messages are already being read.",
+        );
+        yield* Deferred.succeed(answer, undefined);
+        const done = yield* Fiber.join(reading);
+        assert.deepEqual(done, { running: false, read: 2, total: 2, closed: 3, error: null });
+        assert.deepEqual((yield* decisions.snapshot(threadId)).readBack, done);
+        assert.strictEqual((yield* decisions.snapshot(threadId)).readBackCount, 0);
+      }).pipe(
+        Effect.provide(
+          decisionsWith((prompt) =>
+            Queue.offer(asked, undefined).pipe(
+              Effect.andThen(Deferred.await(answer)),
+              Effect.as(verdict(openIn(prompt).filter((label) => label !== undefined))),
+            ),
+          ),
+        ),
+      );
+    }),
+);
+
+it.effect("leaves open a question the owner reopens while the read-back runs", () =>
+  Effect.gen(function* () {
+    const asked = yield* Queue.unbounded<string>();
+    const gate = yield* Deferred.make<void>();
+    yield* Effect.gen(function* () {
+      const decisions = yield* ThreadDecisions.ThreadDecisions;
+      yield* beforeTheJudge(true);
+      const reading = yield* decisions.readBack(threadId);
+      // u1 closed Q4 and Q5; while u2 is judged, the owner takes Q4 back (Reopen waits on the lock).
+      yield* Queue.take(asked);
+      yield* Queue.take(asked);
+      const reopening = yield* Effect.forkChild(decisions.reopen(yield* target("Q4")));
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.join(reopening);
+      const done = yield* Fiber.join(reading);
+      assert.deepEqual([done.read, done.total, done.error], [3, 3, null]);
+      // u3 would close Q4 again: it is not put to the judge.
+      assert.strictEqual(yield* Queue.size(asked), 0);
+      assert.deepEqual(yield* states(), { Q4: "open", Q5: "answered", Q6: "answered" });
+    }).pipe(
+      Effect.provide(
+        decisionsWith((prompt) =>
+          Effect.gen(function* () {
+            yield* Queue.offer(asked, prompt);
+            if (openIn(prompt).includes("Q6")) yield* Deferred.await(gate);
+            return verdict(openIn(prompt).filter((label) => label !== undefined));
+          }),
+        ),
+      ),
+    );
+  }),
+);

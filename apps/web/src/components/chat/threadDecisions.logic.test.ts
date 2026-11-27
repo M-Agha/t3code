@@ -56,6 +56,7 @@ const question = (
   answerText: null,
   answerMessageId: null,
   resolvedAt: null,
+  settledByAgent: false,
 });
 
 const snapshot = {
@@ -72,6 +73,8 @@ const snapshot = {
   artifacts: [],
   artifactCount: 0,
   lastTypedMessageRead: null,
+  readBackCount: 0,
+  readBack: null,
 };
 
 describe("holding questions back while a sent message is judged", () => {

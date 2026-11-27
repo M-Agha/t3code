@@ -35,6 +35,12 @@ export const ThreadDecisionQuestion = Schema.Struct({
   answerText: Schema.NullOr(Schema.String),
   answerMessageId: Schema.NullOr(MessageId),
   resolvedAt: Schema.NullOr(IsoDateTime),
+  /**
+   * Its own thread's agent answered it with the user's words (`answerText`, said in
+   * `answerMessageId`) or dropped it with a reason (`answerText`), through `t3_question`. Defaults
+   * to false for a server that predates it.
+   */
+  settledByAgent: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
 });
 export type ThreadDecisionQuestion = typeof ThreadDecisionQuestion.Type;
 
@@ -141,6 +147,19 @@ export type ThreadArtifact = typeof ThreadArtifact.Type;
 /** The snapshot carries at most this many artifacts, most recently updated first. */
 export const THREAD_ARTIFACTS_LIMIT = 50;
 
+/** The one-time read-back of a thread's messages from before the judge took over (MAIN-129). */
+export const ThreadDecisionsReadBack = Schema.Struct({
+  running: Schema.Boolean,
+  /** The messages read so far, of `total`: one judge call each. */
+  read: Schema.Int,
+  total: Schema.Int,
+  /** The questions it closed so far. */
+  closed: Schema.Int,
+  /** Why it ended without recording that it ran; null while it runs and once it succeeded. */
+  error: Schema.NullOr(Schema.String),
+});
+export type ThreadDecisionsReadBack = typeof ThreadDecisionsReadBack.Type;
+
 export const ThreadDecisionsSnapshot = Schema.Struct({
   threadId: ThreadId,
   /** Newest asking reply first; labels ascending within a reply. */
@@ -161,6 +180,18 @@ export const ThreadDecisionsSnapshot = Schema.Struct({
   lastTypedMessageRead: Schema.NullOr(MessageId).pipe(
     Schema.withDecodingDefaultKey(Effect.succeed(null)),
   ),
+  /**
+   * Open questions asked before the judge took over, while this thread's one-time read-back has not
+   * run; 0 otherwise. The Tracker offers the read-back while it is above 0.
+   */
+  readBackCount: Schema.Int.pipe(Schema.withDecodingDefaultKey(Effect.succeed(0))),
+  /**
+   * The thread's read-back while it runs, or how the last one ended, since the server started; null
+   * when none ran. Every client sees it, so the button waits on each and the outcome reaches each.
+   */
+  readBack: Schema.NullOr(ThreadDecisionsReadBack).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed(null)),
+  ),
 });
 export type ThreadDecisionsSnapshot = typeof ThreadDecisionsSnapshot.Type;
 
@@ -174,6 +205,10 @@ export const ThreadDecisionQuestionInput = Schema.Struct({
   sourceMessageId: MessageId,
 });
 export type ThreadDecisionQuestionInput = typeof ThreadDecisionQuestionInput.Type;
+
+/** The Tracker's one-time read-back of a thread's messages from before the judge took over. */
+export const ThreadDecisionsReadBackInput = Schema.Struct({ threadId: ThreadId });
+export type ThreadDecisionsReadBackInput = typeof ThreadDecisionsReadBackInput.Type;
 
 /** Run statuses that end a run. A completed turn is first persisted as `waiting` (RunExecutionService). */
 export const ENDED_RUN_STATUSES: ReadonlySet<string> = new Set([
