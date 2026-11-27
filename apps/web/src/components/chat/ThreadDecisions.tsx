@@ -61,7 +61,7 @@ import { Radio, RadioGroup } from "../ui/radio-group";
 import { ScrollArea } from "../ui/scroll-area";
 import { toastManager } from "../ui/toast";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { SharedTooltipTrigger } from "../ui/shared-tooltip";
 import { ComposerBanner } from "./ComposerBanner";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
 import type { ChatComposerHandle, ChatComposerProps } from "./ChatComposer";
@@ -471,21 +471,19 @@ function QuestionPanel(props: {
             </>
           ) : null}
           <ComposerBanner.ToggleIcon expanded={!collapsed} />
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label={openTracker}
-                  onClick={props.onOpenPanel}
-                />
-              }
-            >
-              <PanelRightIcon className="size-3.5" />
-            </TooltipTrigger>
-            <TooltipPopup side="top">{openTracker}</TooltipPopup>
-          </Tooltip>
+          <SharedTooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant="ghost"
+                aria-label={openTracker}
+                onClick={props.onOpenPanel}
+              />
+            }
+            label={openTracker}
+          >
+            <PanelRightIcon className="size-3.5" />
+          </SharedTooltipTrigger>
           <ComposerBanner.Dismiss
             aria-label={dismissName}
             title={dismissName}
@@ -718,21 +716,19 @@ function ReplyHeading(props: {
       <span className="font-medium text-foreground/80">{props.title}</span>
       <Dot />
       <RelativeTime timestamp={props.at} />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label={`Show the ${props.title.toLowerCase()} in the chat`}
-              onClick={props.onShow}
-            />
-          }
-        >
-          <ArrowUpRightIcon />
-        </TooltipTrigger>
-        <TooltipPopup side="top">Show in the chat</TooltipPopup>
-      </Tooltip>
+      <SharedTooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="ghost"
+            aria-label={`Show the ${props.title.toLowerCase()} in the chat`}
+            onClick={props.onShow}
+          />
+        }
+        label="Show in the chat"
+      >
+        <ArrowUpRightIcon />
+      </SharedTooltipTrigger>
       {props.children === undefined ? null : <span className="ms-auto">{props.children}</span>}
     </div>
   );
