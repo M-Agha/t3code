@@ -102,6 +102,8 @@ const snapshotOf = (parked: ReadonlyArray<ThreadParkedItem>): ThreadDecisionsSna
   artifacts: [],
   artifactCount: 0,
   lastTypedMessageRead: null,
+  readBackCount: 0,
+  readBack: null,
 });
 
 const panel = () => <ThreadParkedPanel threadRef={threadRef} actions={actions} />;

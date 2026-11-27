@@ -126,6 +126,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.threadDecisionsSubscribe]: "threadDecisions",
   [WS_METHODS.threadDecisionsReopen]: "threadDecisions",
   [WS_METHODS.threadDecisionsDismiss]: "threadDecisions",
+  [WS_METHODS.threadDecisionsReadBack]: "threadDecisions",
   [WS_METHODS.threadDecisionsPark]: "threadDecisions",
   [WS_METHODS.threadDecisionsUpdateParked]: "threadDecisions",
   [WS_METHODS.threadDecisionsLinkArtifact]: "threadDecisions",

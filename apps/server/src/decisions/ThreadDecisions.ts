@@ -8,6 +8,7 @@ import {
   type ThreadDecisionQuestionInput,
   ENDED_RUN_STATUSES,
   ThreadDecisionsError,
+  type ThreadDecisionsReadBack,
   type ThreadDecisionsSnapshot,
   type ThreadId,
   type ThreadParkedItem,
@@ -39,6 +40,8 @@ import {
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -92,6 +95,8 @@ interface QuestionRow {
   readonly answerText: string | null;
   readonly answerMessageId: string | null;
   readonly resolvedAt: string | null;
+  /** 'agent' when t3_question settled it (fork migration 008); NULL otherwise. */
+  readonly settledBy: string | null;
 }
 
 const ARTIFACT_TITLE_LIMIT = 200;
@@ -253,6 +258,51 @@ export const WORKFLOW_STEP_PARK_MESSAGE =
 
 const RESOLVED_PARKED_STATE = { done: "done", drop: "dropped" } as const;
 
+/**
+ * Why t3_question refuses a thread: the same threads `park` refuses (`threadRole`), since only the
+ * main thread's agent speaks for the owner there (MAIN-127).
+ */
+export const QUESTION_REFUSAL = {
+  sideChat:
+    "not settled: a side chat's agent does not settle questions; the main thread's agent does.",
+  subagent:
+    "not settled: a subagent does not settle the user's questions; say in your report what you would settle, and why.",
+  workflowStep:
+    "not settled: a workflow step does not settle the user's questions; put it in the step's result.",
+} as const;
+
+/** One of the caller thread's questions as t3_question lists it. */
+export interface AgentQuestion {
+  readonly label: string;
+  readonly text: string;
+  readonly state: ThreadDecisionQuestion["state"];
+  /** The reply that asked it: what `answer` and `drop` name it by, so a re-ask since is refused. */
+  readonly askedIn: string;
+  readonly askedAt: string;
+}
+
+/** Whether `text` says `words`, ignoring case and how whitespace runs: an answer must quote the owner. */
+const quotes = (text: string, words: string) => {
+  const flat = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+  return flat(text).includes(flat(words));
+};
+
+/** t3_question lists at most this many closed questions, newest first, after every open one. */
+const AGENT_QUESTIONS_CLOSED_LIMIT = 50;
+
+/**
+ * An agent settling one of its own thread's open questions, as t3_question lists it (`label` and
+ * `askedIn`). `answer`: the user's words, said in their message `source`. `drop`: moot or replaced.
+ */
+export type ThreadQuestionSettlement = {
+  readonly threadId: ThreadId;
+  readonly label: string;
+  readonly askedIn: string;
+} & (
+  | { readonly action: "answer"; readonly words: string; readonly source: string }
+  | { readonly action: "drop"; readonly reason: string }
+);
+
 export class ThreadDecisions extends Context.Service<
   ThreadDecisions,
   {
@@ -274,6 +324,20 @@ export class ThreadDecisions extends Context.Service<
     readonly dismiss: (
       input: ThreadDecisionQuestionInput,
     ) => Effect.Effect<void, ThreadDecisionsError>;
+    /** The thread's questions for its agent (t3_question's `list`): open first, in asking order. */
+    readonly agentQuestions: (
+      threadId: ThreadId,
+    ) => Effect.Effect<ReadonlyArray<AgentQuestion>, ThreadDecisionsError>;
+    /** Closes an open question as its agent settled it (t3_question's `answer` and `drop`). */
+    readonly settle: (input: ThreadQuestionSettlement) => Effect.Effect<void, ThreadDecisionsError>;
+    /**
+     * Starts the one-time judging of the thread's messages from before the judge took over, in the
+     * service's scope; refused while one runs, once one succeeded, or with nothing to read. The fiber
+     * ends with its outcome, which the snapshot's `readBack` also carries.
+     */
+    readonly readBack: (
+      threadId: ThreadId,
+    ) => Effect.Effect<Fiber.Fiber<ThreadDecisionsReadBack>, ThreadDecisionsError>;
     /** Parks every item or none. */
     readonly park: (input: ThreadParkRequest) => Effect.Effect<void, ThreadDecisionsError>;
     readonly updateParked: (
@@ -301,6 +365,12 @@ export const layer = Layer.effect(
     const changes = yield* PubSub.sliding<ThreadId>(256);
     const fail = (message: string) => (cause: unknown) =>
       new ThreadDecisionsError({ message, cause });
+    // Each thread's read-back while it runs, and how its last one ended, since the server started.
+    // `reopened`: what the owner reopened while it ran, which it then leaves open (`readBack`).
+    const readBacks = new Map<
+      ThreadId,
+      { progress: ThreadDecisionsReadBack; readonly reopened: Set<string> }
+    >();
 
     yield* sweepDeletedThreads;
 
@@ -330,6 +400,60 @@ export const layer = Layer.effect(
     const neverStarted = () => sql`(
       run.status IN ('cancelled', 'failed') AND json_extract(run.payload_json, '$.startedAt') IS NULL
     )`;
+
+    // A messages row whose run, a runs row named `run`, has begun (a steer joins one that has), or that has
+    // no run: the agent has it. A send still queued is not, and the owner may yet cancel it, or anyone edit
+    // it through t3_queue.
+    const runStarted = () => sql`(
+      run.run_id IS NULL OR json_extract(run.payload_json, '$.startedAt') IS NOT NULL
+    )`;
+
+    // Whether a thread is a main thread, and if not, what it is. `delegated` is isDelegatedAppThread in
+    // SQL: a JSON null delegatedFrom reads as NULL too. Held to the contracts' parkRefusal by "refuses to
+    // park exactly the threads threadParks rules out"; park and t3_question both refuse by it.
+    const threadRole = Effect.fn("ThreadDecisions.threadRole")(function* (threadId: ThreadId) {
+      const [thread] = yield* sql<{
+        readonly side_chat: number | null;
+        readonly delegated: number;
+        readonly workflow_step: number | null;
+      }>`
+        SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat,
+          (json_extract(payload_json, '$.lineage.relationshipToParent') IS 'subagent'
+            OR json_extract(payload_json, '$.delegatedFrom') IS NOT NULL) AS delegated,
+          json_extract(payload_json, '$.lineage.workflowStep') AS workflow_step
+        FROM orchestration_v2_projection_threads
+        WHERE thread_id = ${threadId} AND deleted_at IS NULL
+      `;
+      if (thread === undefined) return "missing" as const;
+      if (thread.side_chat === 1) return "sideChat" as const;
+      if (thread.delegated === 1) return "subagent" as const;
+      if (thread.workflow_step === 1) return "workflowStep" as const;
+      return "main" as const;
+    });
+
+    // Closes, as one message's closing, the open questions it names. Inside the caller's transaction.
+    const applyClosing = Effect.fn("ThreadDecisions.applyClosing")(function* (
+      threadId: ThreadId,
+      row: Pick<MessageRow, "messageId" | "createdAt"> & { readonly text: string },
+      closing: Closing,
+    ) {
+      let closed = 0;
+      for (const [state, labels] of [
+        ["answered", closing.answered],
+        ["dropped", closing.dropped],
+      ] as const) {
+        if (labels.length === 0) continue;
+        const rows = yield* sql`
+          UPDATE fork_thread_decision_questions
+          SET state = ${state}, answer_text = ${row.text},
+            answer_message_id = ${row.messageId}, resolved_at = ${row.createdAt}, settled_by = NULL
+          WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
+          RETURNING label
+        `;
+        closed += rows.length;
+      }
+      return closed;
+    });
 
     // Rows in order, in one transaction: the questions a run's reply asks, the closing found for each user
     // message among them, then the watermark past the last row.
@@ -385,7 +509,8 @@ export const layer = Layer.effect(
                 state = 'open',
                 answer_text = NULL,
                 answer_message_id = NULL,
-                resolved_at = NULL
+                resolved_at = NULL,
+                settled_by = NULL
               WHERE ${shaped ? sql`source_message_id <> excluded.source_message_id` : sql`0`}
                 ${unlessAnsweredLater}
               RETURNING label
@@ -415,17 +540,8 @@ export const layer = Layer.effect(
           VETO_LINE.test(row.text);
         const closing = closings.get(row.messageId);
         if (closing === undefined) continue;
-        for (const [state, labels] of [
-          ["answered", closing.answered],
-          ["dropped", closing.dropped],
-        ] as const) {
-          if (labels.length === 0) continue;
-          yield* sql`
-            UPDATE fork_thread_decision_questions
-            SET state = ${state}, answer_text = ${row.text},
-              answer_message_id = ${row.messageId}, resolved_at = ${row.createdAt}
-            WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
-          `;
+        if (closing.answered.length > 0 || closing.dropped.length > 0) {
+          yield* applyClosing(threadId, { ...row, text: row.text }, closing);
           changed = true;
         }
       }
@@ -439,22 +555,24 @@ export const layer = Layer.effect(
       return changed;
     }, sql.withTransaction);
 
-    // What a user's message closes while questions are open: the judge's verdict when `useJudge`, as in the
-    // terminal, the rules (`closingFor`) when it gives none; else the rules alone, with no model call (owner's
-    // Q38). Outside any transaction: it may wait on a model for seconds.
+    // What a user's message closes among the open questions asked before it: the judge's verdict when
+    // `useJudge`, the rules (`closingFor`) when it gives none (`judged` false); else the rules alone, with no
+    // model call (owner's Q38). Outside any transaction: it may wait on a model for seconds. `skip`:
+    // questions the owner reopened during a read-back.
     const closingOf = Effect.fn("ThreadDecisions.closingOf")(function* (
       threadId: ThreadId,
-      row: MessageRow & { readonly text: string },
+      row: Pick<MessageRow, "messageId" | "createdAt"> & { readonly text: string },
       useJudge: boolean,
+      skip: ReadonlySet<string> = new Set(),
     ) {
-      const open = yield* sql<JudgedQuestion>`
+      const open = (yield* sql<JudgedQuestion>`
         SELECT label, text, source_message_id AS "sourceMessageId", asked_at AS "askedAt"
         FROM fork_thread_decision_questions
-        WHERE thread_id = ${threadId} AND state = 'open'
+        WHERE thread_id = ${threadId} AND state = 'open' AND asked_at < ${row.createdAt}
         ORDER BY asked_at, label_number
-      `;
+      `).filter((question) => !skip.has(question.label));
       if (open.length === 0) return undefined;
-      if (!useJudge) return closingFor(row.text, open);
+      if (!useJudge) return { closing: closingFor(row.text, open), judged: false };
       // The reply the message follows: whether a bare "yes" assents to the question block depends on it.
       const [reply] = yield* sql<{ readonly text: string }>`
         SELECT json_extract(payload_json, '$.text') AS text
@@ -472,7 +590,9 @@ export const layer = Layer.effect(
         reply: reply?.text,
         message: row.text,
       });
-      return judged ?? closingFor(row.text, open);
+      return judged === undefined
+        ? { closing: closingFor(row.text, open), judged: false }
+        : { closing: judged, judged: true };
     });
 
     // Under the thread's lock, but in several transactions, so no model call runs inside one: the rows before
@@ -543,11 +663,11 @@ export const layer = Layer.effect(
           continue;
         changed =
           (yield* applyRows(threadId, ready.slice(start, index), replies, new Map())) || changed;
-        const closing = yield* closingOf(
+        const closing = (yield* closingOf(
           threadId,
           { ...row, text: row.text },
           judgedThread && row.judged === 1,
-        );
+        ))?.closing;
         // A message read while questions were open publishes even when it closes none: the composer hides
         // them from the send until the snapshot's `lastTypedMessageRead` names it (FORK.md, "Hidden while a send is judged").
         changed =
@@ -636,7 +756,7 @@ export const layer = Layer.effect(
             yield* sql`
               UPDATE fork_thread_decision_questions
               SET state = ${state}, answer_text = ${text}, answer_message_id = NULL,
-                resolved_at = ${card.updatedAt}
+                resolved_at = ${card.updatedAt}, settled_by = NULL
               WHERE thread_id = ${threadId} AND state = 'open' AND ${sql.in("label", labels)}
             `;
             changed = true;
@@ -1017,7 +1137,8 @@ export const layer = Layer.effect(
             label, text, source_message_id AS "sourceMessageId", asked_at AS "askedAt", state,
             answer_text AS "answerText",
             answer_message_id AS "answerMessageId",
-            resolved_at AS "resolvedAt"
+            resolved_at AS "resolvedAt",
+            settled_by AS "settledBy"
           FROM fork_thread_decision_questions
           WHERE thread_id = ${threadId}
           ORDER BY asked_at DESC, label_number ASC
@@ -1116,6 +1237,17 @@ export const layer = Layer.effect(
           ORDER BY message.created_at DESC, message.message_id DESC
           LIMIT 1
         `;
+        // Offered until the thread's read-back ran: open questions asked before the judge took over.
+        const [readBack] = yield* sql<{ readonly count: number }>`
+          SELECT COUNT(*) AS count
+          FROM fork_thread_decision_questions AS question
+          JOIN fork_decision_judge_cutoff AS cutoff ON question.asked_at < cutoff.judged_from
+          WHERE question.thread_id = ${threadId} AND question.state = 'open'
+            AND NOT EXISTS (
+              SELECT 1 FROM fork_thread_decision_sync AS sync
+              WHERE sync.thread_id = question.thread_id AND sync.read_back_at IS NOT NULL
+            )
+        `;
         return {
           threadId,
           questions: questions.map((row): ThreadDecisionQuestion => ({
@@ -1128,6 +1260,7 @@ export const layer = Layer.effect(
             answerMessageId:
               row.answerMessageId === null ? null : MessageId.make(row.answerMessageId),
             resolvedAt: row.resolvedAt,
+            settledByAgent: row.settledBy === "agent",
           })),
           decidedWithoutAsking: decided.map((row) => ({
             ...row,
@@ -1154,6 +1287,8 @@ export const layer = Layer.effect(
           artifactCount: artifactCount?.count ?? 0,
           lastTypedMessageRead:
             lastTypedRead === undefined ? null : MessageId.make(lastTypedRead.messageId),
+          readBackCount: readBack?.count ?? 0,
+          readBack: readBacks.get(threadId)?.progress ?? null,
         };
       },
       NodeSqliteClient.readOnly,
@@ -1195,12 +1330,17 @@ export const layer = Layer.effect(
           Effect.gen(function* () {
             const reopened = yield* sql`
               UPDATE fork_thread_decision_questions
-              SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL
+              SET state = 'open', answer_text = NULL, answer_message_id = NULL, resolved_at = NULL,
+                settled_by = NULL
               WHERE thread_id = ${input.threadId} AND label = ${input.label}
                 AND source_message_id = ${input.sourceMessageId} AND state <> 'open'
               RETURNING label
             `;
-            if (reopened.length > 0) return "reopened";
+            if (reopened.length > 0) {
+              const reading = readBacks.get(input.threadId);
+              if (reading?.progress.running === true) reading.reopened.add(input.label);
+              return "reopened";
+            }
             const [current] = yield* sql<{ readonly state: string }>`
               SELECT state FROM fork_thread_decision_questions
               WHERE thread_id = ${input.threadId} AND label = ${input.label}
@@ -1233,7 +1373,8 @@ export const layer = Layer.effect(
       const now = DateTime.formatIso(yield* DateTime.now);
       const dismissed = yield* sql`
         UPDATE fork_thread_decision_questions
-        SET state = 'dismissed', answer_text = NULL, answer_message_id = NULL, resolved_at = ${now}
+        SET state = 'dismissed', answer_text = NULL, answer_message_id = NULL, resolved_at = ${now},
+          settled_by = NULL
         WHERE thread_id = ${input.threadId} AND label = ${input.label}
           AND source_message_id = ${input.sourceMessageId} AND state = 'open'
         RETURNING label
@@ -1244,6 +1385,242 @@ export const layer = Layer.effect(
         });
       }
       yield* PubSub.publish(changes, input.threadId);
+    });
+
+    const refuseUnlessMain = Effect.fn("ThreadDecisions.refuseUnlessMain")(function* (
+      threadId: ThreadId,
+    ) {
+      const role = yield* threadRole(threadId).pipe(
+        Effect.mapError(fail("Could not read this thread.")),
+      );
+      if (role === "main") return;
+      return yield* new ThreadDecisionsError({
+        message: role === "missing" ? "This thread was not found." : QUESTION_REFUSAL[role],
+      });
+    });
+
+    const agentQuestions = Effect.fn("ThreadDecisions.agentQuestions")(function* (
+      threadId: ThreadId,
+    ) {
+      yield* refuseUnlessMain(threadId);
+      return yield* sql<AgentQuestion>`
+        SELECT * FROM (
+          SELECT label, text, state, source_message_id AS "askedIn", asked_at AS "askedAt"
+          FROM fork_thread_decision_questions
+          WHERE thread_id = ${threadId} AND state = 'open'
+          ORDER BY asked_at, label_number
+        )
+        UNION ALL
+        SELECT * FROM (
+          SELECT label, text, state, source_message_id AS "askedIn", asked_at AS "askedAt"
+          FROM fork_thread_decision_questions
+          WHERE thread_id = ${threadId} AND state <> 'open'
+          ORDER BY resolved_at DESC, label_number
+          LIMIT ${AGENT_QUESTIONS_CLOSED_LIMIT}
+        )
+      `.pipe(Effect.mapError(fail("Could not list this thread's questions.")));
+    });
+
+    // Guarded as Dismiss is, and like it outside the thread's lock: only an open question as listed (its
+    // `askedIn`), so a re-ask since is refused. The words must be quoted from a message the user typed here
+    // that reached the agent (MAIN-127); it may predate the question, since the owner can state a
+    // preference before it is asked, and the quote keeps the stored answer theirs.
+    const settle = Effect.fn("ThreadDecisions.settle")(function* (input: ThreadQuestionSettlement) {
+      yield* refuseUnlessMain(input.threadId);
+      const now = DateTime.formatIso(yield* DateTime.now);
+      const outcome = yield* Effect.gen(function* () {
+        if (input.action === "answer") {
+          const [typed] = yield* sql<{ readonly text: string | null }>`
+            SELECT json_extract(message.payload_json, '$.text') AS text
+            FROM orchestration_v2_projection_messages AS message
+            LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+            WHERE message.thread_id = ${input.threadId} AND message.message_id = ${input.source}
+              AND message.role = 'user' AND ${userAuthored()} AND ${runStarted()}
+          `;
+          if (typed === undefined) return { notTyped: input.source } as const;
+          if (!quotes(typed.text ?? "", input.words)) return { notQuoted: input.source } as const;
+        }
+        const [state, text, answerMessageId] =
+          input.action === "answer"
+            ? (["answered", input.words, input.source] as const)
+            : (["dropped", input.reason, null] as const);
+        const settled = yield* sql`
+          UPDATE fork_thread_decision_questions
+          SET state = ${state}, answer_text = ${text}, answer_message_id = ${answerMessageId},
+            resolved_at = ${now}, settled_by = 'agent'
+          WHERE thread_id = ${input.threadId} AND label = ${input.label}
+            AND source_message_id = ${input.askedIn} AND state = 'open'
+          RETURNING label
+        `;
+        if (settled.length > 0) return "settled" as const;
+        const [current] = yield* sql<{ readonly state: string; readonly askedIn: string }>`
+          SELECT state, source_message_id AS "askedIn" FROM fork_thread_decision_questions
+          WHERE thread_id = ${input.threadId} AND label = ${input.label}
+        `;
+        if (current === undefined) return "unknown" as const;
+        return current.askedIn === input.askedIn
+          ? ({ closed: current.state } as const)
+          : ("askedAgain" as const);
+      }).pipe(sql.withTransaction, Effect.mapError(fail(`Could not settle ${input.label}.`)));
+      if (outcome === "settled") {
+        yield* PubSub.publish(changes, input.threadId);
+        return;
+      }
+      const label = input.label;
+      return yield* new ThreadDecisionsError({
+        message:
+          outcome === "unknown"
+            ? `not settled: ${label} is not a question in this thread.`
+            : outcome === "askedAgain"
+              ? `not settled: ${label} was asked again since you listed it; list again.`
+              : "notTyped" in outcome
+                ? `not settled: ${outcome.notTyped} is not a message the user typed in this thread that reached you; cite the user's own message.`
+                : "notQuoted" in outcome
+                  ? `not settled: \`words\` are not in ${outcome.notQuoted}; quote the user's own words from it.`
+                  : `not settled: ${label} is already ${outcome.closed}.`,
+      });
+    });
+
+    // The messages a read-back judges: what the sync read from before the judge took over, typed by a
+    // person, reaching the agent, and after the first question still open from then. Or why there are none.
+    const readBackMessages = Effect.fn("ThreadDecisions.readBackMessages")(function* (
+      threadId: ThreadId,
+    ) {
+      const [state] = yield* sql<{
+        readonly judgedFrom: string;
+        readonly readBackAt: string | null;
+        readonly afterCreatedAt: string | null;
+        readonly afterMessageId: string | null;
+      }>`
+        SELECT cutoff.judged_from AS "judgedFrom", sync.read_back_at AS "readBackAt",
+          sync.after_created_at AS "afterCreatedAt", sync.after_message_id AS "afterMessageId"
+        FROM fork_decision_judge_cutoff AS cutoff
+        LEFT JOIN fork_thread_decision_sync AS sync ON sync.thread_id = ${threadId}
+      `;
+      if (state === undefined || state.afterCreatedAt === null) return "nothing" as const;
+      if (state.readBackAt !== null) return "done" as const;
+      const [first] = yield* sql<{ readonly askedAt: string | null }>`
+        SELECT MIN(asked_at) AS "askedAt" FROM fork_thread_decision_questions
+        WHERE thread_id = ${threadId} AND state = 'open' AND asked_at < ${state.judgedFrom}
+      `;
+      if (first?.askedAt == null) return "nothing" as const;
+      return yield* sql<{
+        readonly messageId: string;
+        readonly createdAt: string;
+        readonly text: string;
+      }>`
+        SELECT message.message_id AS "messageId", message.created_at AS "createdAt",
+          json_extract(message.payload_json, '$.text') AS text
+        FROM orchestration_v2_projection_messages AS message
+        LEFT JOIN orchestration_v2_projection_runs AS run ON run.run_id = message.run_id
+        WHERE message.thread_id = ${threadId} AND message.role = 'user' AND ${userAuthored()}
+          AND json_extract(message.payload_json, '$.text') IS NOT NULL
+          AND ${neverStarted()} IS NOT 1
+          AND message.created_at < ${state.judgedFrom}
+          AND (message.created_at, message.message_id) <=
+            (${state.afterCreatedAt}, ${state.afterMessageId})
+          AND message.created_at > ${first.askedAt}
+        ORDER BY message.created_at, message.message_id
+      `;
+    });
+
+    // The judge over `readBackMessages`, on the owner's click only (MAIN-129: a model call per message). In
+    // the service's scope, as `subscribe`'s sync, so a reload does not cut it short; the snapshot's
+    // `readBack` carries its progress to every client. Locked per message, so a send waits for one judge
+    // call. What the owner reopens meanwhile stays open (`reopened`); a reopen before it is not told apart.
+    const readBack = Effect.fn("ThreadDecisions.readBack")(function* (threadId: ThreadId) {
+      const reading: { progress: ThreadDecisionsReadBack; readonly reopened: Set<string> } = {
+        progress: { running: true, read: 0, total: 0, closed: 0, error: null },
+        reopened: new Set(),
+      };
+      const progress = (change: Partial<ThreadDecisionsReadBack>) =>
+        Effect.suspend(() => {
+          reading.progress = { ...reading.progress, ...change };
+          return PubSub.publish(changes, threadId);
+        });
+      // A message the judge gave no verdict on does not count as read: the rules read it on its first
+      // pass, and recording the read-back without the judge would end the offer for nothing (C-P1-1).
+      const judgeAll = Effect.fn("ThreadDecisions.readBack.judgeAll")(
+        function* (
+          messages: ReadonlyArray<
+            Pick<MessageRow, "messageId" | "createdAt"> & { readonly text: string }
+          >,
+        ) {
+          let unanswered = 0;
+          for (const row of messages) {
+            const closedNow = yield* locks.withLock(
+              threadId,
+              Effect.gen(function* () {
+                const found = yield* closingOf(threadId, row, true, reading.reopened);
+                if (found === undefined) return 0;
+                if (!found.judged) {
+                  unanswered += 1;
+                  return 0;
+                }
+                return yield* applyClosing(threadId, row, found.closing).pipe(sql.withTransaction);
+              }),
+            );
+            yield* progress({
+              read: reading.progress.read + 1,
+              closed: reading.progress.closed + closedNow,
+            });
+          }
+          if (unanswered > 0) {
+            return `${unanswered} of ${messages.length} messages got no answer from the judge; nothing recorded, try again.`;
+          }
+          const now = DateTime.formatIso(yield* DateTime.now);
+          yield* sql`
+            UPDATE fork_thread_decision_sync SET read_back_at = ${now} WHERE thread_id = ${threadId}
+          `;
+          return null;
+        },
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Thread decisions read-back failed", { threadId, cause }).pipe(
+            Effect.as("Could not read this thread's earlier messages."),
+          ),
+        ),
+        Effect.flatMap((error) => progress({ running: false, error })),
+        Effect.map(() => reading.progress),
+      );
+      // Uninterruptible from the check and the claim to the fork, so a request dropped in between still
+      // forks the run; any other end before the fork (nothing to read, an SQL error, a defect) gives the
+      // claim back and publishes it, so no client is left showing a run that is not there.
+      return yield* Effect.uninterruptibleMask((restore) =>
+        Effect.gen(function* () {
+          const previous = readBacks.get(threadId);
+          if (previous?.progress.running === true) {
+            return yield* new ThreadDecisionsError({
+              message: "This thread's earlier messages are already being read.",
+            });
+          }
+          readBacks.set(threadId, reading);
+          return yield* Effect.gen(function* () {
+            const messages = yield* readBackMessages(threadId).pipe(
+              Effect.mapError(fail("Could not read this thread's earlier messages.")),
+            );
+            if (typeof messages === "string") {
+              return yield* new ThreadDecisionsError({
+                message:
+                  messages === "done"
+                    ? "This thread's earlier messages were already read."
+                    : "No open question in this thread was asked before the judge took over.",
+              });
+            }
+            yield* progress({ total: messages.length });
+            return yield* restore(judgeAll(messages)).pipe(Effect.forkIn(scope));
+          }).pipe(
+            Effect.onExit((exit) =>
+              Exit.isSuccess(exit)
+                ? Effect.void
+                : Effect.suspend(() => {
+                    if (previous === undefined) readBacks.delete(threadId);
+                    else readBacks.set(threadId, previous);
+                    return PubSub.publish(changes, threadId);
+                  }),
+            ),
+          );
+        }),
+      );
     });
 
     const refusePlaceholder = (text: string) =>
@@ -1260,24 +1637,9 @@ export const layer = Layer.effect(
       });
       const now = DateTime.formatIso(yield* DateTime.now);
       const parked = yield* Effect.gen(function* () {
-        // `delegated` is isDelegatedAppThread in SQL: a JSON null delegatedFrom reads as NULL too.
-        const [thread] = yield* sql<{
-          readonly side_chat: number | null;
-          readonly delegated: number;
-          readonly workflow_step: number | null;
-        }>`
-          SELECT json_extract(payload_json, '$.lineage.sideChat') AS side_chat,
-            (json_extract(payload_json, '$.lineage.relationshipToParent') IS 'subagent'
-              OR json_extract(payload_json, '$.delegatedFrom') IS NOT NULL) AS delegated,
-            json_extract(payload_json, '$.lineage.workflowStep') AS workflow_step
-          FROM orchestration_v2_projection_threads
-          WHERE thread_id = ${input.threadId} AND deleted_at IS NULL
-        `;
-        if (thread === undefined) return "missing";
         // Every park passes here (the Parked tab's field, t3_park, any client), not only `/park`'s.
-        if (thread.side_chat === 1) return "sideChat";
-        if (thread.delegated === 1) return "subagent";
-        if (thread.workflow_step === 1) return "workflowStep";
+        const role = yield* threadRole(input.threadId);
+        if (role !== "main") return role;
         for (const item of input.items) {
           yield* sql`
             INSERT INTO fork_thread_parked_items (
@@ -1445,6 +1807,9 @@ export const layer = Layer.effect(
       subscribe,
       reopen,
       dismiss,
+      agentQuestions,
+      settle,
+      readBack,
       park,
       updateParked,
       linkArtifact,

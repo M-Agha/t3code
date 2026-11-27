@@ -58,6 +58,7 @@ reasons are the ones they accepted.
 | `(fork) workflows: a daily upstream-upgrade workflow, and workflow steps never park`                  | The daily upgrade workflow    |
 | `(fork) tracker: a deleted thread's rows go on each compaction pass, beside its conversation`         | Parked items                  |
 | `(fork) install: moves the service off Nightly, builds a fresh clone; a queued send holds nothing`    | Installing, Questions         |
+| `(fork) decisions: t3_question lets an agent settle its thread's questions, and a one-time read-back` | Questions and decisions       |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -123,7 +124,7 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   cost 71 Sonnet calls before its panel showed, and the owner's database held 79 such threads with
   485 user messages. That history was answered under the label rules, so they read it, and its
   questions show at once.) _Rejected:_ the judge only on messages the rules leave unclosed; a
-  hard-coded judge model; an agent "close" tool; judging a never-read thread's whole backlog (Q30's
+  hard-coded judge model; an agent "close" tool (superseded 2026-11-26: `t3_question`, below); judging a never-read thread's whole backlog (Q30's
   default), or only its newest message.
 - **Answers on AskUserQuestion cards** close the question whose label leads the card question's
   text (session-kit's `Q_LINE`, as the terminal reads it). Parts asked as "Q28 (1 of 3)" … gather in
@@ -190,6 +191,94 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
   …"; `ThreadDecisions.question-panel.browser.test.tsx` "Dismiss on the card …", "Dismiss on a
   Tracker row …", "the card's Dismiss waits while the draft …", "dismissing the card's last question
   …", "dismissing the Tracker's last open question …" and "Undo says it is reopening …".
+- **Settled by the agent** (`t3_question`, MAIN-127, the owner's Q81, 2026-11-26): a thread's own
+  agent closes its open questions through the thread MCP toolkit's `t3_question`. The work Mac's
+  Questions tab listed 51 open questions of one thread, one of them live: the judge never reads a
+  message from before its cutoff, and a question later work made moot stays open until answered.
+  `list` gives the thread's questions, open ones first in asking order, then at most 50 closed ones
+  newest first (label, text, state, `askedIn`, `askedAt`). `answer` closes one as `answered` with the
+  owner's `words` and `source`, the id of the message they said them in, which must be one a person
+  typed in that thread (the user-authored test the judge reads by) whose run has started (`runStarted`:
+  its `startedAt` is set, or it has no run), so a send still queued, which the owner can cancel and
+  `t3_queue` can edit, is refused, and `words` must appear in its text, whitespace runs collapsed
+  and case ignored; anything else is refused. The source may predate the question: the owner can
+  state a preference before it is asked, and the quote keeps the stored answer their own words. `drop`
+  closes one as `dropped` with a `reason`; the owner is told nothing but the row. `words` and
+  `reason` are `ThreadParkedText` (trimmed, not blank), checked before the service sees them. Both are guarded as
+  Dismiss is: only an open question, named by the `label` and `askedIn` the list gave, so one asked
+  again since is refused ("was asked again since you listed it; list again"). Only a main thread's
+  agent settles: `ThreadDecisions.settle` and `agentQuestions` refuse what `park` refuses (a side
+  chat, a subagent or delegated task, a workflow step; `QUESTION_REFUSAL`) through `threadRole`, the
+  check taken out of `park` so both run the one SQL. The row keeps the ordinary closed states, marked
+  `settled_by = 'agent'` (fork migration 008, `ThreadDecisionQuestion.settledByAgent`), so counts,
+  groups and the re-ask rules treat it as any closed question. A column rather than new states: a
+  client from before still lists the row (as answered or not a decision), where an unknown state is
+  dropped (`ForwardCompatibleArray`), and the read-back's record needed a migration anyway. The
+  Decisions tab's row says "Settled by the agent" before the words or the reason, and its Reopen
+  reads Undo ("Undo the agent's settling of Q4 (reopens it)"): the same held Reopen
+  (`useReopenWithUndo`, `ThreadDecisions.reopen`). Only `settle` sets `settled_by`; Reopen, a re-ask
+  and every other closing (a message's, a card's, Dismiss) clear it, so a row an older server
+  reopened without clearing it does not read as the agent's once closed again. The
+  tool's description grew `mcpToolListJsonBytes` (`agentContextBudget.json`); its eval cases
+  (`evals/mcp-tool-use/cases/questions.ndjson`) have only run with `--dry-run`. _Rejected:_ Dismiss
+  by the owner alone (a click per question, 51 here); new state values (above); a source message of
+  any author; a source that must follow the question (asked for in PR #22's review: an earlier
+  preference of the owner's answers it as well, and the quote rule keeps it theirs). _Known limits:_ (a) a drop
+  stores no message, so a re-ask from the agent's previous run synced after its drop reopens the
+  question (fails safe: it shows open); (b) a native in-session subagent (Claude's Agent, Codex's
+  spawn_agent) shares its parent's thread, so the main-thread check lets it through, as for
+  `t3_park`. On conflict: `threadRole` stays the one check `park` and `t3_question` share, and
+  follows `isListedThreadLineage` as `park` does (Parked items). Tests: `ThreadDecisions.test.ts`
+  "lists the thread's questions for its agent, …", "lists every open question and only the 50
+  newest closed ones", "answers an open question with the user's words and drops one, …", "cites
+  only a message the user typed in this thread …", "answers only in the user's own words, from a
+  message that reached the agent", "refuses to settle a question asked again since …", "Undo of an
+  agent's settlement is Reopen, …", "a question closed by the user's message or Dismiss is not the
+  agent's, …" and "refuses t3_question's list and settle in every thread park refuses";
+  `core.test.ts` "t3_question lists, answers and drops …" (a blank reason refused there); `ForkMigrations.test.ts` "008 marks no existing question …"; the browser
+  test "an agent's settling reads as the agent's, …".
+- **Read-back** (MAIN-129, the owner's Q83, 2026-11-26): the Tracker's Questions tab shows a bar,
+  "N questions asked before the judge took over", with Check earlier messages, while the snapshot's
+  `readBackCount` is above 0: open questions asked before `fork_decision_judge_cutoff.judged_from`,
+  in a thread whose read-back has not run (`fork_thread_decision_sync.read_back_at`, fork migration
+  008). It calls `threadDecisions.readBack`, which judges, once, the thread's person-typed messages
+  from before the cutoff that the sync has read and that follow the first such question, in order,
+  each through `closingOf` against the open questions asked before it, so a message closes only what
+  was asked before it; closings apply as a sync's (`applyClosing`). The request only starts it: it
+  runs in the service's scope, as `subscribe`'s sync does, so a reload or a dropped socket does not
+  cut it short, and the thread's lock is taken per message, so a send meanwhile waits for one judge
+  call, not the whole read-back. Its progress (messages read of the total, questions closed) and how
+  it ended are kept in memory and sent in the snapshot's `readBack`, the one channel every client
+  already holds: each client disables the button while it runs ("Checking earlier messages…", kept
+  focusable, with the count read in a live region that stays in the accessibility tree while empty,
+  so its first line is announced). The bar keeps one place among the Questions tab's children in
+  every branch (below the status bar, whose place a `null` holds where there is none), so it stays one
+  bar, focus and live region kept, while the run closes the last open question or a send holds them,
+  and it stays in Select mode while it runs. The panel, which a tab switch keeps, toasts the end and, only when the bar had this
+  client's focus as it went, moves focus to Select or the Questions tab. The check and the claim run
+  uninterruptible up to the fork; an end before it (nothing to read, an SQL error, a defect) gives
+  the claim back and publishes the change, so no client keeps a busy button. A second read-back while
+  one runs is refused, as is one after it succeeded or with nothing to read. A message the judge
+  gives no verdict on (timeout, provider error, unusable answer) closes nothing in the read-back (the
+  rules read it on its first pass), and then nothing is recorded: it ends "N of M messages got no
+  answer from the judge; nothing recorded, try again", closings already made stay, and the button
+  stays, showing the error. Otherwise it records `read_back_at`, which ends the offer for good, even
+  for a question reopened later. A question the owner reopens while it runs is left open by the rest
+  of it. Cost: one model call per message read. _Rejected:_ an automatic read-back of every thread
+  (Q38's cost: 79 never-read threads, 485 user messages); a read-back on opening a thread; running it
+  in the request (a reload killed it, and a retry started over). _Known limits:_ (a) a question
+  reopened by hand before the read-back started is not told apart from one never closed (nothing
+  records a hand reopen), so an older message can close it again; (b) a thread first read after the
+  cutoff had its first pass on the rules alone (`judgedThread`), and its questions are never offered
+  a read-back; (c) progress and the last outcome live in memory, so a server restart mid-run drops
+  them, and the offer returns with nothing recorded. Tests: `ThreadDecisions.test.ts` "reads back,
+  once, the messages from before the judge took over, …", "offers no read-back for questions asked
+  after the judge took over", "records no read-back when the judge did not answer, …", "runs the
+  read-back past its request, shows its progress, and refuses a second while it runs", "gives the
+  read-back's claim back, and publishes it, when loading its messages fails" and "leaves open a
+  question the owner reopens while the read-back runs"; the browser tests "offers the read-back only
+  while questions from before the judge are open, …", "the read-back shows the server's progress on
+  every client, …" and "the read-back keeps one bar and live region for its whole run, …".
 - **Hidden while a send is judged:** after the user sends a message while questions are open, the
   card and the Tracker's open questions (and the Questions count) are hidden, the Tracker saying
   "Reading your message", until the server has read it or its run ends, whichever is first; then
@@ -350,7 +439,8 @@ upstream release the fork sits on (`git merge-base fork/main upstream/main`). To
     the draft and the pick are both blue, since its update role is its primary; each colour sits
     beside a word. Parked's kind icons use the update and warning roles' foregrounds, each beside its
     words.
-- **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP),
+- **Code:** `apps/server/src/decisions/ThreadDecisions.ts` (one service for ws.ts and MCP; its
+  `agentQuestions`, `settle` and `readBack` serve `t3_question` and the read-back),
   `apps/server/src/decisions/DecisionJudge.ts` (the model call),
   `apps/web/src/components/chat/ThreadDecisions.tsx` with its rules in `threadDecisions.logic.ts`,
   `ThreadParked.tsx` and `ThreadArtifacts.tsx` beside it (the two surfaces, on the same snapshot;
@@ -962,6 +1052,12 @@ copy in `apps/web/src`, `apps/mobile/src` and `packages/client-runtime/src`, min
      005), and the lifecycle's 008 dropped; round 1 of PR #9's chip review changed it in place again
      before it merged. The owner's live ledger recorded this 007 on 2026-11-20, so it is now as fixed
      as the rest: never edit it.
+   - 008 (`ThreadDecisionAgentSettlements`, MAIN-127, MAIN-129) adds
+     `fork_thread_decision_questions.settled_by` and `fork_thread_decision_sync.read_back_at`
+     (Questions and decisions, "Settled by the agent" and "Read-back"). The lifecycle's dropped 008
+     above never ran anywhere, so the number was free: this Mac's ledger has no migration above 7
+     (checked read-only 2026-11-26); the work Mac's is unverified. A ledger that recorded the old
+     008 would skip this one, and every snapshot would fail on `settled_by`.
    - A new value in a TEXT state column needs no migration: `dismissed` (Questions and decisions,
      Dismissing) went into `fork_thread_decision_questions.state`, which has no CHECK.
    - _Rejected:_ new orchestration event types, since official builds reject unknown events on
@@ -1068,8 +1164,9 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `apps/server/src/peer/PeerForwarding.test.ts`, `apps/server/src/mcp/linkOrigin.test.ts`,
        `apps/server/src/mcp/toolkits/core.test.ts`,
        `packages/client-runtime/src/state/commandPermissions.test.ts`.
-     - `t3_park`, the MCP thread toolkit: `apps/server/src/mcp/toolkits/thread/tools.ts`,
-       `apps/server/src/mcp/toolkits/thread/handlers.ts`, and the budget it grows,
+     - `t3_park` and `t3_question`, the MCP thread toolkit:
+       `apps/server/src/mcp/toolkits/thread/tools.ts`,
+       `apps/server/src/mcp/toolkits/thread/handlers.ts`, and the budget they grow,
        `apps/server/src/provider/agentContextBudget.json` with
        `apps/server/src/provider/AgentContextBudget.test.ts`.
      - Storage: `apps/server/src/persistence/Sqlite.ts` (fork migrations after upstream's, and the
