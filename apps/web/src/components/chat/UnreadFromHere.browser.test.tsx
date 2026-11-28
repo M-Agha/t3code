@@ -7,7 +7,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
-import { act, fakeTimers, render } from "../../../test/render";
+import { act, fakeTimers, render, type Screen } from "../../../test/render";
 import { useUiStateStore } from "../../uiStateStore";
 import { SharedTooltipProvider } from "../ui/shared-tooltip";
 import { toastManager } from "../ui/toast";
@@ -15,6 +15,7 @@ import { MessagesTimeline } from "./MessagesTimeline";
 import { CHAT_TIMELINE_ANCHOR_OFFSET, rememberTimelinePosition } from "./timelineScrollAnchoring";
 import type { TimelineViewport } from "./timelineViewport";
 import type { UnreadMarker } from "./unreadFromHere.logic";
+import { useTimelineFollow } from "./useTimelineFollow";
 
 // The latest run as the thread's shell reads it; null leaves the shell unloaded, as without an environment.
 const shell = vi.hoisted(() => ({
@@ -291,7 +292,10 @@ describe("Mark unread from here: the opening jump", () => {
       onViewportAttach,
     });
     const viewport = props.listRef.current!.getScrollableNode()!;
-    await vi.waitFor(() => expect(screen.container.textContent).toContain("Answer 29"));
+    // Shown, not just mounted: LegendList hides its rows until its load, and until then the jump
+    // reads a command as upstream's opening restore. The user can only click once they see it.
+    await expect.element(page.getByText("Answer 29", { exact: true })).toBeVisible();
+    await act(async () => {});
     // Scroll to end, as ChatView's button sends it: a command, not a gesture.
     await act(async () => timelineViewport!.navigate({ releasesFollow: false }));
     await screen.rerender(ui(all, false));
@@ -344,6 +348,223 @@ describe("Mark unread from here: the opening jump", () => {
     await act(() => vi.advanceTimersByTime(1000));
     // A jump right after a remount can land a few px off; none leaves the divider screens away.
     expect(dividerAtTop(screen.container, viewport, viewport.clientHeight / 2)).toBe(false);
+  });
+});
+
+/**
+ * The timeline wired to upstream's follow as ChatView wires it, so stick-to-bottom, the composer's
+ * growth and the jump meet as in the app. `inset` is the composer's height (a docked card grows
+ * it); the button is ChatView's scroll to end.
+ */
+const FollowedTimeline = ({ inset, ...props }: TimelineProps & { readonly inset: number }) => {
+  const follow = useTimelineFollow({
+    legendListRef: props.listRef,
+    composerTimelineInset: inset,
+    routeThreadKey: props.routeThreadKey,
+    activeThreadKey: props.routeThreadKey,
+    isServerThread: false,
+    serverProjection: null,
+    threadStatus: "live",
+    activeActivityRun: null,
+    activeRunningTurnId: null,
+    timelineEntries: props.timelineEntries,
+    timelineAnchorMessageId: null,
+    setTimelineAnchor: () => {},
+  });
+  return (
+    <>
+      <button type="button" onClick={() => follow.scrollToEnd()}>
+        Scroll to end
+      </button>
+      <MessagesTimeline
+        {...props}
+        contentInsetEndAdjustment={inset}
+        liveFollowEnabled={follow.timelineLiveFollowEnabled}
+        onIsAtEndChange={follow.onIsAtEndChangeStable}
+        onViewportAttach={follow.attachTimelineViewport}
+        onFooterGrow={follow.onTimelineFooterGrowStable}
+      />
+    </>
+  );
+};
+
+type Position = "divider" | "end" | "elsewhere";
+
+const positionOf = (container: HTMLElement, viewport: HTMLElement): Position =>
+  dividerAtTop(container, viewport)
+    ? "divider"
+    : viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 2
+      ? "end"
+      : "elsewhere";
+
+/** Records where the viewport is after each scroll, so a position that lasts one frame is seen. */
+const recordPositions = (container: HTMLElement, viewport: HTMLElement) => {
+  const positions: Position[] = [];
+  const record = () => positions.push(positionOf(container, viewport));
+  viewport.addEventListener("scroll", record, { passive: true });
+  return {
+    positions,
+    [Symbol.dispose]: () => viewport.removeEventListener("scroll", record),
+  };
+};
+
+/** The positions from the first `position` on, each run of repeats collapsed. */
+const settledFrom = (positions: ReadonlyArray<Position>, position: Position) =>
+  positions
+    .slice(positions.indexOf(position))
+    .filter((current, index, all) => index === 0 || current !== all[index - 1]);
+
+/**
+ * Waits until the viewport has stopped scrolling for a few polls, then has the opening settled at
+ * `position` and never left it. Each poll checks the positions first, so a viewport that keeps
+ * moving fails with them.
+ */
+const expectHeldAt = async (
+  recorded: { readonly positions: ReadonlyArray<Position> },
+  position: Position,
+) => {
+  let seen = -1;
+  let quietPolls = 0;
+  await vi.waitFor(
+    () => {
+      expect(recorded.positions).toContain(position);
+      expect(settledFrom(recorded.positions, position)).toEqual([position]);
+      quietPolls = recorded.positions.length === seen ? quietPolls + 1 : 0;
+      seen = recorded.positions.length;
+      expect(quietPolls).toBeGreaterThanOrEqual(5);
+    },
+    { interval: 50, timeout: 3000 },
+  );
+};
+
+describe("Mark unread from here: the opening holds through re-measures", () => {
+  const history = (hasMoreHistory: boolean) => ({
+    hasMoreHistory,
+    loading: false,
+    error: null,
+    onLoadEarlier: () => {},
+  });
+
+  /**
+   * Opens another thread, then switches the same timeline to `props`' thread as the sidebar does,
+   * recording the positions from the switch on.
+   */
+  const switchTo = async (props: TimelineProps, opening: Partial<TimelineProps> = {}) => {
+    const container = document.createElement("div");
+    container.style.cssText = "height: 800px; width: 900px; display: flex; flex-direction: column;";
+    const screen = await render(
+      <FollowedTimeline
+        {...baseProps()}
+        listRef={props.listRef}
+        timelineEntries={longThread(12)}
+        inset={100}
+      />,
+      { container },
+    );
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("Answer 11"));
+    const viewport = props.listRef.current!.getScrollableNode()!;
+    const recorded = recordPositions(screen.container, viewport);
+    await screen.rerender(<FollowedTimeline {...props} {...opening} inset={100} />);
+    return { screen, container, viewport, recorded };
+  };
+
+  const openedAtDivider = () => {
+    const props = { ...baseProps(), timelineEntries: longThread(30) };
+    // a10 (minute 21) is the first agent message after minute 20.
+    return { ...props, unreadMarker: marker(props.routeThreadKey, at(20)) };
+  };
+
+  // Each re-measure lands while upstream's opening restore still holds the end, before the jump.
+  it.each([
+    {
+      name: "a question card docks and grows the composer",
+      remeasure: (screen: Screen, _container: HTMLElement, props: TimelineProps) =>
+        screen.rerender(<FollowedTimeline {...props} inset={300} />),
+    },
+    {
+      name: "a side panel opens and narrows the chat",
+      remeasure: async (_screen: Screen, container: HTMLElement) => {
+        container.style.width = "700px";
+      },
+    },
+    {
+      name: "its rows render taller",
+      remeasure: (screen: Screen, _container: HTMLElement, props: TimelineProps) =>
+        screen.rerender(
+          <FollowedTimeline
+            {...props}
+            timelineEntries={props.timelineEntries.map((entry) =>
+              entry.kind === "message" && entry.message.role === "assistant"
+                ? { ...entry, message: { ...entry.message, text: `${entry.message.text}\n\nmore` } }
+                : entry,
+            )}
+            inset={100}
+          />,
+        ),
+    },
+  ])("a thread opened at the divider stays there when $name", async ({ remeasure }) => {
+    const props = openedAtDivider();
+    const { screen, container, recorded } = await switchTo(props);
+    await using _screen = screen;
+    using _recorded = recorded;
+    await remeasure(screen, container, props);
+    await expectHeldAt(recorded, "divider");
+  });
+
+  it("a thread opened at the divider stays there when its rows load late and a card docks", async () => {
+    const props = openedAtDivider();
+    // Only the latest turns are there at first, still syncing, so the divider is not decided yet.
+    const partial = {
+      timelineEntries: props.timelineEntries.slice(40),
+      historyControls: history(true),
+      syncing: true,
+    };
+    const { screen, recorded } = await switchTo(props, partial);
+    await using _screen = screen;
+    using _recorded = recorded;
+    await screen.rerender(<FollowedTimeline {...props} {...partial} inset={300} />);
+    await screen.rerender(<FollowedTimeline {...props} inset={300} />);
+    await expectHeldAt(recorded, "divider");
+  });
+
+  it("a thread with no divider opens at the end and stays there when a card docks", async () => {
+    const props = { ...baseProps(), timelineEntries: longThread(30) };
+    props.unreadMarker = marker(props.routeThreadKey, at(59));
+    const { screen, recorded } = await switchTo(props);
+    await using _screen = screen;
+    using _recorded = recorded;
+    await screen.rerender(<FollowedTimeline {...props} inset={300} />);
+    await expectHeldAt(recorded, "end");
+    expect(divider(screen.container)).toBeNull();
+  });
+
+  it("hands back to upstream's follow once the user scrolls to the end", async () => {
+    const props = openedAtDivider();
+    const { screen, viewport, recorded } = await switchTo(props);
+    await using _screen = screen;
+    using _recorded = recorded;
+    await expectHeldAt(recorded, "divider");
+    await userEvent.click(screen.getByRole("button", { name: "Scroll to end" }));
+    const atEnd = () =>
+      expect(
+        viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight,
+      ).toBeLessThanOrEqual(2);
+    await vi.waitFor(atEnd);
+    // A new reply arrives: upstream's follow keeps the end in view.
+    await screen.rerender(
+      <FollowedTimeline
+        {...props}
+        timelineEntries={[
+          ...props.timelineEntries,
+          message("a30", "assistant", 70, "run-30", `Answer 30\n\n${"line\n\n".repeat(8)}`),
+        ]}
+        inset={100}
+      />,
+    );
+    await vi.waitFor(() => {
+      expect(screen.container.textContent).toContain("Answer 30");
+      atEnd();
+    });
   });
 });
 

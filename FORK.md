@@ -61,6 +61,7 @@ reasons are the ones they accepted.
 | `(fork) decisions: t3_question lets an agent settle its thread's questions, and a one-time read-back` | Questions and decisions       |
 | `(fork) tooltips: the fork's buttons and chips use upstream's shared tooltip, as upstream's own do`   | Tooltips                      |
 | `(fork) decisions: the Tracker follows the transcript when an edit rewinds later messages`            | Questions and decisions       |
+| `(fork) timeline: a thread opened at the New divider stays there through re-measures`                 | Mark unread from here         |
 
 The table names features; `docs:` and `chore: re-copy session-kit's reply.ts` commits are left out.
 `git log --oneline <base>..fork/main` lists every fork commit with its hash, where `<base>` is the
@@ -946,8 +947,23 @@ menu item" and answered Q64 "yes, with the divider" (2026-11-21; _rejected:_ the
 - **The jump:** on the opening whose first decision found a divider, upstream's
   `startTimelinePositionRestore` scrolls its row below the top fade, once, after upstream's own
   opening restore; not while the latest run is under way, nor after the user's own navigation.
+  The restore releases upstream's follow, which is how the opening tells stick-to-bottom it opened
+  at the divider: from then on the thread stays there through re-measures (rows rendering, a card
+  docking, the chat resizing) until the user navigates, and then upstream's follow resumes. Without
+  a divider the thread opens at the end, as upstream's. A command before the list has loaded is
+  read as the opening restore's, so it does not stop the jump: upstream's own scroll to end when
+  the composer grows (a question card docking) is one, and the jump wins over it.
   _Rejected:_ feeding the divider into upstream's opening restore itself, which needs the rows when
   the thread changes (they often load later) and touches every reader of the remembered position.
+- **Follow's deferred scroll to end** (2026-11-28): upstream's `scrollToEnd` in `useTimelineFollow.ts`
+  scrolls a frame after it is called and settled only while follow still follows. The fork adds
+  the same check before that first scroll. Without it, a card that docked during the opening
+  restore queued a scroll to end, the jump released follow in the same frame, and the late scroll
+  then landed at the end, which re-armed follow; its settle and the jump's then fought for their
+  frame budgets (the owner's screen: A and B alternating for about a second, then the end), or the
+  end won outright once the divider's row left the rendered range. _Rejected:_ a second scroll write
+  from the jump to win that fight, and holding the jump a frame for the late scroll to land first
+  (the end would flash).
 - **Where:** `UnreadFromHere.tsx` and `unreadFromHere.logic.ts` in `apps/web/src/components/chat/`
   (their doc comments carry the rules).
 - **Seams:** `packages/contracts/src/orchestrationV2.ts` (`from` on `thread.mark-unread`),
@@ -958,18 +974,25 @@ menu item" and answered Q64 "yes, with the divider" (2026-11-21; _rejected:_ the
   parameter narrowed to the run and the watermark, so the divider calls it),
   `apps/web/src/components/chat/TimelineAssistantRows.tsx` (the button in `AssistantMessageMeta`),
   `apps/web/src/components/chat/MessagesTimeline.tsx` (the `unreadMarker` prop, the
-  `useUnreadDivider` call, the divider in `renderItem`, its row in `listExtraData`), and
-  `apps/web/src/components/ChatView.tsx` (the `useUnreadMarker` call and the prop).
+  `useUnreadDivider` call, the divider in `renderItem`, its row in `listExtraData`),
+  `apps/web/src/components/chat/useTimelineFollow.ts` (the follow check before `scrollToEnd`'s
+  first scroll), and `apps/web/src/components/ChatView.tsx` (the `useUnreadMarker` call and the
+  prop).
 - **Tests:** `apps/server/src/orchestration-v2/Orchestrator.markUnreadFrom.test.ts`,
   `apps/web/src/hooks/useThreadActions.markUnreadFrom.test.ts`, and `unreadFromHere.logic.test.ts`
-  and `UnreadFromHere.browser.test.tsx` in `apps/web/src/components/chat/`. Not covered: ChatView's
-  wiring.
+  and `UnreadFromHere.browser.test.tsx` in `apps/web/src/components/chat/`. The browser test's
+  "the opening holds through re-measures" cases wire the timeline to upstream's `useTimelineFollow`
+  as ChatView does and switch threads, then record the position on every scroll: a card docking during
+  the opening restore and late rows with a card fail without the follow check. Not covered:
+  ChatView itself.
 - **Conflict guidance:** if upstream gives `thread.mark-unread` a time of its own, drop the fork's
   field and call upstream's. If upstream moves an agent message's actions, put the button with them.
   If upstream rebuilds the timeline's rows or its opening restore, keep the divider on the row that
   holds (or folds) the first unread entry and the jump after the restore; if upstream renames a
   tool group's row ids or stops giving folds their `runId`, `rowHoldingEntry` and its tests go
-  first. If upstream ships its own unread divider, stop and ask the owner (step 4). The button's
+  first. If upstream reworks `scrollToEnd`'s deferred scroll (scrolls at once, or cancels the
+  pending frame on a release), the fork's check may go; keep the re-measure cases green either way.
+  If upstream ships its own unread divider, stop and ask the owner (step 4). The button's
   tooltip is upstream's `SharedTooltipTrigger`, as the timestamp's beside it ("Tooltips"): if
   upstream changes that one's, change this one's the same way.
 
@@ -1347,7 +1370,8 @@ it fails instead. The steps below are what the script encodes and what stays a p
        `packages/client-runtime/src/operations/commands.ts`, `apps/web/src/hooks/useThreadActions.ts`,
        `apps/web/src/components/Sidebar.logic.ts`,
        `apps/web/src/components/chat/TimelineAssistantRows.tsx`,
-       `apps/web/src/components/chat/MessagesTimeline.tsx`, and `apps/web/src/components/ChatView.tsx`.
+       `apps/web/src/components/chat/MessagesTimeline.tsx`,
+       `apps/web/src/components/chat/useTimelineFollow.ts`, and `apps/web/src/components/ChatView.tsx`.
      - Tooling: `vite.config.ts` and `knip.jsonc` (rule 4's exemptions; `knip.jsonc` also lists the
        upgrade workflow as an entry of `evals`), and `AGENTS.md` (the pointer to this file).
    - Seams the fork added to upstream files: `ComposerBannerStack.tsx`'s optional `content` on a

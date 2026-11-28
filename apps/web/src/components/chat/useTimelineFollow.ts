@@ -313,7 +313,9 @@ export function useTimelineFollow(input: TimelineFollowInput) {
     // list lands short of the real end.
     requestAnimationFrame(() => {
       const list = legendListRef.current;
-      if (!list) return;
+      // Fork: a release in between (the jump to the New divider, the user) wins, as over the
+      // settle below; FORK.md, "Mark unread from here".
+      if (!list || readCurrentFollow().mode !== "following") return;
       void Promise.resolve(
         list.scrollToEnd?.({
           animated: animated && !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
